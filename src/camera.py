@@ -38,6 +38,7 @@ class CameraStream:
         self.phone_server: Optional[PhoneWebCameraServer] = None
         self.is_phone_web: bool = False
         self.is_network_stream: bool = False
+        self.is_new_frame: bool = True
         self._fps_ema: float = 0.0
         self._last_frame_time: float = time.perf_counter()
 
@@ -92,6 +93,7 @@ class CameraStream:
         if not self.cap or not self.cap.isOpened():
             return False
 
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.config.fps)
@@ -101,16 +103,24 @@ class CameraStream:
     def read(self) -> tuple[bool, Optional[np.ndarray]]:
         """Read a frame, optionally mirror it, and compute real-time FPS."""
         if self.is_phone_web and self.phone_server is not None:
+            if self.phone_server.has_client:
+                # Wait up to 12ms for a fresh WebSocket frame so main loop doesn't
+                # repeatedly run MediaPipe inference on the same stale frame.
+                self.is_new_frame = self.phone_server.wait_for_new_frame(timeout=0.012)
+            else:
+                self.is_new_frame = False
             ok, frame = self.phone_server.read_frame()
             # Only mirror when an actual phone camera frame is active (do not mirror QR text screen!)
             if ok and frame is not None and self.phone_server.has_client and self.config.mirror:
                 frame = cv2.flip(frame, 1)
-            self._update_fps()
+            if self.is_new_frame or not self.phone_server.has_client:
+                self._update_fps()
             return ok, frame
 
         if self.cap is None or not self.cap.isOpened():
             if self.config.auto_reconnect and self.is_network_stream:
                 self.open()
+            self.is_new_frame = False
             return False, None
 
         ok, frame = self.cap.read()
@@ -118,8 +128,10 @@ class CameraStream:
             if self.config.auto_reconnect and self.is_network_stream:
                 time.sleep(0.1)
                 self.open()
+            self.is_new_frame = False
             return False, None
 
+        self.is_new_frame = True
         if self.config.mirror:
             frame = cv2.flip(frame, 1)
 

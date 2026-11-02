@@ -1,39 +1,128 @@
 {
   "pinch_threshold": 0.055,
-  "release_threshold": 0.075,
-  "click_threshold": 0.052,
+  "release_threshold": 0.08,
+  "click_threshold": 0.075,
+  "finger_separation": 0.75,
+  "click_confirm_frames": 2,
+  "click_separation": 0.8,
+  "reference_palm_size": 0.22,
   "smoothing": 0.35,
   "active_margin": 0.15,
-  "movement_mode": "absolute",
-  "relative_sensitivity": 2.2,
+  "movement_mode": "relative",
+  "pen_speed": 1.2,
+  "dpi_scale": 1.0,
+  "paper_rotation_deg": 0.0,
+  "paper_tilt_deg": 45.0,
+  "paper_x_angle_deg": -49.3,
+  "calib_target_length": 6.0,
+  "calib_bundle_deg": 20.0,
+  "vertical_source": "hand",
+  "curl_gain": 0.5,
+  "curl_open": 1.468,
+  "curl_closed": 0.838,
+  "range_left_deg": 70.53,
+  "range_right_deg": 57.53,
+  "range_x_source": "move",
+  "range_left_pos": 1.389,
+  "range_right_pos": 1.967,
+  "range_top": 1.468,
+  "range_bottom": 0.838,
+  "range_margin": 0.04,
+  "corner_hold_s": 0.6,
+  "corner_settle_s": 0.15,
+  "range_min_turn_deg": 12.0,
+  "range_min_move": 0.6,
+  "curl_min_range": 0.25,
+  "thumb_corners": [
+    [
+      -0.6706,
+      0.8905
+    ],
+    [
+      -0.8561,
+      1.1015
+    ],
+    [
+      -0.1667,
+      0.7447
+    ],
+    [
+      -0.0342,
+      0.5689
+    ]
+  ],
+  "thumb_hold_s": 0.7,
+  "thumb_still_tol": 0.04,
+  "thumb_rearm_dist": 0.12,
+  "thumb_min_area": 0.004,
+  "extend_on_ratio": 1.55,
+  "extend_off_ratio": 1.35,
+  "extend_confirm_s": 0.15,
+  "click_freeze_lookback_s": 0.25,
+  "click_release_hold_s": 0.35,
+  "calibrate_on_start": false,
+  "pen_takeover_window_s": 0.25,
+  "paper_depth_gain": 1.0,
+  "straighten_arcs": true,
+  "paper_invert_x": false,
+  "pen_finger_weight": 0.3,
+  "pointer_acceleration": true,
+  "accel_min_gain": 0.1,
+  "accel_max_gain": 1.8,
+  "accel_low_speed": 0.15,
+  "accel_high_speed": 1.5,
+  "lift_rollback_s": 0.12,
+  "lift_rollback_max_px": 60,
+  "one_euro_min_cutoff": 0.8,
+  "one_euro_beta": 1.5,
+  "deadzone_px": 2.5,
   "gestures": {
     "thumb_index_pinch": {
       "action": "move_cursor",
       "enabled": true,
-      "description": "엄지+검지 붙임: 마우스 커서 이동"
+      "description": "엄지+검지 붙임: 펜 내림(도화지 위에서 커서 이동)"
     },
     "thumb_middle_pinch": {
       "action": "left_click",
       "enabled": true,
-      "cooldown": 0.35,
-      "description": "엄지+중지 붙임: 좌클릭"
+      "cooldown": 0.15,
+      "description": "엄지+중지 붙임: 좌클릭(붙일 때마다 한 번)"
     },
     "thumb_ring_pinch": {
       "action": "right_click",
       "enabled": true,
-      "cooldown": 0.45,
-      "description": "엄지+약지 붙임: 우클릭"
+      "cooldown": 0.25,
+      "description": "엄지+약지 붙임: 우클릭(붙일 때마다 한 번)"
     },
     "thumb_index_middle_pinch": {
       "action": "drag_hold",
-      "enabled": true,
-      "description": "엄지+검지+중지 함께 붙임: 드래그(누른 상태 유지)"
+      "enabled": false,
+      "description": "엄지+검지+중지 함께 붙임: 누른 채 끌기(기본 꺼짐)"
     },
     "thumb_pinky_pinch": {
       "action": "drag_toggle",
-      "enabled": true,
+      "enabled": false,
       "cooldown": 0.6,
-      "description": "엄지+약지/소지 붙임: 드래그 토글"
+      "description": "엄지+소지 붙임: 끌기 켜기/끄기(기본 꺼짐)"
+    },
+    "index_extend": {
+      "action": "left_click",
+      "enabled": true,
+      "cooldown": 0.15,
+      "description": "엄지 모드: 검지 펴기 = 좌클릭 (다시 말았다 펴면 다음 클릭)"
+    },
+    "index_middle_extend": {
+      "action": "right_click",
+      "enabled": true,
+      "cooldown": 0.25,
+      "description": "엄지 모드: 검지+중지 펴기 = 우클릭"
     }
-  }
+  },
+  "landmark_filter": true,
+  "landmark_min_cutoff": 1.5,
+  "landmark_beta": 8.0,
+  "still_lock": true,
+  "still_lock_speed": 0.08,
+  "still_lock_time_s": 0.2,
+  "still_unlock_dist": 0.05
 }

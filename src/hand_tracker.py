@@ -9,7 +9,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import mediapipe as mp
@@ -116,8 +116,12 @@ class HandTracker:
         landmarks: Sequence[HandLandmark],
         is_pinched: bool = False,
         active_action: str = "none",
+        active_finger: Optional[str] = None,
+        distances: Optional[Dict[str, float]] = None,
+        thresholds: Optional[Dict[str, float]] = None,
+        high_is_on: bool = False,
     ) -> None:
-        """Draw hand skeleton, joints, and highlight thumb-index pinch interaction."""
+        """Draw hand skeleton, the finger pinched against the thumb, and thumb-to-fingertip distances."""
         h, w = frame.shape[:2]
         pts = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
 
@@ -128,26 +132,57 @@ class HandTracker:
 
         # Draw all joints
         for idx, (px, py) in enumerate(pts):
-            if idx in (4, 8):
+            if idx == 4:
                 continue
             cv2.circle(frame, (px, py), 4, (255, 180, 0), -1, cv2.LINE_AA)
 
-        # Highlight Thumb Tip (#4) and Index Tip (#8)
+        # Draw Wrist (#0) -> Palm Center (#5, #9, #17) Pivot Steering Axis
+        if len(pts) >= 18:
+            wrist_pt = pts[0]
+            palm_cx = int(0.40 * pts[5][0] + 0.40 * pts[9][0] + 0.20 * pts[17][0])
+            palm_cy = int(0.40 * pts[5][1] + 0.40 * pts[9][1] + 0.20 * pts[17][1])
+            palm_pt = (palm_cx, palm_cy)
+            cv2.arrowedLine(
+                frame,
+                wrist_pt,
+                palm_pt,
+                (255, 255, 0),
+                2,
+                cv2.LINE_AA,
+                tipLength=0.22,
+            )
+            cv2.circle(frame, wrist_pt, 6, (255, 220, 0), -1, cv2.LINE_AA)
+            cv2.circle(frame, palm_pt, 6, (0, 255, 255), -1, cv2.LINE_AA)
+
+        # Thumb tip, plus a line only to the finger that is actually pinched right now
+        # (green = pen down with the index, red = click finger).
         thumb_pt = pts[4]
-        index_pt = pts[8]
-        mid_pt = ((thumb_pt[0] + index_pt[0]) // 2, (thumb_pt[1] + index_pt[1]) // 2)
+        tips = {"index": 8, "middle": 12, "ring": 16, "pinky": 20}
+        if active_finger in tips:
+            tip_pt = pts[tips[active_finger]]
+            color = (0, 255, 0) if active_finger == "index" else (0, 60, 255)
+            cv2.line(frame, thumb_pt, tip_pt, color, 3, cv2.LINE_AA)
+            cv2.circle(frame, tip_pt, 10, color, -1, cv2.LINE_AA)
+        elif active_finger == "index_middle":
+            for key in ("index", "middle"):
+                cv2.line(frame, thumb_pt, pts[tips[key]], (255, 160, 80), 3, cv2.LINE_AA)
+        cv2.circle(frame, thumb_pt, 8, (255, 255, 255), -1, cv2.LINE_AA)
 
-        pinch_color = (0, 255, 0) if is_pinched else (0, 140, 255)
-        if active_action in ("left_click", "right_click", "drag_hold", "drag_toggle"):
-            pinch_color = (0, 60, 255)
-
-        cv2.circle(frame, thumb_pt, 8, pinch_color, -1, cv2.LINE_AA)
-        cv2.circle(frame, index_pt, 8, pinch_color, -1, cv2.LINE_AA)
-        cv2.line(frame, thumb_pt, index_pt, pinch_color, 2, cv2.LINE_AA)
-
-        if is_pinched:
-            cv2.circle(frame, mid_pt, 12, (0, 255, 128), 2, cv2.LINE_AA)
-            cv2.circle(frame, mid_pt, 5, (0, 255, 128), -1, cv2.LINE_AA)
+        # Next to each fingertip: thumb distance (green = close enough to pinch), or with
+        # high_is_on the finger's straightness (green = counts as straightened out)
+        if distances:
+            for name, idx in tips.items():
+                d = distances.get(name)
+                if d is None:
+                    continue
+                limit = (thresholds or {}).get(name, 0.0)
+                on = d >= limit if high_is_on else d <= limit
+                color = (0, 255, 0) if on else (200, 200, 200)
+                tx, ty = pts[idx]
+                cv2.putText(frame, f"{d:.3f}", (tx + 8, ty - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                            (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(frame, f"{d:.3f}", (tx + 8, ty - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                            color, 1, cv2.LINE_AA)
 
     def close(self) -> None:
         if self._landmarker is not None:

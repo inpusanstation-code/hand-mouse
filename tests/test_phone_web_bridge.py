@@ -85,3 +85,92 @@ def test_decode_jpeg_bytes():
 
     # Empty bytes test
     assert decode_jpeg_bytes(b"") is None
+
+
+def test_phone_web_camera_server_lazy_jpeg_decoding(tmp_path: Path):
+    """Verify PhoneWebCameraServer implements zero-bufferbloat lazy decoding of newest JPEG packets."""
+    server = PhoneWebCameraServer(port=18443, cert_dir=tmp_path / "certs")
+
+    # 1. Unconnected initial state
+    assert server.has_client is False
+    assert server.has_new_frame is False
+    ok, frame_waiting = server.read_frame()
+    assert ok is True
+    assert frame_waiting.shape == (540, 960, 3)
+    assert server.wait_for_new_frame(timeout=0.001) is False
+
+    # 2. Simulate client connection and sending rapid JPEG frames
+    img1 = np.full((120, 160, 3), 40, dtype=np.uint8)
+    img2 = np.full((120, 160, 3), 210, dtype=np.uint8)
+    img3 = np.full((120, 160, 3), 110, dtype=np.uint8)
+
+    _, enc1 = cv2.imencode(".jpg", img1)
+    _, enc2 = cv2.imencode(".jpg", img2)
+    _, enc3 = cv2.imencode(".jpg", img3)
+    jpeg1, jpeg2, jpeg3 = enc1.tobytes(), enc2.tobytes(), enc3.tobytes()
+
+    # Frame 1 arrives
+    with server._frame_lock:
+        server._client_connected = True
+        server._latest_raw_jpeg = jpeg1
+        server._frame_seq += 1
+    server._frame_event.set()
+
+    # Frame 2 arrives immediately before consumer thread reads frame 1
+    # Frame 1 must be overwritten in-place without decoding
+    with server._frame_lock:
+        server._latest_raw_jpeg = jpeg2
+        server._frame_seq += 1
+    server._frame_event.set()
+
+    assert server.has_client is True
+    assert server.has_new_frame is True
+    assert server._frame_seq == 2
+    assert server._consumed_seq == -1
+    # Prior to read_frame(), no JPEG decoding was performed
+    assert server._latest_frame is None
+
+    # wait_for_new_frame returns True since has_new_frame is True
+    assert server.wait_for_new_frame(timeout=0.01) is True
+
+    # 3. Consumer thread calls read_frame()
+    # Must decode only the latest packet (jpeg2), skipping jpeg1
+    ok2, frame2 = server.read_frame()
+    assert ok2 is True
+    assert frame2.shape == (120, 160, 3)
+    assert np.mean(frame2) == pytest.approx(210, abs=5)
+    assert server._consumed_seq == 2
+    assert server.has_new_frame is False
+    assert server._latest_frame is not None
+
+    # 4. Immediate second read without new network packets returns cached frame without re-decoding
+    ok_cached, frame_cached = server.read_frame()
+    assert ok_cached is True
+    assert np.array_equal(frame_cached, frame2)
+    assert server.has_new_frame is False
+
+    # 5. Frame 3 arrives
+    with server._frame_lock:
+        server._latest_raw_jpeg = jpeg3
+        server._frame_seq += 1
+    server._frame_event.set()
+
+    assert server.has_new_frame is True
+    ok3, frame3 = server.read_frame()
+    assert ok3 is True
+    assert frame3.shape == (120, 160, 3)
+    assert np.mean(frame3) == pytest.approx(110, abs=5)
+    assert server._consumed_seq == 3
+    assert server.has_new_frame is False
+
+    # 6. Disconnect client
+    with server._frame_lock:
+        server._client_connected = False
+    server._frame_event.set()
+
+    assert server.has_client is False
+    assert server.has_new_frame is False
+    ok_dc, frame_dc = server.read_frame()
+    assert ok_dc is True
+    assert frame_dc.shape == (540, 960, 3)
+

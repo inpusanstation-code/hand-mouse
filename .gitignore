@@ -13,3 +13,6 @@ wheels/
 # Local self-signed TLS certificates
 models/certs/
 *.pem
+
+# Pinch debug logs (D key)
+logs/
