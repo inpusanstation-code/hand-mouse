@@ -1,0 +1,39 @@
+{
+  "pinch_threshold": 0.055,
+  "release_threshold": 0.075,
+  "click_threshold": 0.052,
+  "smoothing": 0.35,
+  "active_margin": 0.15,
+  "movement_mode": "absolute",
+  "relative_sensitivity": 2.2,
+  "gestures": {
+    "thumb_index_pinch": {
+      "action": "move_cursor",
+      "enabled": true,
+      "description": "엄지+검지 붙임: 마우스 커서 이동"
+    },
+    "thumb_middle_pinch": {
+      "action": "left_click",
+      "enabled": true,
+      "cooldown": 0.35,
+      "description": "엄지+중지 붙임: 좌클릭"
+    },
+    "thumb_ring_pinch": {
+      "action": "right_click",
+      "enabled": true,
+      "cooldown": 0.45,
+      "description": "엄지+약지 붙임: 우클릭"
+    },
+    "thumb_index_middle_pinch": {
+      "action": "drag_hold",
+      "enabled": true,
+      "description": "엄지+검지+중지 함께 붙임: 드래그(누른 상태 유지)"
+    },
+    "thumb_pinky_pinch": {
+      "action": "drag_toggle",
+      "enabled": true,
+      "cooldown": 0.6,
+      "description": "엄지+약지/소지 붙임: 드래그 토글"
+    }
+  }
+}
