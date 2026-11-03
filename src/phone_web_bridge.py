@@ -121,13 +121,28 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="controls">
-    <button id="switchBtn" type="button">🔄 전면/후면 카메라 전환</button>
-    <button id="pauseBtn" type="button" class="secondary">⏸️ 전송 일시정지</button>
+    <button id="switchBtn" type="button">🔄 전면/후면 전환</button>
+    <button id="modeBtn" type="button" class="secondary">🎯 모드 전환 (범위/펜/절대)</button>
+  </div>
+  <div class="controls">
+    <button id="dpiDownBtn" type="button" class="secondary">🐢 속도 -</button>
+    <button id="dpiUpBtn" type="button">⚡ 속도 +</button>
+    <button id="pauseBtn" type="button" class="secondary">⏸️ 일시정지</button>
+  </div>
+  <div class="controls">
+    <button id="calibrateBtn" type="button">🧭 영점 재설정</button>
+  </div>
+  <div class="controls">
+    <button id="calibXBtn" type="button" class="secondary">↔ 좌우만</button>
+    <button id="calibCBtn" type="button" class="secondary">▢ 모서리만</button>
+
   </div>
 
   <p class="hint">
-    엄지와 검지를 붙인 채 손을 상하좌우로 움직이면 PC 마우스 커서가 이동합니다.<br/>
-    화면이 꺼지지 않도록 유지해 주세요.
+    • 휴대폰은 책상 위 손을 위에서(또는 비스듬히) 내려다보게 두세요.<br/>
+    • <b>엄지+검지</b> 붙임 = 커서 이동 &nbsp;|&nbsp; <b>엄지+중지</b> = 좌클릭 &nbsp;|&nbsp; <b>엄지+약지</b> = 우클릭<br/>
+    • <b>🧭 영점 재설정</b>: ① 엄지+검지를 붙이고 오른쪽으로 먼저, 좌우로 여러 번 왔다 갔다 ② 모서리 4곳 손모양을 잡기.<br/>
+    • 손을 많이 움직여야 하면 <b>속도 +</b>를 누르세요.
   </p>
 
   <canvas id="canvas" style="display:none;"></canvas>
@@ -135,17 +150,29 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
   <script>
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d', { alpha: false });
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const statusEl = document.getElementById('status');
     const switchBtn = document.getElementById('switchBtn');
+    const modeBtn = document.getElementById('modeBtn');
+    const dpiDownBtn = document.getElementById('dpiDownBtn');
+    const dpiUpBtn = document.getElementById('dpiUpBtn');
     const pauseBtn = document.getElementById('pauseBtn');
+    const calibrateBtn = document.getElementById('calibrateBtn');
+    const calibXBtn = document.getElementById('calibXBtn');
+    const calibCBtn = document.getElementById('calibCBtn');
 
     let facingMode = 'user'; // 'user' (전면) or 'environment' (후면)
     let stream = null;
     let ws = null;
     let paused = false;
     let sending = false;
-    let frameCount = 0;
+    let lastVideoTime = -1;
+
+    // Target 480x360 resolution & 0.55 JPEG quality for ultra-low Wi-Fi latency
+    // (MediaPipe HandLandmarker internally resizes to 224x224 anyway)
+    const TARGET_W = 480;
+    const TARGET_H = 360;
+    const JPEG_QUALITY = 0.55;
 
     async function startCamera() {
       if (stream) {
@@ -155,9 +182,9 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: facingMode },
-            width: { ideal: 640 },
-            height: { ideal: 480 },
-            frameRate: { ideal: 30 }
+            width: { ideal: TARGET_W },
+            height: { ideal: TARGET_H },
+            frameRate: { ideal: 30, max: 30 }
           },
           audio: false
         });
@@ -165,6 +192,7 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
         video.className = (facingMode === 'environment') ? 'rear' : '';
         statusEl.textContent = '카메라 준비 완료 - PC 연결 중...';
         connectWebSocket();
+        scheduleNextFrame();
       } catch (err) {
         statusEl.textContent = '카메라 접근 실패: ' + err.message;
       }
@@ -179,29 +207,51 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
-        statusEl.textContent = '✅ PC와 실시간 연결됨 (스트리밍 중)';
+        statusEl.textContent = '✅ PC와 실시간 연결됨 (초저지연 스트리밍 중)';
         statusEl.classList.add('connected');
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.status) {
+            statusEl.textContent = '✅ ' + data.status;
+          }
+        } catch (_) {}
       };
 
       ws.onclose = () => {
         statusEl.textContent = '연결 끊김 - 재연결 시도 중...';
         statusEl.classList.remove('connected');
-        setTimeout(connectWebSocket, 1500);
+        setTimeout(connectWebSocket, 1000);
       };
     }
 
-    function captureLoop() {
-      if (!paused && ws && ws.readyState === WebSocket.OPEN && !sending && video.readyState >= 2) {
-        const vw = video.videoWidth || 640;
-        const vh = video.videoHeight || 480;
-        if (canvas.width !== vw || canvas.height !== vh) {
-          canvas.width = vw;
-          canvas.height = vh;
+    function sendCurrentVideoFrame() {
+      if (
+        !paused &&
+        ws &&
+        ws.readyState === WebSocket.OPEN &&
+        ws.bufferedAmount === 0 &&
+        !sending &&
+        video.readyState >= 2 &&
+        video.currentTime !== lastVideoTime
+      ) {
+        lastVideoTime = video.currentTime;
+        const vw = video.videoWidth || TARGET_W;
+        const vh = video.videoHeight || TARGET_H;
+        const scale = Math.min(1.0, TARGET_W / vw, TARGET_H / vh);
+        const cw = Math.max(160, Math.round(vw * scale));
+        const ch = Math.max(120, Math.round(vh * scale));
+
+        if (canvas.width !== cw || canvas.height !== ch) {
+          canvas.width = cw;
+          canvas.height = ch;
         }
-        ctx.drawImage(video, 0, 0, vw, vh);
+        ctx.drawImage(video, 0, 0, cw, ch);
         sending = true;
         canvas.toBlob(blob => {
-          if (blob && ws && ws.readyState === WebSocket.OPEN) {
+          if (blob && ws && ws.readyState === WebSocket.OPEN && ws.bufferedAmount === 0) {
             blob.arrayBuffer().then(buf => {
               ws.send(buf);
               sending = false;
@@ -209,9 +259,23 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
           } else {
             sending = false;
           }
-        }, 'image/jpeg', 0.72);
+        }, 'image/jpeg', JPEG_QUALITY);
       }
-      requestAnimationFrame(captureLoop);
+      scheduleNextFrame();
+    }
+
+    function scheduleNextFrame() {
+      if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+        video.requestVideoFrameCallback(sendCurrentVideoFrame);
+      } else {
+        requestAnimationFrame(sendCurrentVideoFrame);
+      }
+    }
+
+    function sendCommand(cmd) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ cmd }));
+      }
     }
 
     switchBtn.addEventListener('click', () => {
@@ -219,13 +283,19 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
       startCamera();
     });
 
+    modeBtn.addEventListener('click', () => sendCommand('toggle_mode'));
+    dpiUpBtn.addEventListener('click', () => sendCommand('dpi_up'));
+    dpiDownBtn.addEventListener('click', () => sendCommand('dpi_down'));
+    calibrateBtn.addEventListener('click', () => sendCommand('calibrate'));
+    calibXBtn.addEventListener('click', () => sendCommand('calibrate_x'));
+    calibCBtn.addEventListener('click', () => sendCommand('calibrate_corners'));
+
     pauseBtn.addEventListener('click', () => {
       paused = !paused;
-      pauseBtn.textContent = paused ? '▶️ 전송 재개' : '⏸️ 전송 일시정지';
+      pauseBtn.textContent = paused ? '▶️ 전송 재개' : '⏸️ 일시정지';
     });
 
     startCamera();
-    requestAnimationFrame(captureLoop);
   </script>
 </body>
 </html>
@@ -406,7 +476,12 @@ class PhoneWebCameraServer:
         self.url = f"https://{self.host_ip}:{self.port}"
 
         self._latest_frame: Optional[np.ndarray] = None
+        self._latest_raw_jpeg: Optional[bytes] = None
+        self._frame_seq: int = 0
+        self._consumed_seq: int = -1
+        self._frame_event = threading.Event()
         self._frame_lock = threading.Lock()
+        self._pending_commands: list[str] = []
         self._client_connected = False
         self._waiting_frame = build_waiting_qr_frame(self.url)
 
@@ -432,13 +507,27 @@ class PhoneWebCameraServer:
 
         try:
             async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.BINARY:
-                    frame = decode_jpeg_bytes(msg.data)
-                    if frame is not None:
-                        with self._frame_lock:
-                            self._latest_frame = frame
+                if msg.type == aiohttp.WSMsgType.BINARY and msg.data:
+                    # Store only the newest raw JPEG bytes in the receive loop;
+                    # decoding happens on-demand on the consumer thread so queued stale
+                    # packets are immediately dropped (zero bufferbloat).
+                    with self._frame_lock:
+                        self._latest_raw_jpeg = msg.data
+                        self._frame_seq += 1
+                    self._frame_event.set()
+                elif msg.type == aiohttp.WSMsgType.TEXT and msg.data:
+                    try:
+                        import json as _json
+                        payload = _json.loads(msg.data)
+                        cmd = str(payload.get("cmd", "")).strip()
+                        if cmd:
+                            with self._frame_lock:
+                                self._pending_commands.append(cmd)
+                    except Exception:
+                        pass
         finally:
             self._client_connected = False
+            self._frame_event.set()
             print("[PhoneWebBridge] Smartphone disconnected")
 
         return ws
@@ -477,14 +566,58 @@ class PhoneWebCameraServer:
 
     @property
     def has_client(self) -> bool:
-        return self._client_connected and self._latest_frame is not None
+        return self._client_connected and (
+            self._latest_frame is not None or self._latest_raw_jpeg is not None
+        )
+
+    @property
+    def has_new_frame(self) -> bool:
+        """Whether a fresh frame has arrived from the smartphone since the last read."""
+        with self._frame_lock:
+            return self._client_connected and self._frame_seq != self._consumed_seq
+
+    def wait_for_new_frame(self, timeout: float = 0.015) -> bool:
+        """Wait briefly for a fresh WebSocket frame to avoid busy-spinning on stale frames."""
+        if not self._client_connected:
+            return False
+        if self.has_new_frame:
+            return True
+        self._frame_event.wait(timeout=timeout)
+        self._frame_event.clear()
+        return self.has_new_frame
 
     def read_frame(self) -> Tuple[bool, np.ndarray]:
-        """Return latest smartphone camera frame, or the QR waiting screen if not yet connected."""
+        """Return latest smartphone camera frame (decoding only the newest packet), or QR waiting screen."""
+        raw_to_decode: Optional[bytes] = None
+        seq_snapshot: int = -1
+        with self._frame_lock:
+            if not self._client_connected:
+                return True, self._waiting_frame.copy()
+            if self._latest_raw_jpeg is not None and self._frame_seq != self._consumed_seq:
+                raw_to_decode = self._latest_raw_jpeg
+                seq_snapshot = self._frame_seq
+
+        if raw_to_decode is not None:
+            decoded = decode_jpeg_bytes(raw_to_decode)
+            if decoded is not None:
+                with self._frame_lock:
+                    self._latest_frame = decoded
+                    self._consumed_seq = seq_snapshot
+                return True, decoded.copy()
+
         with self._frame_lock:
             if self._latest_frame is not None and self._client_connected:
                 return True, self._latest_frame.copy()
         return True, self._waiting_frame.copy()
+
+    def pop_commands(self) -> list[str]:
+        """Retrieve and clear any remote control commands sent from the smartphone UI."""
+        with self._frame_lock:
+            if not self._pending_commands:
+                return []
+            cmds = list(self._pending_commands)
+            self._pending_commands.clear()
+            return cmds
 
     def stop(self) -> None:
         self._running = False
