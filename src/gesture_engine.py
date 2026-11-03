@@ -175,6 +175,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "straighten_arcs": True,
     # Mirror left/right on the paper (F key toggles it).
     "paper_invert_x": True,
+    # The user's own left/right flip (F key). Calibration never resets it.
+    "flip_x": False,
     # Share of the pinch point in the pen point (rest is the knuckles, which stay put
     # while fingers open/close so the cursor does not twitch on pen up/down).
     "pen_finger_weight": 0.3,
@@ -1209,6 +1211,8 @@ class GestureEngine:
         ny = (openness - top) / (bottom - top) * (1.0 + 2.0 * m) - m
         if bool(self.config.get("paper_invert_x", False)):
             nx = 1.0 - nx
+        if bool(self.config.get("flip_x", False)):
+            nx = 1.0 - nx
         return max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
 
     @property
@@ -1550,12 +1554,16 @@ class GestureEngine:
             py = py_hand * self.paper_depth_scale()
         if bool(self.config.get("paper_invert_x", True)):
             px = -px
+        if bool(self.config.get("flip_x", False)):
+            px = -px
         self._paper = (self._paper[0] + px, self._paper[1] + py)
 
     def paper_to_image(self, du: float, dv: float) -> Tuple[float, float]:
         """Convert a paper offset (palm units) to a normalized image offset (for drawing the paper)."""
         dv /= self.paper_depth_scale()
         if bool(self.config.get("paper_invert_x", True)):
+            du = -du
+        if bool(self.config.get("flip_x", False)):
             du = -du
         axis = self.x_axis_angle
         if axis is not None:

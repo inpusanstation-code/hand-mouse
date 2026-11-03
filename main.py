@@ -921,9 +921,10 @@ def main() -> int:
                 status_msg = "Calibration cleared: horizontal axis follows the hand (Z to calibrate)"
                 status_expire = now + 2.0
             elif key in (ord("f"), ord("F")):
-                inverted = not bool(engine.config.get("paper_invert_x", True))
-                engine.config["paper_invert_x"] = inverted
-                status_msg = f"Left/right {'inverted' if inverted else 'normal'} (S to save)"
+                inverted = not bool(engine.config.get("flip_x", False))
+                engine.config["flip_x"] = inverted
+                engine.save_config()
+                status_msg = f"Left/right {'inverted' if inverted else 'normal'} (saved)"
                 status_expire = now + 2.0
             elif key in (ord("r"), ord("R")):
                 engine.load_config()

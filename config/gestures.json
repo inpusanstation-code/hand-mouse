@@ -124,5 +124,6 @@
   "still_lock": true,
   "still_lock_speed": 0.08,
   "still_lock_time_s": 0.2,
-  "still_unlock_dist": 0.05
+  "still_unlock_dist": 0.05,
+  "flip_x": true
 }

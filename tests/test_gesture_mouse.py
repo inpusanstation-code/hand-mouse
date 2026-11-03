@@ -1284,3 +1284,20 @@ def test_hand_vertical_lets_click_finger_take_over_from_a_resting_pen():
     fired = [engine._update_pinch_state(_dist(0.06, 0.2, ring=0.045), 4.6 + k / 30) for k in range(5)]
     assert fired.count(True) == 1
     assert engine.active_finger == "ring"
+
+
+def test_flip_x_reverses_left_right_and_survives_calibration():
+    engine = GestureEngine()
+    engine.config["paper_x_angle_deg"] = 0.0
+    engine.config["paper_invert_x"] = False
+    engine._paper = (0.0, 0.0)
+    engine._advance_paper(0.05, 0.0)
+    normal = engine._paper[0]
+    engine.config["flip_x"] = True
+    engine._paper = (0.0, 0.0)
+    engine._advance_paper(0.05, 0.0)
+    assert normal > 0 and engine._paper[0] == pytest.approx(-normal)
+    engine.calib_estimate = 0.0
+    engine._calib_points_all = []
+    engine._finish_calibration()
+    assert engine.config["flip_x"] is True
