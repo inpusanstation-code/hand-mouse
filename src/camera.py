@@ -8,6 +8,7 @@ Supports:
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -40,6 +41,18 @@ class CameraStream:
         self.is_network_stream: bool = False
         self._fps_ema: float = 0.0
         self._last_frame_time: float = time.perf_counter()
+
+        # Dedicated capture thread keeps ONLY the newest frame. Reading synchronously let
+        # unprocessed frames queue up in the driver whenever processing slowed down (e.g.
+        # another program in front), so the app processed ever-older frames -> growing lag.
+        self._grab_thread: Optional[threading.Thread] = None
+        self._grab_stop = threading.Event()
+        self._cond = threading.Condition()
+        self._latest: Optional[np.ndarray] = None
+        self._latest_id = 0
+        self._consumed_id = 0
+        self._grab_ok = True
+        self.dropped_frames = 0
 
     @staticmethod
     def parse_source(source_str: Union[int, str]) -> Union[int, str]:
@@ -95,8 +108,55 @@ class CameraStream:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.config.fps)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._last_frame_time = time.perf_counter()
+        self._start_grabber()
         return True
+
+    # ------------------------------------------------------------------ capture thread
+    def _start_grabber(self) -> None:
+        self._stop_grabber()
+        self._grab_stop.clear()
+        with self._cond:
+            self._latest = None
+            self._latest_id = self._consumed_id = 0
+            self._grab_ok = True
+        self._grab_thread = threading.Thread(target=self._grab_loop, args=(self.cap,), name="camera-grab", daemon=True)
+        self._grab_thread.start()
+
+    def _grab_loop(self, cap: "cv2.VideoCapture") -> None:
+        while not self._grab_stop.is_set():
+            ok, frame = cap.read()
+            with self._cond:
+                if ok and frame is not None:
+                    if self._latest_id != self._consumed_id:
+                        self.dropped_frames += 1  # an older frame was never processed: skip it
+                    self._latest = frame
+                    self._latest_id += 1
+                    self._grab_ok = True
+                else:
+                    self._grab_ok = False
+                self._cond.notify_all()
+            if not ok:
+                time.sleep(0.01)
+
+    def _stop_grabber(self) -> None:
+        t = self._grab_thread
+        if t is not None:
+            self._grab_stop.set()
+            t.join(timeout=1.0)
+        self._grab_thread = None
+
+    def _read_latest(self, timeout: float = 0.2) -> tuple[bool, Optional[np.ndarray]]:
+        """Newest frame not processed yet (waits briefly for the next one)."""
+        with self._cond:
+            self._cond.wait_for(
+                lambda: self._latest_id != self._consumed_id or not self._grab_ok, timeout=timeout
+            )
+            if self._latest_id == self._consumed_id or self._latest is None:
+                return False, None
+            self._consumed_id = self._latest_id
+            return True, self._latest
 
     def read(self) -> tuple[bool, Optional[np.ndarray]]:
         """Read a frame, optionally mirror it, and compute real-time FPS."""
@@ -113,7 +173,10 @@ class CameraStream:
                 self.open()
             return False, None
 
-        ok, frame = self.cap.read()
+        if self._grab_thread is not None:
+            ok, frame = self._read_latest()
+        else:
+            ok, frame = self.cap.read()
         if not ok or frame is None:
             if self.config.auto_reconnect and self.is_network_stream:
                 time.sleep(0.1)
@@ -149,6 +212,7 @@ class CameraStream:
         return True
 
     def release(self) -> None:
+        self._stop_grabber()
         if self.cap is not None:
             self.cap.release()
             self.cap = None

@@ -31,6 +31,60 @@ HAND_CONNECTIONS: List[Tuple[int, int]] = [
 ]
 
 
+FINGER_TIPS = {"index": 8, "middle": 12, "ring": 16, "pinky": 20}
+GUIDE_COLORS = {  # BGR
+    "near": (0, 220, 255),     # yellow: a finger is approaching the thumb
+    "pinched": (0, 255, 0),    # green : pinch recognized
+    "action": (0, 60, 255),    # red   : click / drag / switcher actually firing
+}
+ACTION_FINGER = {
+    "left_click": "middle", "right_click": "ring", "drag_hold": "middle",
+    "task_switcher": "pinky", "alt_tab": "pinky", "drag_toggle": "pinky", "grab": "index",
+    "scroll_grab": "index",
+}
+
+
+def pinch_guides(
+    distances: dict,
+    config: dict,
+    pinched: set,
+    action: str = "none",
+    gesture: str = "NONE",
+    near_factor: float = 1.8,
+) -> List[Tuple[str, str]]:
+    """
+    Which thumb -> finger lines to draw: every recognized pinch, plus the single nearest
+    finger once it comes within `near_factor` x its own pinch distance. Nothing in a fist
+    or the show-desktop posture (the thumb rests near the fingers there).
+    """
+    if gesture in ("fist", "thumb_tucked_open"):
+        return []
+    thresholds = {
+        "index": float(config.get("pinch_threshold", 0.055)),
+        "middle": float(config.get("click_threshold", 0.052)),
+        "ring": float(config.get("click_threshold", 0.052)),
+        "pinky": float(config.get("pinky_click_threshold", 0.065)),
+    }
+    fired = ACTION_FINGER.get(action)
+    guides: List[Tuple[str, str]] = []
+    for finger in ("index", "middle", "ring", "pinky"):
+        if finger in pinched or finger == fired:
+            state = "action" if (finger == fired and action not in ("grab", "scroll_grab")) else "pinched"
+            guides.append((finger, state))
+    if not guides:
+        best, best_ratio = None, near_factor
+        for finger, thr in thresholds.items():
+            d = distances.get(finger)
+            if d is None or thr <= 0:
+                continue
+            ratio = d / thr
+            if ratio <= best_ratio:
+                best, best_ratio = finger, ratio
+        if best is not None:
+            guides.append((best, "near"))
+    return guides
+
+
 @dataclass
 class HandLandmark:
     x: float
@@ -64,7 +118,13 @@ class HandTracker:
         min_detection_confidence: float = 0.6,
         min_presence_confidence: float = 0.6,
         min_tracking_confidence: float = 0.6,
+        detect_max_width: int = 640,
     ) -> None:
+        # MediaPipe shrinks the image to a small fixed input internally anyway, so feeding it
+        # a 720p frame mostly costs conversion time (14.5 ms -> 10.6 ms per frame at 640 px).
+        # Landmarks are normalized, so they map back to the full frame unchanged.
+        self.detect_max_width = int(detect_max_width)
+        self.last_detect_ms: float = 0.0
         resolved_model = ensure_model_exists(model_path or DEFAULT_MODEL_PATH)
 
         BaseOptions = mp.tasks.BaseOptions
@@ -85,6 +145,12 @@ class HandTracker:
 
     def detect(self, frame_bgr: np.ndarray) -> List[HandDetection]:
         """Detect hands in a BGR frame and return 21 normalized landmarks per hand."""
+        t0 = time.perf_counter()
+        h, w = frame_bgr.shape[:2]
+        if self.detect_max_width > 0 and w > self.detect_max_width:
+            scale = self.detect_max_width / float(w)
+            frame_bgr = cv2.resize(frame_bgr, (self.detect_max_width, max(1, int(round(h * scale)))),
+                                   interpolation=cv2.INTER_AREA)
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
@@ -94,6 +160,7 @@ class HandTracker:
         self._last_timestamp_ms = timestamp_ms
 
         result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
+        self.last_detect_ms = (time.perf_counter() - t0) * 1000.0
         detections: List[HandDetection] = []
 
         if not result.hand_landmarks:
@@ -114,40 +181,33 @@ class HandTracker:
     def draw_hand(
         frame: np.ndarray,
         landmarks: Sequence[HandLandmark],
-        is_pinched: bool = False,
-        active_action: str = "none",
+        guides: Sequence[Tuple[str, str]] = (),
     ) -> None:
-        """Draw hand skeleton, joints, and highlight thumb-index pinch interaction."""
+        """
+        Draw the hand skeleton plus thumb -> finger pinch guide lines.
+        `guides` comes from `pinch_guides()`: (finger, state) with state
+        "near" (yellow), "pinched" (green) or "action" (red).
+        """
         h, w = frame.shape[:2]
         pts = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
 
-        # Draw connections
-        line_color = (0, 230, 118) if is_pinched else (220, 220, 220)
+        pinched_any = any(state != "near" for _, state in guides)
+        line_color = (0, 230, 118) if pinched_any else (220, 220, 220)
         for i, j in HAND_CONNECTIONS:
             cv2.line(frame, pts[i], pts[j], line_color, 2, cv2.LINE_AA)
-
-        # Draw all joints
         for idx, (px, py) in enumerate(pts):
-            if idx in (4, 8):
-                continue
             cv2.circle(frame, (px, py), 4, (255, 180, 0), -1, cv2.LINE_AA)
 
-        # Highlight Thumb Tip (#4) and Index Tip (#8)
         thumb_pt = pts[4]
-        index_pt = pts[8]
-        mid_pt = ((thumb_pt[0] + index_pt[0]) // 2, (thumb_pt[1] + index_pt[1]) // 2)
-
-        pinch_color = (0, 255, 0) if is_pinched else (0, 140, 255)
-        if active_action in ("left_click", "right_click", "drag_hold", "drag_toggle"):
-            pinch_color = (0, 60, 255)
-
-        cv2.circle(frame, thumb_pt, 8, pinch_color, -1, cv2.LINE_AA)
-        cv2.circle(frame, index_pt, 8, pinch_color, -1, cv2.LINE_AA)
-        cv2.line(frame, thumb_pt, index_pt, pinch_color, 2, cv2.LINE_AA)
-
-        if is_pinched:
-            cv2.circle(frame, mid_pt, 12, (0, 255, 128), 2, cv2.LINE_AA)
-            cv2.circle(frame, mid_pt, 5, (0, 255, 128), -1, cv2.LINE_AA)
+        for finger, state in guides:
+            tip_pt = pts[FINGER_TIPS[finger]]
+            color = GUIDE_COLORS[state]
+            cv2.line(frame, thumb_pt, tip_pt, color, 3 if state != "near" else 2, cv2.LINE_AA)
+            cv2.circle(frame, thumb_pt, 8, color, -1, cv2.LINE_AA)
+            cv2.circle(frame, tip_pt, 8, color, -1, cv2.LINE_AA)
+            if state != "near":
+                mid = ((thumb_pt[0] + tip_pt[0]) // 2, (thumb_pt[1] + tip_pt[1]) // 2)
+                cv2.circle(frame, mid, 11, color, 2, cv2.LINE_AA)
 
     def close(self) -> None:
         if self._landmarker is not None:
