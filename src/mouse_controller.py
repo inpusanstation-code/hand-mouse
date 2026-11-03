@@ -156,6 +156,13 @@ class MouseController:
         self._slow_since: Optional[float] = None
         self.locked: bool = False
         self._lock_travel: float = 0.0
+        # Precision mode: slow cursor after the still lock, until a fast or long move
+        self.precise: bool = False
+        self._precise_travel: float = 0.0
+
+        # Click freeze (pen mode): cursor held where it was aimed while a click forms
+        self._freeze_pos: Optional[Tuple[int, int]] = None
+        self._freeze_until: float = 0.0
 
         # Jitter meter: recent raw targets and output positions while the pen is down
         self._jit_raw: deque = deque(maxlen=20)
@@ -233,6 +240,7 @@ class MouseController:
                 self._speed_ema = 0.0
                 self._slow_since = None
                 self.locked = False
+                self.precise = False
                 self._jit_raw.clear()
                 self._jit_out.clear()
                 self._one_euro.reset()
@@ -256,6 +264,17 @@ class MouseController:
             else:
                 accel = 1.0
 
+            # Precision mode: once the hand has stopped over a target, move slowly until it
+            # clearly leaves (fast or far).
+            if self.precise:
+                self._precise_travel += step
+                if self._speed_ema > float(config.get("precision_exit_speed", 0.8)) or (
+                    self._precise_travel > float(config.get("precision_exit_dist", 0.6))
+                ):
+                    self.precise = False
+                else:
+                    accel = min(accel, float(config.get("precision_gain", 0.2)))
+
             # Still lock: a nearly stopped hand holds the cursor; a clear move lets go.
             if bool(config.get("still_lock", False)):
                 if self.locked:
@@ -272,6 +291,9 @@ class MouseController:
                         self.locked = True
                         self._lock_travel = 0.0
                         du = dv = 0.0
+                        if bool(config.get("precision_mode", False)):
+                            self.precise = True
+                            self._precise_travel = 0.0
                 else:
                     self._slow_since = None
 
@@ -347,6 +369,18 @@ class MouseController:
         """Jitter meter: before (raw) and after (output) smoothing, while the pen is down."""
         self.jitter_raw_px = self._spread(self._jit_raw)
         self.jitter_out_px = self._spread(self._jit_out)
+
+    def _position_before(self, now: float, lookback: float) -> Tuple[int, int]:
+        """Cursor position `lookback` seconds ago (while the pen was down), else the current one."""
+        target = self.last_screen_pos
+        for t, pos in self._history:
+            if t <= now - lookback:
+                target = pos
+            else:
+                break
+        if target == self.last_screen_pos and self._history and self._history[0][0] > now - lookback:
+            target = self._history[0][1]
+        return int(target[0]), int(target[1])
 
     def _rollback_on_lift(self, config: Dict[str, Any]) -> None:
         """Move the cursor back to where it was `lift_rollback_s` before the pen was lifted,
@@ -455,9 +489,34 @@ class MouseController:
             self._was_moving = False
             self._history.clear()
 
+        # Pen mode click: go back to where the cursor was just before the thumb headed for
+        # the click finger, and stay there until the click is let go.
+        frozen = False
+        if mode == "relative" and bool(cfg.get("click_freeze", False)):
+            if result.click_forming:
+                if self._freeze_pos is None:
+                    self._freeze_pos = self._position_before(
+                        now, float(cfg.get("click_freeze_lookback_s", 0.25)))
+                    self._move_os_cursor(*self._freeze_pos)
+                self._freeze_until = float("inf")
+            elif self._freeze_pos is not None:
+                if self._freeze_until == float("inf"):
+                    self._freeze_until = now + float(cfg.get("click_release_hold_s", 0.35))
+                elif now >= self._freeze_until:
+                    self._freeze_pos = None
+            frozen = self._freeze_pos is not None
+            if frozen:
+                # Keep the cursor still; the pen starts afresh from here afterwards.
+                self.anchor_hand_pos = None
+                self.anchor_screen_pos = None
+                self._smoothed_pos = None
+                self._history.clear()
+                self._was_moving = False
+                self._move_os_cursor(*self._freeze_pos)
+
         # Pen lifted: undo the small drift caused by the fingers opening (before a drag
         # is released, so the drop lands where it was aimed).
-        if self._was_moving and not result.is_moving:
+        if self._was_moving and not result.is_moving and not frozen:
             self._rollback_on_lift(cfg)
         self._was_moving = result.is_moving
         if not result.is_moving:
@@ -477,7 +536,7 @@ class MouseController:
 
         # Handle cursor movement (during move_cursor or drag_hold)
         hand_pt = {"relative": result.paper_point, "range": result.screen_point}.get(mode, result.cursor_point)
-        if result.is_moving and hand_pt is not None:
+        if result.is_moving and hand_pt is not None and not frozen:
             target_x, target_y = self._compute_target_screen_pos(hand_pt, cfg, now, mode)
             if action == "drag_hold":
                 self._hold_dragging = True

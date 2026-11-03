@@ -1301,3 +1301,71 @@ def test_flip_x_reverses_left_right_and_survives_calibration():
     engine._calib_points_all = []
     engine._finish_calibration()
     assert engine.config["flip_x"] is True
+
+
+def test_pen_follows_palm_centre_not_the_thumb():
+    """Moving only the thumb (still pinched) does not move the pen."""
+    engine = GestureEngine()
+    clock = Clock()
+    run(engine, make_hand("index", gap=0.002), clock, frames=3)
+    before = engine._paper
+    run(engine, make_hand("index", gap=0.02), clock, frames=3)
+    assert engine.is_pinched
+    assert engine._paper == pytest.approx(before, abs=1e-6)
+
+
+def test_precision_mode_after_stop_then_leaves_on_a_fast_move():
+    ctrl = MouseController(dry_run=True, screen_size=(1920, 1080))
+    cfg = {"smoothing": 1.0, "movement_mode": "relative", "pen_speed": 1.0, "still_lock": True,
+           "precision_mode": True, "precision_gain": 0.2}
+    t, u = 10.0, 0.0
+    ctrl.apply(_pen((u, 0.0), t), cfg)
+    for _ in range(10):  # stop over a target
+        t += 1 / 30
+        ctrl.apply(_pen((u, 0.0), t), cfg)
+    assert ctrl.locked and ctrl.precise
+    start = ctrl.last_screen_pos
+    for _ in range(10):  # leave the lock, then move slowly: 0.2x
+        t += 1 / 30
+        u += 0.01
+        ctrl.apply(_pen((u, 0.0), t), cfg)
+    assert ctrl.precise
+    slow = ctrl.last_screen_pos[0] - start[0]
+    assert 0 < slow <= 0.2 * 1920 * 0.1 + 2
+    for _ in range(4):  # fast move: back to normal speed
+        t += 1 / 30
+        u += 0.08
+        ctrl.apply(_pen((u, 0.0), t), cfg)
+    assert not ctrl.precise
+
+
+def test_click_freeze_puts_cursor_back_and_holds_it_during_the_click():
+    ctrl = MouseController(dry_run=True, screen_size=(1920, 1080))
+    cfg = {"smoothing": 1.0, "movement_mode": "relative", "pen_speed": 1.0, "click_freeze": True,
+           "click_freeze_lookback_s": 0.25, "click_release_hold_s": 0.35}
+    t, u = 10.0, 0.0
+    trail = []
+    for _ in range(20):
+        t += 1 / 30
+        u += 0.02
+        trail.append((t, ctrl.apply(_pen((u, 0.0), t), cfg)))
+    aimed = [p for tt, p in trail if tt <= t + 1 / 30 - 0.25][-1]  # 0.25 s before the click starts
+    for k in range(5):  # thumb slides to the middle finger; the hand drifts on
+        t += 1 / 30
+        u += 0.02
+        res = _pen((u, 0.0), t)
+        res.click_forming = True
+        if k == 3:
+            res.action = "left_click"
+        assert ctrl.apply(res, cfg) == aimed
+    assert ctrl.event_log == ["left_click"]
+    for _ in range(5):  # let go: still held a moment, then moves again from there
+        t += 1 / 30
+        u += 0.02
+        pos = ctrl.apply(_pen((u, 0.0), t), cfg)
+    assert pos == aimed
+    for _ in range(10):
+        t += 1 / 30
+        u += 0.02
+        pos = ctrl.apply(_pen((u, 0.0), t), cfg)
+    assert pos[0] > aimed[0] + 50

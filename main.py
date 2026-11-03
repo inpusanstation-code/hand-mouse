@@ -509,7 +509,7 @@ def draw_hud(
         else f"Tilt:{float(engine.config.get('paper_tilt_deg', 45.0)):.0f}"
     )
     jit = UI.get("jitter")
-    jit_txt = f" | Shake raw/out:{jit[0]:.0f}/{jit[1]:.0f}px{' LOCK' if jit[2] else ''}" if jit else ""
+    jit_txt = f" | Shake raw/out:{jit[0]:.0f}/{jit[1]:.0f}px{' LOCK' if jit[2] else ''}{' PRECISE' if jit[3] else ''}" if jit else ""
     info_line = (
         f"FPS:{fps:4.1f} {w}x{h}{jit_txt} | {MODE_NAMES.get(mode, mode)} x{dpi_scale:.1f} | Axis:{axis_txt} "
         f"Rot:{float(engine.config.get('paper_rotation_deg', 0.0)):+.0f} | {vert_txt} | "
@@ -827,7 +827,7 @@ def main() -> int:
                         status_msg = apply_calibration(engine, mouse, ("x",) if p_cmd.endswith("x") else ("corners",))
                         status_expire = now + 2.5
 
-            UI["jitter"] = (mouse.jitter_raw_px, mouse.jitter_out_px, mouse.locked)
+            UI["jitter"] = (mouse.jitter_raw_px, mouse.jitter_out_px, mouse.locked, mouse.precise)
             if should_detect:
                 draw_hud(
                     frame=frame,

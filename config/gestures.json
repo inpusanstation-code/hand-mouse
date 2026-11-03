@@ -65,7 +65,7 @@
   "paper_depth_gain": 1.0,
   "straighten_arcs": true,
   "paper_invert_x": false,
-  "pen_finger_weight": 0.3,
+  "pen_finger_weight": 0.0,
   "pointer_acceleration": true,
   "accel_min_gain": 0.25,
   "accel_max_gain": 1.8,
@@ -125,5 +125,10 @@
   "still_lock_speed": 0.08,
   "still_lock_time_s": 0.2,
   "still_unlock_dist": 0.05,
-  "flip_x": true
+  "flip_x": true,
+  "precision_mode": true,
+  "precision_gain": 0.2,
+  "precision_exit_speed": 0.8,
+  "precision_exit_dist": 0.6,
+  "click_freeze": true
 }

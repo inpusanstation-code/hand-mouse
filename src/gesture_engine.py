@@ -179,7 +179,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "flip_x": False,
     # Share of the pinch point in the pen point (rest is the knuckles, which stay put
     # while fingers open/close so the cursor does not twitch on pen up/down).
-    "pen_finger_weight": 0.3,
+    "pen_finger_weight": 0.0,
     # Speed-dependent gain: below accel_low_speed (palm widths/s) the cursor moves at
     # accel_min_gain x, above accel_high_speed at accel_max_gain x.
     "pointer_acceleration": True,
@@ -203,6 +203,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "still_lock_speed": 0.08,
     "still_lock_time_s": 0.2,
     "still_unlock_dist": 0.05,
+    # Precision mode (pen mode): after the still lock, the cursor moves at precision_gain
+    # until the hand moves fast (palm widths per second) or far (palm widths) again.
+    "precision_mode": True,
+    "precision_gain": 0.2,
+    "precision_exit_speed": 0.8,
+    "precision_exit_dist": 0.6,
+    # Pen mode clicks: while a click forms the cursor goes back to where it was this long
+    # before and stays there until the click is let go (+ click_release_hold_s).
+    "click_freeze": True,
     "one_euro_min_cutoff": 0.8,
     "one_euro_beta": 1.5,
     "deadzone_px": 2.5,
@@ -389,6 +398,8 @@ class GestureResult:
     thumb_point: Optional[Tuple[float, float]] = None
     # True while the horizontal-line calibration is running (no cursor moves or clicks).
     calibrating: bool = False
+    # True while a click finger (middle / ring) is about to click or is held.
+    click_forming: bool = False
 
 
 class _OneEuro:
@@ -818,13 +829,19 @@ class GestureEngine:
             if not self._user_calibrated and self._active is None:
                 self._update_auto_direction(self._last_hand_angle)
 
-        # Pen point: mostly knuckles (stable while fingers open/close) + some pinch point.
+        # Pen point: the palm centre (wrist + four knuckles). These joints are tracked far
+        # more steadily than fingertips and do not move when the thumb pinches or clicks.
+        # pen_finger_weight mixes in some of the pinch point.
         pinch_mid = ((thumb[0] + pts[8][0]) * 0.5, (thumb[1] + pts[8][1]) * 0.5)
         if real_palm:
-            w_f = max(0.0, min(1.0, float(self.config.get("pen_finger_weight", 0.3))))
+            centre = (
+                sum(pts[i][0] for i in (0, 5, 9, 13, 17)) / 5.0,
+                sum(pts[i][1] for i in (0, 5, 9, 13, 17)) / 5.0,
+            )
+            w_f = max(0.0, min(1.0, float(self.config.get("pen_finger_weight", 0.0))))
             pen = (
-                (1.0 - w_f) * knuckle[0] + w_f * pinch_mid[0],
-                (1.0 - w_f) * knuckle[1] + w_f * pinch_mid[1],
+                (1.0 - w_f) * centre[0] + w_f * pinch_mid[0],
+                (1.0 - w_f) * centre[1] + w_f * pinch_mid[1],
             )
         else:
             pen = pinch_mid
@@ -876,6 +893,10 @@ class GestureEngine:
         )
         result.thumb_point = self._thumb
         result.extension = dict(self._extension)
+        result.click_forming = not self.calibrating and any(
+            k is not None and k in FINGERS and self._action_of(k) not in CONTINUOUS_ACTIONS
+            for k in (self._candidate, self._active)
+        )
         if self.thumb_mode and not self.calibrating:
             fired_click = self._extend_click(real_palm, now)
             self._thumb_cursor(result, now)
