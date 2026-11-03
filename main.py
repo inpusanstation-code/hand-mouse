@@ -479,13 +479,23 @@ def draw_hud(
 
     cv2.putText(frame, f"State: {state_text}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, state_color, 2, cv2.LINE_AA)
 
-    # Clickable "reset calibration" button (handled by on_mouse)
-    bx1, by1, bx2, by2 = w - 176, 8, w - 12, 42
-    UI["reset_button"] = (bx1, by1, bx2, by2)
-    hover = UI.get("hover", False)
-    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (90, 70, 40) if hover else (60, 50, 35), -1)
-    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 200, 255), 1, cv2.LINE_AA)
-    put_text_kr(frame, "영점 재설정", (bx1 + 30, by1 + 4), 20, (255, 255, 255))
+    # Clickable buttons (handled by on_mouse): they work even when keys do not reach the
+    # window (Korean input mode, or another window has the keyboard).
+    speed = float(engine.config.get("dpi_scale", 1.0))
+    buttons = (
+        ("reset", w - 176, 164, "영점 재설정"),
+        ("faster", w - 230, 46, "+"),
+        ("slower", w - 382, 46, "-"),
+    )
+    for name, bx1, bw, text in buttons:
+        by1, bx2, by2 = 8, bx1 + bw, 42
+        UI["buttons"][name] = (bx1, by1, bx2, by2)
+        hover = UI.get("hover") == name
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (90, 70, 40) if hover else (60, 50, 35), -1)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 200, 255), 1, cv2.LINE_AA)
+        tx = bx1 + 30 if name == "reset" else bx1 + 17
+        put_text_kr(frame, text, (tx, by1 + 4), 20, (255, 255, 255))
+    put_text_kr(frame, f"속도 x{speed:.1f}", (w - 330, 12), 20, (255, 255, 255))
 
     def fmt(key: str) -> str:
         d = result.distances.get(key, 1.0)
@@ -522,16 +532,66 @@ MODE_NAMES = {"thumb": "THUMB", "range": "RANGE", "relative": "PEN", "absolute":
 MODE_CYCLE = ("relative", "range", "thumb", "absolute")
 
 # Window UI state shared with the mouse callback
-UI: dict = {"reset_button": None, "reset_clicked": False, "hover": False}
+UI: dict = {"buttons": {}, "clicked": None, "hover": None}
 
 
 def on_mouse(event: int, x: int, y: int, flags: int, param: object) -> None:
-    """Camera-window clicks: the "reset calibration" button."""
-    rect = UI.get("reset_button")
-    inside = rect is not None and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
-    UI["hover"] = inside
-    if event == cv2.EVENT_LBUTTONUP and inside:
-        UI["reset_clicked"] = True
+    """Camera-window clicks: reset calibration, speed - / +."""
+    UI["hover"] = None
+    for name, (x1, y1, x2, y2) in UI["buttons"].items():
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            UI["hover"] = name
+    if event == cv2.EVENT_LBUTTONUP and UI["hover"]:
+        UI["clicked"] = UI["hover"]
+
+
+class KeyReader:
+    """Keys for the camera window. On Windows the physical keys are read directly while the
+    window is in front, so the shortcuts work in Korean input mode too (cv2.waitKey then
+    gets IME codes instead of letters)."""
+
+    # virtual-key code -> the character the main loop expects
+    VK = {0x1B: 27, 0x20: ord(" "), 0xBB: ord("+"), 0x6B: ord("+"), 0xBD: ord("-"), 0x6D: ord("-"),
+          0xDB: ord("["), 0xDD: ord("]")}
+    VK.update({c: c + 32 for c in range(0x41, 0x5B)})  # A-Z -> a-z
+
+    def __init__(self, window: str) -> None:
+        self.window = window
+        self.user32 = None
+        self.down: set = set()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                self.user32 = ctypes.windll.user32
+            except Exception:
+                self.user32 = None
+
+    def read(self) -> int:
+        key = cv2.waitKey(1) & 0xFF
+        if self.user32 is None:
+            return key
+        hwnd = self.user32.FindWindowW(None, self.window)
+        if not hwnd or self.user32.GetForegroundWindow() != hwnd:
+            self.down.clear()
+            return 255
+        pressed = 255
+        for vk, ch in self.VK.items():
+            is_down = bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
+            if is_down and vk not in self.down and pressed == 255:
+                pressed = ch
+            if is_down:
+                self.down.add(vk)
+            else:
+                self.down.discard(vk)
+        return pressed
+
+
+def change_speed(engine: GestureEngine, step: float) -> str:
+    """Cursor speed - / + (saved right away, so it is kept next time)."""
+    new_dpi = engine.set_dpi_scale(float(engine.config.get("dpi_scale", 1.0)) + step)
+    engine.save_config()
+    return f"Speed x{new_dpi:.1f} (saved)"
 
 
 def next_mode(engine: GestureEngine) -> str:
@@ -652,6 +712,7 @@ def main() -> int:
     window = "Hand-Mouse (MediaPipe)"
     cv2.namedWindow(window)
     cv2.setMouseCallback(window, on_mouse)
+    keys = KeyReader(window)
     shown_corner = None
 
     print("=== Hand-Mouse Started ===")
@@ -724,10 +785,13 @@ def main() -> int:
                 shown_corner = target
                 if target is not None:
                     screen_pos = mouse.place_cursor(target[1], target[2])
-            if UI["reset_clicked"]:
-                UI["reset_clicked"] = False
+            clicked, UI["clicked"] = UI["clicked"], None
+            if clicked == "reset":
                 status_msg = apply_calibration(engine, mouse)
                 status_expire = now + 2.5
+            elif clicked in ("faster", "slower"):
+                status_msg = change_speed(engine, 0.2 if clicked == "faster" else -0.2)
+                status_expire = now + 2.0
             if engine.pop_calibration_done():
                 engine.save_config()
                 mouse.release_all()
@@ -783,7 +847,7 @@ def main() -> int:
             if args.max_frames > 0 and frame_count >= args.max_frames:
                 break
 
-            key = cv2.waitKey(1) & 0xFF
+            key = keys.read()
             if key == 27 and engine.calibrating:
                 engine.cancel_calibration()
                 status_msg = "Calibration skipped - saved values kept (button / Z to calibrate)"
@@ -817,14 +881,10 @@ def main() -> int:
                 status_msg = f"Pinch Threshold -> {thr:.3f} (Stricter)"
                 status_expire = now + 2.0
             elif key in (ord("]"), ord("}")):
-                cur_dpi = float(engine.config.get("dpi_scale", 1.0))
-                new_dpi = engine.set_dpi_scale(cur_dpi + 0.2)
-                status_msg = f"Speed UP -> x{new_dpi:.1f} (smaller paper)"
+                status_msg = change_speed(engine, 0.2)
                 status_expire = now + 2.0
             elif key in (ord("["), ord("{")):
-                cur_dpi = float(engine.config.get("dpi_scale", 1.0))
-                new_dpi = engine.set_dpi_scale(cur_dpi - 0.2)
-                status_msg = f"Speed DOWN -> x{new_dpi:.1f}"
+                status_msg = change_speed(engine, -0.2)
                 status_expire = now + 2.0
             elif key in (ord("z"), ord("Z")):
                 status_msg = apply_calibration(engine, mouse)

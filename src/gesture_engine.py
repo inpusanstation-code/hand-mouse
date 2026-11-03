@@ -98,7 +98,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "active_margin": 0.15,
     "movement_mode": "relative",
     # Pen mode: screen widths the cursor travels when the hand moves one palm width.
-    "pen_speed": 1.2,
+    "pen_speed": 2.0,
     "dpi_scale": 1.0,
     # A hand resting on a desk curls toward the palm, so the paper it "draws" on is not
     # square to the camera. Both angles are user-adjustable (J/L and I/K keys):
@@ -165,7 +165,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "click_freeze_lookback_s": 0.25,
     "click_release_hold_s": 0.35,
     # Run the calibration every time the app starts (otherwise only when never done).
-    "calibrate_on_start": False,
+    "calibrate_on_start": True,
     # The pen may hand over to a click finger only this soon after pen down (the thumb
     # sliding past the index); later, curling fingers for up/down never clicks.
     "pen_takeover_window_s": 0.25,
@@ -181,7 +181,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Speed-dependent gain: below accel_low_speed (palm widths/s) the cursor moves at
     # accel_min_gain x, above accel_high_speed at accel_max_gain x.
     "pointer_acceleration": True,
-    "accel_min_gain": 0.1,
+    "accel_min_gain": 0.25,
     "accel_max_gain": 1.8,
     "accel_low_speed": 0.15,
     "accel_high_speed": 1.5,
@@ -946,6 +946,18 @@ class GestureEngine:
                 and self._pen_down_t is not None
                 and now - self._pen_down_t <= window
             )
+            # Up/down from the hand moving (not finger curl): fingers do not curl while the
+            # pen is down, so a click finger that is clearly closer than the index always
+            # takes over, however long the thumb rested on the index first.
+            if (
+                not takes_over
+                and str(self.config.get("vertical_source", "fingers")).lower() != "fingers"
+                and self._active is not None
+                and self._action_of(self._active) in CONTINUOUS_ACTIONS
+                and self._action_of(first) not in CONTINUOUS_ACTIONS
+                and clearly_closest
+            ):
+                takes_over = True
             # While the pen is down (past the slide-by window) fingers curl for up/down;
             # a click needs the pen lifted first.
             pen_locked = (

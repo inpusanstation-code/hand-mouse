@@ -1267,3 +1267,20 @@ def test_hand_forward_back_moves_cursor_up_down_by_default():
     # Curling the three fingers no longer moves up/down
     c = run(engine, make_hand("index", shift=(0.0, -0.04), overrides=curl_overrides(1.0)), clock)[0].paper_point
     assert c[1] == pytest.approx(b[1])
+
+
+def test_hand_vertical_lets_click_finger_take_over_from_a_resting_pen():
+    """Up/down from hand movement: the thumb may rest on the index a while, then a
+    clearly closer middle (left) or ring (right) still clicks."""
+    engine = GestureEngine()
+    engine.config["vertical_source"] = "hand"
+    engine._update_pinch_state(_dist(0.03, 0.2), 1.0)
+    assert engine.is_pinched
+    fired = [engine._update_pinch_state(_dist(0.06, 0.045), 1.5 + k / 30) for k in range(5)]
+    assert fired.count(True) == 1
+    assert engine.active_finger == "middle"
+    engine._update_pinch_state(_dist(0.2, 0.2), 3.0)
+    engine._update_pinch_state(_dist(0.03, 0.2), 4.0)
+    fired = [engine._update_pinch_state(_dist(0.06, 0.2, ring=0.045), 4.6 + k / 30) for k in range(5)]
+    assert fired.count(True) == 1
+    assert engine.active_finger == "ring"
