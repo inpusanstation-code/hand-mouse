@@ -38,6 +38,13 @@ from src.settings_panel import SettingsPanel
 from src.hotkeys import VK_0, VK_F2, VK_NUMPAD0, VK_O, KeyPoller
 from src.win_perf import keep_responsive_in_background
 from src.perf_log import PerfLog
+from src.pipeline import InferencePipeline, Snapshot
+from src.status import describe_state, short_label
+from src.overlay import CORNERS, StatusOverlay
+from src.tray import TrayIcon
+from src.ui_magnet import UITargetMagnet
+
+WINDOW_NAME = "Hand-Mouse (MediaPipe)"  # must keep the "Hand-Mouse" prefix (hotkeys.py)
 
 
 def draw_cursor_anchor(
@@ -110,40 +117,15 @@ def draw_hud(
     cv2.rectangle(overlay, (0, 0), (w, 92), (18, 18, 24), -1)
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
 
-    state_color = (0, 255, 128) if result.is_moving else (200, 200, 200)
-    if paused:
-        state_text = "PAUSED (Press SPACE to resume)"
-        state_color = (0, 180, 255)
-    elif switcher_open:
-        state_text = "TASK SWITCHER: point at a window | thumb+middle = open | thumb+ring = cancel"
-        state_color = (255, 120, 255)
-    elif result.action == "move_cursor" and result.active_gesture == "fist":
-        state_text = f"FAST MOVE x{result.dpi_multiplier:.1f} (Fist / {mode})"
-        state_color = (0, 200, 255)
-    elif result.action == "move_cursor":
-        state_text = f"FINE MOVE (No Pinch / {mode})"
-    elif result.action == "scroll_grab":
-        state_text = "SCROLLING - page grabbed (Thumb + Index), move the hand to scroll"
-        state_color = (255, 220, 0)
-    elif result.action == "grab":
-        state_text = f"RECORDING - draw, release to fling  [speed {grab_speed:.2f}]"
-        state_color = (255, 200, 0)
-    elif result.action == "drag_hold":
-        state_text = "DRAGGING (left button held) - release the pinch to drop"
-        state_color = (80, 160, 255)
-    elif recent_action:
-        # shown for a moment after it fires (a single frame was unreadable)
-        state_text = f"ACTION: {recent_action.upper()}"
-        state_color = (0, 120, 255)
-    elif result.active_gesture in ("thumb_middle_pinch", "thumb_ring_pinch", "thumb_pinky_pinch"):
-        finger = result.active_gesture.split("_")[1].upper()
-        state_text = f"PINCH HELD: {finger} (open the fingers to click again)"
-        state_color = (0, 230, 180)
-    elif result.distances:
-        near = min(("index", "middle", "ring", "pinky"), key=lambda f: result.distances.get(f, 9.9))
-        state_text = f"AIMING: {near.upper()} near the thumb (cursor held for a precise click)"
-    else:
-        state_text = "NO HAND"
+    state_text, state_rgb = describe_state(
+        result,
+        paused=paused,
+        switcher_open=switcher_open,
+        recent_action=recent_action,
+        grab_speed=grab_speed,
+        mode=mode,
+    )
+    state_color = state_rgb[::-1]  # RGB -> BGR for OpenCV
 
     cv2.putText(
         frame,
@@ -166,8 +148,8 @@ def draw_hud(
     tk_str = f"{tk:.2f}/{float(engine.config.get('desktop_thumb_tuck', 0.45)):.2f}" if tk is not None else "---"
     info_line = (
         f"FPS: {fps:4.1f} Det: {detect_ms:4.1f}ms | {mode} | Idx: {dist_str}/{pinch_thr:.3f} | "
-        f"Mid: {mid if mid is None else f'{mid:.3f}'} Rng: {rng if rng is None else f'{rng:.3f}'}"
-        f"/{float(engine.config.get('click_threshold', 0.052)):.3f} | "
+        f"Mid: {mid if mid is None else f'{mid:.3f}'}/{float(engine.config.get('click_threshold', 0.052)):.3f} "
+        f"Rng: {rng if rng is None else f'{rng:.3f}'}/{float(engine.config.get('ring_click_threshold', 0.044)):.3f} | "
         f"Pky: {pky_str} | Tuck: {tk_str}"
     )
     cv2.putText(
@@ -206,6 +188,30 @@ def draw_hud(
             (0, 255, 255),
             2,
             cv2.LINE_AA,
+        )
+
+
+def render_snapshot(snap: Snapshot, engine: GestureEngine, status_msg: str = "") -> None:
+    """Draw one pipeline snapshot onto its frame (runs on the main thread only)."""
+    frame = snap.frame
+    if snap.has_hand:
+        HandTracker.draw_hand(frame, snap.landmarks, snap.guides)
+        draw_cursor_anchor(frame, snap.landmarks, snap.palm_pt, snap.result.is_moving)
+        draw_recording(frame, snap.recorded_path)
+    if snap.should_detect:
+        draw_hud(
+            frame=frame,
+            fps=snap.fps,
+            source=snap.source,
+            result=snap.result,
+            screen_pos=snap.screen_pos,
+            engine=engine,
+            paused=snap.paused,
+            status_msg=snap.fling_msg or status_msg,
+            grab_speed=snap.grab_speed,
+            switcher_open=snap.switcher_open,
+            detect_ms=snap.detect_ms,
+            recent_action=snap.recent_action,
         )
 
 
@@ -254,6 +260,18 @@ def parse_args() -> argparse.Namespace:
         help="Run camera & gesture visualization without moving the actual OS mouse cursor",
     )
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="No camera window: run in the background with a tray icon and a small status overlay "
+             "(open the camera window again from the tray menu)",
+    )
+    parser.add_argument("--no-tray", action="store_true", help="Do not create the system tray icon")
+    parser.add_argument("--overlay", action="store_true",
+                        help="Show the small click-through status overlay even with the camera window open")
+    parser.add_argument("--no-overlay", action="store_true", help="Never show the status overlay")
+    parser.add_argument("--overlay-corner", choices=CORNERS, default="top-right",
+                        help="Screen corner of the status overlay (default: top-right)")
+    parser.add_argument(
         "--max-frames",
         type=int,
         default=0,
@@ -262,7 +280,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _log_to_file_without_console() -> None:
+    """pythonw.exe (run_admin.bat) has no console: keep messages and errors in a log file."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log_dir = Path(__file__).resolve().parent / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        f = open(log_dir / "app_latest.log", "w", encoding="utf-8", buffering=1)
+    except OSError:
+        return
+    sys.stdout = sys.stdout or f
+    sys.stderr = sys.stderr or f
+
+
 def main() -> int:
+    _log_to_file_without_console()
     args = parse_args()
     perf = keep_responsive_in_background()
 
@@ -291,13 +324,36 @@ def main() -> int:
     settings = SettingsPanel(engine)
     keys = KeyPoller()
     perf_log = PerfLog(Path(__file__).resolve().parent / "logs" / "perf_latest.csv")
+    # Aim assist: slow the cursor near clickable UI (reads engine.config live, [Settings] toggles it)
+    magnet = UITargetMagnet(lambda: engine.config)
+    mouse.slowdown_provider = magnet.factor
+    magnet.start()
+    pipeline = InferencePipeline(camera, tracker, engine, mouse, perf_log, max_frames=args.max_frames)
 
-    paused = False
+    hud_visible = not args.headless
+    pipeline.publish_frames = hud_visible
+
+    overlay: StatusOverlay | None = None
+    overlay_wanted = (args.headless or args.overlay) and not args.no_overlay
+    if overlay_wanted:
+        overlay = StatusOverlay(corner=args.overlay_corner)
+        overlay.start()
+
+    tray: TrayIcon | None = None
+    if not args.no_tray:
+        tray = TrayIcon(
+            is_paused=lambda: pipeline.paused,
+            is_hud=lambda: hud_visible,
+            is_overlay=lambda: overlay is not None and overlay.visible,
+        )
+        if not tray.start():
+            tray = None
+    if args.headless and tray is None:
+        print("[Warn] --headless without a tray icon: stop the app from Task Manager.", file=sys.stderr)
+
     status_msg = ""
     status_expire = 0.0
-    frame_count = 0
-    last_fling_count = 0
-    recent_action, recent_action_until = "", 0.0
+    window_open = False
 
     print("=== Hand-Mouse Started ===")
     if perf:
@@ -319,167 +375,165 @@ def main() -> int:
     print("  Thumb+Middle = Left Click, Thumb+Ring = Right Click.")
     print("  Press 'O' (or '0', or F2 from any window) to open the SETTINGS window.")
     print("  Press 'P' in window to switch to Smartphone Browser mode, 'C' for USB Webcam, 'Q' to quit.")
+    if tray is not None:
+        print("  System tray icon: pause / camera window / status overlay / settings / quit.")
+    if args.headless:
+        print("  Headless: no camera window (open it from the tray menu).")
 
+    def say(text: str, seconds: float = 2.0) -> None:
+        nonlocal status_msg, status_expire
+        status_msg, status_expire = text, time.perf_counter() + seconds
+
+    def set_hud(visible: bool) -> None:
+        nonlocal hud_visible
+        hud_visible = visible
+        pipeline.publish_frames = visible  # hidden => the pipeline skips the frame hand-off entirely
+
+    def set_paused(value: bool) -> None:
+        pipeline.set_paused(value)
+        say("Mouse Control PAUSED" if value else "Mouse Control RESUMED")
+        if tray is not None:
+            tray.refresh()
+
+    def toggle_settings() -> None:
+        opened = settings.toggle()
+        say("Settings window OPEN (sliders apply live, [S] to save)" if opened else "Settings window closed")
+
+    def switch_mode() -> None:
+        def task() -> str:
+            cur = str(engine.config.get("movement_mode", "relative")).lower()
+            new = "relative" if cur == "absolute" else "absolute"
+            engine.set_movement_mode(new)
+            mouse.release_all()
+            return f"Switched Movement Mode -> {new.upper()}"
+        pipeline.post(task)
+
+    def switch_camera(target: str) -> None:
+        def task() -> str:
+            if target == "phone":
+                camera.switch_source("phone")
+                return "Switched to Smartphone Browser Camera Mode"
+            if camera.is_phone_web:
+                camera.switch_source(0)
+                return "Switched to USB Webcam 0"
+            if isinstance(camera.config.source, int):
+                next_idx = (camera.config.source + 1) % 3
+                if camera.switch_source(next_idx):
+                    return f"Switched to Camera Index {next_idx}"
+                camera.switch_source(0)
+                return "Reverted to Camera Index 0"
+            return ""
+        pipeline.post(task)
+
+    quit_requested = False
+    pipeline.start()
     try:
-        while True:
-            ok, frame = camera.read()
-            loop_t0 = time.perf_counter()
-            if not ok or frame is None:
-                time.sleep(0.03)
-                continue
+        while not pipeline.finished and not quit_requested:
+            # --- tray menu commands (executed here, on the main thread)
+            while tray is not None and not tray.commands.empty():
+                cmd = tray.commands.get_nowait()
+                if cmd == "pause":
+                    set_paused(not pipeline.paused)
+                elif cmd == "hud":
+                    set_hud(not hud_visible)
+                    tray.refresh()
+                elif cmd == "overlay":
+                    if overlay is None:
+                        overlay = StatusOverlay(corner=args.overlay_corner)
+                        overlay.start()
+                    else:
+                        overlay.set_visible(not overlay.visible)
+                    tray.refresh()
+                elif cmd == "settings":
+                    toggle_settings()
+                elif cmd == "quit":
+                    quit_requested = True
+            while not pipeline.messages.empty():
+                say(pipeline.messages.get_nowait())
 
-            # Only run MediaPipe detection when we have an actual camera feed (not on the QR waiting screen)
-            should_detect = not camera.is_phone_web or (
-                camera.phone_server is not None and camera.phone_server.has_client
-            )
-
-            if should_detect:
-                detections = tracker.detect(frame)
+            key = -1
+            if hud_visible:
+                snap = pipeline.wait_snapshot(0.05)
+                if snap is not None and snap.frame is not None:
+                    if time.perf_counter() > status_expire:
+                        status_msg = ""
+                    render_snapshot(snap, engine, status_msg)
+                    cv2.imshow(WINDOW_NAME, snap.frame)
+                    window_open = True
+                key = cv2.waitKey(1) & 0xFF
+                if window_open and cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                    # closed with the window's X button: hide to the tray, or quit without one
+                    if tray is not None:
+                        set_hud(False)
+                        tray.refresh()
+                    else:
+                        quit_requested = True
             else:
-                detections = []
+                if window_open:
+                    cv2.destroyAllWindows()
+                    window_open = False
+                time.sleep(0.04)  # no rendering at all: the main thread is (almost) idle
 
-            fh, fw = frame.shape[:2]
-            mouse.frame_aspect = fh / max(1, fw)
-
-            if detections:
-                hand = detections[0]
-                result = engine.process(hand.landmarks)
-                if not paused:
-                    screen_pos = mouse.apply(result, engine.config)
-                if result.action in ("left_click", "right_click", "drag_toggle", "alt_tab",
-                                     "show_desktop", "task_switcher"):
-                    recent_action, recent_action_until = result.action, time.perf_counter() + 0.8
-                else:
-                    screen_pos = mouse.last_screen_pos
-
-                HandTracker.draw_hand(
-                    frame,
-                    hand.landmarks,
-                    pinch_guides(
-                        result.distances,
-                        engine.config,
-                        engine.pinched_fingers,
-                        action=result.action,
-                        gesture=result.active_gesture,
-                    ),
-                )
-                palm_pt = engine.palm_anchor_point(hand.landmarks)
-                draw_cursor_anchor(frame, hand.landmarks, palm_pt, result.is_moving)
-                draw_recording(frame, mouse.recorded_path)
-                if mouse.fling_count != last_fling_count:
-                    last_fling_count = mouse.fling_count
-                    status_msg = f"FLING! ~{mouse.last_fling_distance:.0f}px"
-                    status_expire = time.perf_counter() + 0.8
-            else:
-                result = engine.process(None)
-                screen_pos = mouse.hand_lost(engine.config)  # a thrown cursor keeps gliding
-
-            now = time.perf_counter()
-            if now > status_expire:
-                status_msg = ""
-
-            if should_detect:
-                draw_hud(
-                    frame=frame,
-                    fps=camera.fps,
-                    source=camera.phone_server.url if (camera.is_phone_web and camera.phone_server) else camera.config.source,
-                    result=result,
-                    screen_pos=screen_pos,
-                    engine=engine,
-                    paused=paused,
-                    status_msg=status_msg,
-                    grab_speed=mouse.grab_speed,
-                    switcher_open=mouse.switcher_open,
-                    detect_ms=tracker.last_detect_ms,
-                    recent_action=recent_action if time.perf_counter() < recent_action_until else "",
-                )
-
-            cv2.imshow("Hand-Mouse (MediaPipe)", frame)
-            frame_count += 1
-            if args.max_frames > 0 and frame_count >= args.max_frames:
-                break
-
-            settings.update()
-            key = cv2.waitKey(1) & 0xFF
-            perf_log.frame(tracker.last_detect_ms if should_detect else None,
-                           (time.perf_counter() - loop_t0) * 1000.0)
-            perf_log.tick(camera.fps, camera.dropped_frames)
+            if overlay is not None and overlay.visible:
+                snap_now = pipeline.latest()
+                if snap_now is not None:
+                    overlay.set_state(*short_label(
+                        snap_now.result, has_hand=snap_now.has_hand, paused=snap_now.paused,
+                        switcher_open=snap_now.switcher_open, recent_action=snap_now.recent_action,
+                    ))
 
             # Settings window: physical-key polling works in Korean IME mode too.
             # O / 0 while a Hand-Mouse window is focused, F2 from anywhere.
-            toggle_settings = False
+            want_settings = False
             if keys.available:
-                toggle_settings = keys.pressed([VK_F2]) or keys.pressed(
+                want_settings = keys.pressed([VK_F2]) or keys.pressed(
                     [VK_O, VK_0, VK_NUMPAD0], require_focus=True
                 )
             elif key in (ord("o"), ord("O"), ord("0")):
-                toggle_settings = True
-            if toggle_settings:
-                opened = settings.toggle()
-                status_msg = (
-                    "Settings window OPEN (sliders apply live, [S] to save)" if opened else "Settings window closed"
-                )
-                status_expire = time.perf_counter() + 2.0
+                want_settings = True
+            if want_settings:
+                toggle_settings()
+
             if key in (27, ord("q"), ord("Q")):
                 break
             elif key == ord(" "):
-                paused = not paused
-                if paused:
-                    mouse.release_all()
-                status_msg = "Mouse Control PAUSED" if paused else "Mouse Control RESUMED"
-                status_expire = now + 2.0
+                set_paused(not pipeline.paused)
             elif key in (ord("m"), ord("M")):
-                cur_mode = str(engine.config.get("movement_mode", "relative")).lower()
-                new_mode = "relative" if cur_mode == "absolute" else "absolute"
-                engine.set_movement_mode(new_mode)
-                mouse.release_all()
-                status_msg = f"Switched Movement Mode -> {new_mode.upper()}"
-                status_expire = now + 2.0
+                switch_mode()
             elif key in (ord("+"), ord("=")):
                 thr = min(0.12, float(engine.config.get("pinch_threshold", 0.055)) + 0.005)
                 engine.config["pinch_threshold"] = round(thr, 4)
                 engine.config["release_threshold"] = round(thr + 0.02, 4)
-                status_msg = f"Pinch Threshold -> {thr:.3f} (More sensitive)"
-                status_expire = now + 2.0
+                say(f"Pinch Threshold -> {thr:.3f} (More sensitive)")
             elif key in (ord("-"), ord("_")):
                 thr = max(0.02, float(engine.config.get("pinch_threshold", 0.055)) - 0.005)
                 engine.config["pinch_threshold"] = round(thr, 4)
                 engine.config["release_threshold"] = round(thr + 0.02, 4)
-                status_msg = f"Pinch Threshold -> {thr:.3f} (Stricter)"
-                status_expire = now + 2.0
+                say(f"Pinch Threshold -> {thr:.3f} (Stricter)")
             elif key in (ord("["), ord("]")):
                 # Fling distance: ']' farther, '[' shorter (x1.2 per press, saved with 'S')
                 cur = float(engine.config.get("fling_strength", 1.0))
                 new = cur * 1.2 if key == ord("]") else cur / 1.2
                 new = round(max(0.1, min(5.0, new)), 3)
                 engine.config["fling_strength"] = new
-                status_msg = f"Fling Distance -> {new:.2f} ({'farther' if key == ord(']') else 'shorter'}, [S] to save)"
-                status_expire = now + 2.0
+                say(f"Fling Distance -> {new:.2f} ({'farther' if key == ord(']') else 'shorter'}, [S] to save)")
             elif key in (ord("r"), ord("R")):
-                engine.load_config()
-                status_msg = "Reloaded config/gestures.json"
-                status_expire = now + 2.0
+                pipeline.post(lambda: (engine.load_config(), "Reloaded config/gestures.json")[1])
             elif key in (ord("s"), ord("S")):
-                saved_path = engine.save_config()
-                status_msg = f"Saved config to {saved_path.name}"
-                status_expire = now + 2.0
+                say(f"Saved config to {engine.save_config().name}")
             elif key in (ord("p"), ord("P")):
-                camera.switch_source("phone")
-                status_msg = "Switched to Smartphone Browser Camera Mode"
-                status_expire = now + 2.5
+                switch_camera("phone")
             elif key in (ord("c"), ord("C")):
-                if camera.is_phone_web:
-                    camera.switch_source(0)
-                    status_msg = "Switched to USB Webcam 0"
-                elif isinstance(camera.config.source, int):
-                    next_idx = (camera.config.source + 1) % 3
-                    if camera.switch_source(next_idx):
-                        status_msg = f"Switched to Camera Index {next_idx}"
-                    else:
-                        camera.switch_source(0)
-                        status_msg = "Reverted to Camera Index 0"
-                status_expire = now + 2.0
+                switch_camera("next")
+        if pipeline.error is not None:
+            print(f"[Error] inference thread stopped: {pipeline.error!r}", file=sys.stderr)
     finally:
+        pipeline.stop()
+        magnet.shutdown()
+        if tray is not None:
+            tray.stop()
+        if overlay is not None:
+            overlay.shutdown()
         mouse.close()
         settings.shutdown()
         perf_log.close()
@@ -488,8 +542,17 @@ def main() -> int:
         camera.release()
         cv2.destroyAllWindows()
 
-    return 0
+    return 1 if pipeline.error is not None else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback
+
+        _log_to_file_without_console()
+        traceback.print_exc()
+        raise

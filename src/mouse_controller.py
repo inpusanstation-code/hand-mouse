@@ -21,7 +21,7 @@ import math
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import pyautogui
 
@@ -135,6 +135,8 @@ class MouseController:
         self.abs_offset: Tuple[float, float] = (0.0, 0.0)
         self._abs_prev: Optional[Tuple[float, float]] = None  # last mapped point (fist boost)
         self.dpi_multiplier: float = 1.0  # set per frame from GestureResult
+        # (x, y) -> speed multiplier in (0, 1]; set by main.py (UITargetMagnet.factor)
+        self.slowdown_provider: Optional[Callable[[int, int], float]] = None
 
         self.event_log: List[str] = []
 
@@ -784,6 +786,10 @@ class MouseController:
         self._lost_since = None
         self.interpolation = bool(cfg.get("cursor_interpolation", False))
         self.dpi_multiplier = float(getattr(result, "dpi_multiplier", 1.0) or 1.0)
+        # Aim assist: slow the cursor near clickable UI (fine moves only: a fist is a fast travel)
+        if (self.slowdown_provider is not None and action == "move_cursor"
+                and self.dpi_multiplier <= 1.5 and cfg.get("ui_magnet_enabled", True)):
+            self.dpi_multiplier *= self.slowdown_provider(*self.last_screen_pos)
         if not result.is_moving:
             self._abs_prev = None
 
