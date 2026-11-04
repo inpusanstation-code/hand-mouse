@@ -102,6 +102,7 @@ class QtDashboard(QObject):
         self.training_job = TrainingJob()
         self.training_rows = []                                 # one row per gesture (src/training_center.gesture_rows)
         self.training_info = ("", "")                           # (data line, model line)
+        self.training_storage = ("", False)                     # (recordings size in git, past the split limit)
         self.training_busy = ""                                 # "읽는 중…" / "내보내는 중…"
         self.training_note = ""
         self._training_was_running = False
@@ -453,9 +454,13 @@ class QtDashboard(QObject):
                 files = [f for f in summary["files"] if "error" not in f]
                 frames = sum(f.get("frames", 0) for f in files)
                 data = f"녹화 {len(files)}개 · {frames / 30 / 60:.0f}분 ({frames:,}프레임)"
+                waiting = len(summary["files"]) - len(files)
+                if waiting:
+                    data += f" · 다음 학습에 포함 {waiting}개 (끝나지 않았거나 받는 중)"
                 model = (f"모델: {report.get('trained')} 학습 · 녹화 {len(report.get('data', []))}개로" if report
                          else "모델: 아직 없음 (학습하세요)")
                 self.training_rows, self.training_info = rows, (data, model)
+                self.training_storage = tc.storage_text(summary)
             except Exception as exc:
                 self.training_note = f"읽지 못했어요: {exc}"
             self.training_busy = ""
@@ -541,6 +546,14 @@ class QtDashboard(QObject):
         return self.training_info[1]
 
     @Property(str, notify=trainingChanged)
+    def trainingStorage(self):
+        return self.training_storage[0]
+
+    @Property(bool, notify=trainingChanged)
+    def trainingStorageWarn(self):
+        return bool(self.training_storage[1])
+
+    @Property(str, notify=trainingChanged)
     def trainingBusy(self):
         return self.training_busy
 
@@ -562,6 +575,8 @@ class QtDashboard(QObject):
             text += f" · 반복 {s['epoch']}/{s['epochs']} · 손실 {s.get('loss', 0):.3f}"
         if s.get("running"):
             text += f" · {int(time.time() - s['started'])}초"
+        if s.get("skipped"):
+            text += f" · 다음 학습으로 미룬 녹화 {len(s['skipped'])}개"
         return text
 
     @Property(float, notify=trainingChanged)

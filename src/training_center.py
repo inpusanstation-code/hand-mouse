@@ -17,7 +17,7 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 REC_DIR = ROOT / "recordings"
@@ -30,6 +30,7 @@ GOAL_POSTURES = 3
 GOAL_RATE = 0.8           # recognition in postures the model did not train on
 GOAL_FREE_MIN = 9.0       # minutes of "nothing" (half-fist moving)
 MAX_MISFIRES_PER_MIN = 0.5
+STORAGE_LIMIT_MB = 500    # recordings travel with the code in git; past this, suggest a repository of their own
 
 
 # ---------------------------------------------------------------- what has been recorded
@@ -47,6 +48,8 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
     from src.recorder import read_session
 
     meta, frames, events = read_session(path)
+    if not meta.get("complete"):
+        raise ValueError("끝나지 않은 녹화 (학습에서 빠짐)")
     reps: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     seen = set()
     free = defaultdict(int)
@@ -95,7 +98,18 @@ def dataset_summary(rec_dir: Path = REC_DIR) -> Dict[str, Any]:
                 g["postures"][posture] = g["postures"].get(posture, 0) + n
         per["none"]["minutes"] = round(per["none"]["minutes"] + sum(s["free_minutes"].values()), 2)
     newest = max((p.stat().st_mtime for p in files), default=0.0)
-    return {"files": out_files, "per_gesture": per, "newest": newest}
+    total = sum(p.stat().st_size for p in files)
+    return {"files": out_files, "per_gesture": per, "newest": newest, "total_bytes": total}
+
+
+def storage_text(summary: Dict[str, Any]) -> Tuple[str, bool]:
+    """(text, too big) for the recordings kept in the git repository together with the code (user's choice,
+    2026-11-05). Past STORAGE_LIMIT_MB: suggest moving them to a repository of their own."""
+    mb = summary.get("total_bytes", 0) / 1024 / 1024
+    if mb > STORAGE_LIMIT_MB:
+        return (f"녹화 총 {mb:.0f} MB: {STORAGE_LIMIT_MB} MB를 넘었어요. 받기가 느려지니 학습 데이터를 "
+                f"전용 저장소로 나누는 걸 권해요 (docs/training-studio.md)", True)
+    return f"녹화 총 {mb:.0f} MB / 분리 권장 {STORAGE_LIMIT_MB} MB", False
 
 
 def model_report(model: Path = MODEL) -> Optional[Dict[str, Any]]:
@@ -230,6 +244,8 @@ class TrainingJob:
             elif kind == "done":
                 s["stage"] = "끝! 새 모델 저장됨"
                 s["per_gesture"] = ev.get("per_gesture")
+            elif kind == "skipped":
+                s.setdefault("skipped", []).append(ev.get("file"))
             elif kind == "error":
                 s["error"] = ev.get("text")
             steps = s["folds"] + 1
@@ -321,12 +337,12 @@ def export_package(out_root: Path = EXPORT_DIR, with_dataset: bool = True) -> Pa
 def _export_dataset(path: Path, report: Dict[str, Any]) -> None:
     import numpy as np
 
-    from src.recorder import read_session
+    from src.recorder import finished_recordings, read_session
     from src.tcn_features import frame_features
 
     classes = report["classes"]
     xs, ys, ps, fs = [], [], [], []
-    for i, p in enumerate(sorted(REC_DIR.glob("*.jsonl.gz"))):
+    for i, p in enumerate(finished_recordings(REC_DIR)[0]):
         meta, frames, _ = read_session(p)
         xs.append(frame_features(frames, float(meta.get("frame_aspect", 0.5625))))
         ys.append(np.array([classes.index((f.get("label") or {}).get("target")) if (f.get("label") or {}).get("target") in classes

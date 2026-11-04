@@ -89,3 +89,11 @@
 ## 관련 파일
 `studio.py`, `studio.bat`, `src/training_center.py`, `scripts/training_report.py`, `scripts/export_model.py`, `scripts/train_tcn.py`,
 `src/guided_recording.py`(`tasks_for`), `src/qt_dashboard.py`·`src/dashboard.qml`(학습 센터 창), `tests/test_training_center.py`.
+
+## 6. 여러 PC의 학습 데이터 모으기 (2026-11-05 결정)
+
+- **녹화는 코드와 같은 브랜치(`feat/tcn-training-app-transition`)에 함께 올린다.** 다른 PC·다른 각도에서 녹화한 파일도 같은 `recordings/`에 쌓고, 학습은 그 폴더 전체로 한다.
+- 녹화 파일 이름에 **PC 이름**이 들어간다: `20261105-030947-DESKTOP-09LB4VQ-guided.jsonl.gz`. 두 PC가 같은 초에 녹화해도 겹치지 않는다. PC·카메라·사람 정보는 파일 안 meta에도 있다.
+- 녹화 중에는 `….jsonl.gz.part`로 저장되고, 끝나면 이름이 바뀐다. `.part`는 git에 올라가지 않고 학습에도 쓰이지 않는다.
+- **받으면서 학습해도 된다**: 학습은 시작할 때 완성된 녹화 목록을 고정한다. 반쯤 받은 파일이나 끝 줄이 없는 파일(녹화 중 앱이 꺼짐)은 건너뛴다. 진행 줄과 학습 센터에 "다음 학습에 포함 n개"로 표시되고, 다음 학습 때 들어간다.
+- **용량**: 학습 센터 위쪽에 "녹화 총 n MB / 분리 권장 500 MB"가 보인다. 500 MB를 넘으면 노란 안내가 뜬다. 그때는 학습 데이터를 전용 비공개 저장소로 옮기는 걸 검토한다. git은 지운 파일도 기록에 남기므로, 옮기기 전에 이미 올린 양은 줄지 않는다. 녹화는 17분에 약 10 MB다.

@@ -87,3 +87,46 @@ def test_export_package_has_model_code_example_and_zip(tmp_path, monkeypatch):
     compile((out / "example_use.py").read_text(encoding="utf-8"), "example_use.py", "exec")
     with zipfile.ZipFile(str(out) + ".zip") as z:
         assert "example_use.py" in z.namelist()
+
+
+# ---------------------------------------------------------------- recordings shared through git (2026-11-05)
+def _record(folder, close=True):
+    from src.recorder import SessionRecorder
+    rec = SessionRecorder(folder, "guided", {}, now=0.0)
+    rec.frame(0.1)
+    if close:
+        rec.close()
+    return rec
+
+
+def test_recording_name_has_the_pc_and_is_hidden_until_finished(tmp_path):
+    from src.recorder import finished_recordings, machine_info
+    rec = _record(tmp_path, close=False)
+    assert list(tmp_path.glob("*.jsonl.gz")) == []          # still recording: only the .part file
+    rec.close()
+    (p,) = tmp_path.glob("*.jsonl.gz")
+    pc = "".join(c for c in machine_info().get("pc", "") if c.isalnum() or c in "_-") or "pc"
+    assert p.name.endswith(f"-{pc}-guided.jsonl.gz")
+    assert finished_recordings(tmp_path) == ([p], [])
+
+
+def test_half_downloaded_or_unclosed_recordings_wait_for_the_next_training(tmp_path):
+    import gzip
+    from src.recorder import finished_recordings
+    good = _record(tmp_path).path
+    cut = tmp_path / "20261105-000000-OTHERPC-guided.jsonl.gz"
+    cut.write_bytes(good.read_bytes()[:-20])                # git pull stopped mid-file
+    open_ = tmp_path / "20261105-000001-OTHERPC-guided.jsonl.gz"
+    with gzip.open(open_, "wt", encoding="utf-8") as f:     # app closed without the end line
+        f.write('{"type":"meta"}\n{"type":"frame","t":0}\n')
+    usable, skipped = finished_recordings(tmp_path)
+    assert usable == [good] and {p for p, _ in skipped} == {cut, open_}
+    s = tc.dataset_summary(tmp_path)
+    assert sum("error" in f for f in s["files"]) == 2
+
+
+def test_storage_advice_past_500_mb():
+    text, warn = tc.storage_text({"total_bytes": 120 * 1024 * 1024})
+    assert not warn and "120 MB" in text
+    text, warn = tc.storage_text({"total_bytes": 501 * 1024 * 1024})
+    assert warn and "전용 저장소" in text

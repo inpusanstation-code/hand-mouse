@@ -20,6 +20,8 @@ from __future__ import annotations
 import getpass
 import gzip
 import json
+import os
+import re
 import socket
 import time
 from collections import Counter
@@ -51,8 +53,12 @@ class SessionRecorder:
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.path = folder / f"{stamp}-{mode}.jsonl.gz"
-        self._f = gzip.open(self.path, "wt", encoding="utf-8")
+        # The PC name keeps files from several PCs apart in one shared folder (same second on two PCs).
+        pc = re.sub(r"[^A-Za-z0-9_-]+", "", machine_info().get("pc", "")) or "pc"
+        self.path = folder / f"{stamp}-{pc}-{mode}.jsonl.gz"
+        # Written as .part and renamed on close: training and git never pick up a recording still being written.
+        self._part = self.path.with_name(self.path.name + ".part")
+        self._f = gzip.open(self._part, "wt", encoding="utf-8")
         self.mode = mode
         self.counts: Counter = Counter()
         self.frames = 0
@@ -95,22 +101,48 @@ class SessionRecorder:
             self._write({"type": "end", "frames": self.frames, "counts": dict(self.counts), "marks": self.marks})
             self._f.close()
             self._f = None
+            os.replace(self._part, self.path)
         return self.path
 
 
 def read_session(path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """(meta, frames, events) of a recording."""
+    """(meta, frames, events) of a recording. meta["complete"] is True when the file has its closing "end" line."""
     meta: Dict[str, Any] = {}
     frames: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
+    complete = False
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
             obj = json.loads(line)
             kind = obj.get("type")
-            if kind == "meta":
+            if kind == "end":
+                complete = True
+            elif kind == "meta":
                 meta = obj
             elif kind == "frame":
                 frames.append(obj)
             elif kind == "event":
                 events.append(obj)
+    meta["complete"] = complete
     return meta, frames, events
+
+
+def finished_recordings(folder: Path) -> Tuple[List[Path], List[Tuple[Path, str]]]:
+    """(usable, skipped) recordings in a folder, fixed at this moment. Skipped: unreadable (half-downloaded) or no
+    closing line (app closed mid-recording) - with the reason. Files still being recorded end in .part and are not listed."""
+    usable: List[Path] = []
+    skipped: List[Tuple[Path, str]] = []
+    for p in sorted(Path(folder).glob("*.jsonl.gz")):
+        try:
+            with gzip.open(p, "rt", encoding="utf-8") as f:
+                last = ""
+                for line in f:
+                    last = line
+            if json.loads(last).get("type") != "end":
+                skipped.append((p, "끝나지 않은 녹화"))
+                continue
+        except Exception as exc:  # truncated gzip, broken JSON, file in use
+            skipped.append((p, f"읽지 못함 ({type(exc).__name__})"))
+            continue
+        usable.append(p)
+    return usable, skipped

@@ -31,6 +31,7 @@
 ## 지금 상태와 다음 할 일 (2026-11-05 새벽, 브랜치 `feat/tcn-training-app-transition`)
 - 된 것: 학습 데이터 녹화(`docs/recording.md`, Qt "학습 데이터 녹화"), 첫 안내 녹화 1개(`recordings/20261105-030947-guided.jsonl.gz`, 폰 카메라 17분, 엄지+약지·엄지+검지·반주먹 이동 × 자세 3), TCN 학습 스크립트(`scripts/train_tcn.py`), 모델(`models/gesture_tcn.onnx` + `.json`), 앱의 손짓 확인기(`src/gesture_gate.py`, Qt "손짓 확인 (TCN)"). 결과·수치는 `docs/recording.md`.
 - **2026-11-05 새벽 4시대: "TCN 학습 앱" 1차 완료** (`docs/training-studio.md`): `studio.bat`/`studio.py` 번호 메뉴(명령·옵션 설명), 앱 위쪽 [학습 센터](동작별 데이터·인식률·학습 정확도·오작동·조언, [집중 녹화], [학습 시작] 진행·손실 곡선, [내보내기]), `scripts/training_report.py`, `scripts/export_model.py`, `train_tcn.py --progress`, `src/training_center.py`. 아래 1~4는 이 요청의 원문 요약이다. 아직 GitHub에 올리지 않았다(사용자가 "올려"라고 할 때만).
+- **학습 데이터 공유 방식(사용자 결정, 2026-11-05)**: 녹화(`recordings/*.jsonl.gz`)는 코드와 같은 브랜치에 계속 함께 올린다. 학습 센터가 총량을 보여 주고 500 MB를 넘으면 전용 저장소 분리를 권한다. 파일 이름에 PC 이름, 녹화 중엔 `.part`, 학습은 완성된 파일만(`src/recorder.finished_recordings`). `docs/training-studio.md` 6절.
 - 사용자가 요청했던 작업: 이 앱을 "TCN 학습 앱"으로 바꾸기.
   1. 긴 실행 명령(`uv run --locked --extra qt --extra train python main.py --ui qt`)을 쉽게: 무엇을 하는지, 어떤 옵션이 어떤 효과인지 바로 알 수 있게(예: 실행 메뉴·바로가기 배치 파일, 옵션 설명).
   2. 동작별 **학습 정도(데이터 양·학습 손실)**와 **인식률(학습에 안 쓴 자세에서의 인식·오작동)**을 앱 화면에서 바로 보이게. 사용자가 "이 동작은 데이터가 더 필요하다"를 알아보고 그 동작만 골라 집중 녹화할 수 있게.

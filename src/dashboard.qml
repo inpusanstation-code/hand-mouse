@@ -658,8 +658,29 @@ ApplicationWindow {
                 spacing: 8
                 Chip { text: dashboard.trainingData !== "" ? dashboard.trainingData : "녹화 읽는 중…" }
                 Chip { text: dashboard.trainingModel !== "" ? dashboard.trainingModel : "모델 확인 중…" }
+                Chip {
+                    visible: dashboard.trainingStorage !== "" && !dashboard.trainingStorageWarn
+                    text: dashboard.trainingStorage
+                }
                 Item { Layout.fillWidth: true }
                 TextLabel { visible: dashboard.trainingBusy !== ""; text: dashboard.trainingBusy; font.pixelSize: 12; color: window.muted }
+            }
+            Rectangle {
+                visible: dashboard.trainingStorageWarn
+                Layout.fillWidth: true
+                implicitHeight: storageWarn.implicitHeight + 14
+                radius: 8
+                color: "#FFF1D6"
+                border.color: "#F2B544"
+                TextLabel {
+                    id: storageWarn
+                    anchors.fill: parent
+                    anchors.margins: 7
+                    text: dashboard.trainingStorage
+                    font.pixelSize: 12
+                    color: "#8A5A00"
+                    wrapMode: Text.Wrap
+                }
             }
             TextLabel {
                 Layout.fillWidth: true

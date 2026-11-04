@@ -268,7 +268,17 @@ def main() -> int:
     global PROGRESS
     PROGRESS = a.progress
 
+    # The list is fixed here: files that arrive (git pull) or finish recording while training wait for the next run.
+    from src.recorder import finished_recordings
     paths = sorted(glob.glob(a.recordings))
+    folders = sorted({str(Path(p).parent) for p in paths})
+    usable = {str(p) for f in folders for p in finished_recordings(Path(f))[0]}
+    skipped = [p for p in paths if str(Path(p)) not in usable]
+    paths = [p for p in paths if str(Path(p)) in usable]
+    for p in skipped:
+        emit("skipped", file=Path(p).name)
+        if not PROGRESS:
+            print(f"skipped (unfinished or unreadable, next run): {Path(p).name}")
     if not paths:
         emit("error", text=f"녹화가 없어요: {a.recordings}")
         print("no recordings found:", a.recordings)
