@@ -45,7 +45,7 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
                 return data
         except Exception:
             pass
-    from src.recorder import read_session
+    from src.recorder import public_source, read_session
 
     meta, frames, events = read_session(path)
     if not meta.get("complete"):
@@ -68,7 +68,7 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
             free["use"] += 1
     data = {
         "file": path.name, "size": stat.st_size, "mtime": int(stat.st_mtime), "mode": meta.get("mode"),
-        "created": meta.get("created"), "pc": meta.get("pc"), "camera": (meta.get("camera") or {}).get("note", ""),
+        "created": meta.get("created"), "pc": public_source(meta)[0], "camera": public_source(meta)[1],
         "frames": len(frames), "reps": {k: dict(v) for k, v in reps.items()},
         "free_minutes": {k: round(v / 30.0 / 60.0, 2) for k, v in free.items()},
         "marks": sum(1 for e in events if e.get("kind") == "mark"),

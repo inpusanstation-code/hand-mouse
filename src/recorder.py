@@ -3,7 +3,7 @@ Dataset recorder (2026-11-05): every frame of a session to `recordings/<time>-<m
 gesture model (TCN) that checks / replaces the hand-written rules.
 
 One JSON object per line:
-- `{"type": "meta", ...}` first: schema, PC, user, camera (source, real mode, mirror, a free note such as "phone
+- `{"type": "meta", ...}` first: schema, PC nickname (never the real PC or user name: the repository is public), camera (source, real mode, mirror, a free note such as "phone
   camera"), control hand, profile, mode ("guided" | "free"), the rule thresholds in use. Recordings from different PCs
   and cameras must never be mixed up (2026-11-04: tuning from the home PC's phone camera looked like the old webcam's).
 - `{"type": "frame", ...}` per camera frame: time, the hand's image joints (x, y, z), its 3D joints in metres
@@ -17,8 +17,8 @@ No camera images are stored. About 2-3 kB per frame before compression.
 """
 from __future__ import annotations
 
-import getpass
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -35,17 +35,33 @@ def _r(v: float, n: int = 4) -> float:
     return round(float(v), n)
 
 
-def machine_info() -> Dict[str, str]:
-    info = {}
+def pc_label(alias: str = "") -> str:
+    """How this PC appears in recordings and file names. The recordings are uploaded to a public repository, so never
+    the real PC name or user name: the nickname from config "pc_alias" (e.g. "home-pc"), else "pc-" + a short code
+    made from the PC name (same PC -> same code, but the name cannot be read back)."""
+    nick = re.sub(r"[^A-Za-z0-9_-]+", "", alias or "")
+    if nick:
+        return nick[:32]
     try:
-        info["pc"] = socket.gethostname()
+        host = socket.gethostname()
     except Exception:
-        pass
-    try:
-        info["user"] = getpass.getuser()
-    except Exception:
-        pass
-    return info
+        host = ""
+    return "pc-" + hashlib.sha1(host.encode("utf-8")).hexdigest()[:4]
+
+
+def machine_info(alias: str = "") -> Dict[str, str]:
+    return {"pc": pc_label(alias), "pc_named": "alias" if re.sub(r"[^A-Za-z0-9_-]+", "", alias or "") else "code"}
+
+
+def public_source(meta: Dict[str, Any]) -> Tuple[str, str]:
+    """(pc, camera note) of a recording, safe to publish. Recordings made before 2026-11-05 05:00 kept the real PC name
+    (no "pc_named"): shown as a code instead, and the name is taken out of the camera note."""
+    pc = str(meta.get("pc") or "")
+    note = str((meta.get("camera") or {}).get("note", ""))
+    if pc and not meta.get("pc_named"):
+        code = "pc-" + hashlib.sha1(pc.encode("utf-8")).hexdigest()[:4]
+        note, pc = note.replace(pc, code), code
+    return pc, note
 
 
 class SessionRecorder:
@@ -54,7 +70,9 @@ class SessionRecorder:
         folder.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         # The PC name keeps files from several PCs apart in one shared folder (same second on two PCs).
-        pc = re.sub(r"[^A-Za-z0-9_-]+", "", machine_info().get("pc", "")) or "pc"
+        meta = dict(meta)
+        who = machine_info(meta.pop("pc_alias", ""))
+        pc = who["pc"]
         self.path = folder / f"{stamp}-{pc}-{mode}.jsonl.gz"
         # Written as .part and renamed on close: training and git never pick up a recording still being written.
         self._part = self.path.with_name(self.path.name + ".part")
@@ -65,7 +83,7 @@ class SessionRecorder:
         self.marks = 0
         self._t0 = time.perf_counter() if now is None else now
         self._write({"type": "meta", "schema": SCHEMA, "mode": mode, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-                     **machine_info(), **meta})
+                     **who, **meta})
 
     def _write(self, obj: Dict[str, Any]) -> None:
         self._f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")

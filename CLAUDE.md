@@ -2,7 +2,7 @@
 
 ## 이 브랜치(`feat/dan-tuning-20261105`)의 출처
 - **집 PC에서 폰 카메라로 쓰면서 맞춘 값이다.** 원래 개발하던 PC·웹캠에서 한 작업이 아니다.
-  - PC: `DESKTOP-09LB4VQ` (Windows 사용자 `Bob`), 작업 폴더 `Documents\claude code\hand-mouse-main` (GitHub `main` 4124a0f를 내려받은 것)
+  - PC: 집 PC (녹화·모델 정보에는 별명 `home-pc`, 이전 녹화는 코드 `pc-ded5`로 표시. 이 저장소는 공개라 실제 PC 이름·사용자 이름은 적지 않는다), 작업 폴더 `Documents\claude code\hand-mouse-main` (GitHub `main` 4124a0f를 내려받은 것)
   - 카메라: 휴대폰 카메라를 **카메라 번호 0**으로 연결, 1280×720 @ 30fps, 거울 모드, 조작 손 = 오른손 (`--ui qt`, 손바닥(Dan) 모드)
   - 기간: 2026-11-04 저녁 ~ 11-05 새벽
   - 이 카메라에서는 손이 작게 찍혔다: 손 크기(손목→손가락 뿌리 중 가장 긴 것)가 화면 폭의 약 0.09~0.16.

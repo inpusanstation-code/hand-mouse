@@ -130,3 +130,25 @@ def test_storage_advice_past_500_mb():
     assert not warn and "120 MB" in text
     text, warn = tc.storage_text({"total_bytes": 501 * 1024 * 1024})
     assert warn and "전용 저장소" in text
+
+
+def test_recordings_never_store_the_real_pc_or_user_name(tmp_path):
+    import getpass
+    import socket
+    from src.recorder import SessionRecorder, public_source, read_session
+    rec = SessionRecorder(tmp_path, "free", {"pc_alias": "home-pc"}, now=0.0)
+    rec.close()
+    assert rec.path.name.endswith("-home-pc-free.jsonl.gz")
+    meta, _, _ = read_session(rec.path)
+    assert meta["pc"] == "home-pc" and "user" not in meta and "pc_alias" not in meta
+    rec = SessionRecorder(tmp_path / "b", "free", {}, now=0.0)      # no nickname: a code, not the name
+    rec.close()
+    raw = rec.path.read_bytes()
+    import gzip
+    text = gzip.decompress(raw).decode("utf-8")
+    for secret in {socket.gethostname(), getpass.getuser()} - {""}:
+        assert secret not in text and secret not in rec.path.name
+    # recordings made before the change: the name is replaced when shown or exported
+    old = {"pc": "DESKTOP-ABC123", "user": "someone", "camera": {"note": "webcam, DESKTOP-ABC123"}}
+    pc, note = public_source(old)
+    assert pc.startswith("pc-") and "DESKTOP" not in note and pc in note

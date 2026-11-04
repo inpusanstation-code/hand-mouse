@@ -14,7 +14,7 @@
   "data": [
     {
       "file": "20261105-030947-guided.jsonl.gz",
-      "pc": "DESKTOP-09LB4VQ",
+      "pc": "pc-ded5",
       "camera": {
         "source": "0",
         "mode": [
@@ -24,7 +24,7 @@
         ],
         "mirror": true,
         "phone_web": false,
-        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC DESKTOP-09LB4VQ)"
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC pc-ded5)"
       },
       "frames": 30697
     }

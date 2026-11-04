@@ -32,7 +32,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 
-from src.recorder import read_session  # noqa: E402
+from src.recorder import public_source, read_session  # noqa: E402
 from src.tcn_features import FEATURE_VERSION, FEATURES, windows, frame_features  # noqa: E402
 
 CLASSES = ["none", "thumb_index", "thumb_ring"]
@@ -342,7 +342,8 @@ def main() -> int:
         "classes": CLASSES, "window": WINDOW, "features": FEATURES, "feature_version": FEATURE_VERSION,
         "threshold": a.thr, "frames_in_a_row": a.k, "epochs": a.epochs,
         "trained": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "data": [{"file": Path(s["path"]).name, "pc": s["meta"].get("pc"), "camera": s["meta"].get("camera"),
+        "data": [{"file": Path(s["path"]).name, "pc": public_source(s["meta"])[0],
+                  "camera": dict(s["meta"].get("camera") or {}, note=public_source(s["meta"])[1]),
                   "frames": len(s["frames"])} for s in sessions],
         "held_out_results": results,
         "loss_curve": losses, "train_accuracy": train_acc,

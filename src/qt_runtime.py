@@ -755,6 +755,7 @@ class QtRuntime:
                 self.mouse.release_all()
                 meta = self._rec_meta(mode)
                 meta["focus"] = focus
+                meta["pc_alias"] = str(self.engine.config.get("pc_alias", ""))
                 self._rec = SessionRecorder(self.rec_dir, mode, meta, now=t0)
                 self._guided = GuidedSession(self.engine.config, tasks=tasks_for(focus)) if mode == "guided" else None
                 self._rec_adv_seen = ui.rec_advance
