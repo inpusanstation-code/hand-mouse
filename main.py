@@ -30,10 +30,13 @@ from typing import Union
 import cv2
 import numpy as np
 
+from src import profiles
 from src.camera import CameraConfig, CameraStream
 from src.gesture_engine import GestureEngine, GestureResult
-from src.hand_tracker import HandTracker, pinch_guides
+from src.hand_tracker import HandTracker, pinch_guides, tracker_options
 from src.mouse_controller import MouseController
+from src.scroll_target import ScrollTargetFinder
+from src.window_probe import window_center_at
 from src.settings_panel import SettingsPanel
 from src.hotkeys import VK_0, VK_F2, VK_NUMPAD0, VK_O, KeyPoller
 from src.win_perf import keep_responsive_in_background
@@ -43,6 +46,7 @@ from src.status import describe_state, short_label
 from src.overlay import CORNERS, StatusOverlay
 from src.tray import TrayIcon
 from src.ui_magnet import UITargetMagnet
+from src.dashboard import Dashboard
 
 WINDOW_NAME = "Hand-Mouse (MediaPipe)"  # must keep the "Hand-Mouse" prefix (hotkeys.py)
 
@@ -164,7 +168,7 @@ def draw_hud(
     )
 
     help_line = (
-        "[O/F2] SETTINGS  [SPACE] Pause  [M] Mode  [+/-] Pinch  [ [ / ] ] Fling  "
+        "[O/F2] SETTINGS  [SPACE] Pause  [M] Mode  [N] Monitor  [+/-] Pinch  [ [ / ] ] Fling  "
         "[P] Phone  [C] Cam  [R] Reload  [S] Save  [Q] Quit"
     )
     cv2.putText(
@@ -265,6 +269,9 @@ def parse_args() -> argparse.Namespace:
         help="No camera window: run in the background with a tray icon and a small status overlay "
              "(open the camera window again from the tray menu)",
     )
+    parser.add_argument("--profile", default=None,
+                        help="Calibration profile for this run (name, or 'none'); default: the one chosen last "
+                             "(scripts/profile.py list|use)")
     parser.add_argument("--no-tray", action="store_true", help="Do not create the system tray icon")
     parser.add_argument("--overlay", action="store_true",
                         help="Show the small click-through status overlay even with the camera window open")
@@ -277,6 +284,8 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Exit automatically after N frames (0 = run indefinitely)",
     )
+    parser.add_argument("--ui", choices=("tk", "qt"), default=None,
+                        help="Desktop dashboard (tk or qt). Default: camera window + tray icon")
     return parser.parse_args()
 
 
@@ -294,20 +303,365 @@ def _log_to_file_without_console() -> None:
     sys.stderr = sys.stderr or f
 
 
+def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log) -> int:
+    """`--ui qt`: Qt dashboard on the UI thread, camera -> tracking -> mouse on a runtime thread.
+
+    The UI thread only polls Qt, forwards keys / requests to the runtime and renders its
+    newest snapshot (src/qt_runtime.py), so a slow UI frame never delays the cursor.
+    """
+    from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+    from src.qt_dashboard import QtDashboard
+    from src.qt_runtime import QtRuntime
+
+    QApplication.instance() or QApplication([])
+    # Same flags as the default mode: tray unless --no-tray, --headless starts in the tray,
+    # the reception overlay shows with --headless or --overlay (never with --no-overlay)
+    tray_ok = not args.no_tray and QSystemTrayIcon.isSystemTrayAvailable()
+    if args.headless and not tray_ok:
+        print("[Warn] --headless needs a system tray; showing the window instead.", file=sys.stderr)
+    dashboard = QtDashboard(
+        dry_run=args.dry_run, hide_to_tray=tray_ok, start_hidden=args.headless and tray_ok,
+        overlay=(args.headless or args.overlay) and not args.no_overlay,
+        overlay_corner=args.overlay_corner,
+    )
+    tray = None
+    if tray_ok:
+        from src.qt_tray import QtTray
+        tray = QtTray(dashboard)
+    runtime = QtRuntime(
+        camera=camera, tracker=tracker, engine=engine, mouse=mouse, perf_log=perf_log,
+        config_path=args.config, dry_run=args.dry_run, max_frames=args.max_frames,
+        draw_cursor_anchor=draw_cursor_anchor, draw_recording=draw_recording,
+    )
+    print("=== Hand-Mouse Started (Qt, runtime thread) ===")
+    if perf:
+        print(f"  Background performance: {', '.join(perf)}")
+    print(f"  Camera Source : {camera.config.source}")
+    print(f"  Movement Mode : {engine.config.get('movement_mode')}")
+    print("  Space start/pause · Esc pause · N next monitor · F mark a failure · O settings · Q quit")
+    if tray is not None:
+        print("  Tray icon: start/pause, show window, tracking test, status overlay, quit"
+              + (" (window hidden: --headless)" if args.headless else ""))
+    print(f"  Monitors: {len(mouse.screens)} (cursor can cross to any of them, [N] = jump to next)")
+
+    close_posted = False
+    # Aim assist: slow the cursor near clickable UI (same as the default mode)
+    magnet = UITargetMagnet(lambda: engine.config)
+    mouse.slowdown_provider = magnet.factor
+    magnet.start()
+    runtime.ui = dashboard.ui_state()
+    runtime.start()
+    try:
+        while not dashboard.closed and not runtime.finished:
+            key = dashboard.poll()
+            if dashboard.closed:
+                break
+            if dashboard.tracking_requested:
+                dashboard.tracking_requested = False
+                runtime.post("pause")
+                runtime.post("tracking_start")
+            if dashboard.tracking_close_requested and not close_posted:
+                runtime.post("tracking_close")
+                close_posted = True
+            elif not dashboard.tracking_close_requested:
+                close_posted = False
+            if dashboard.failure_mark_requested:
+                dashboard.failure_mark_requested = False
+                runtime.post("failure_mark")
+            want_settings = key in (ord("o"), ord("O"), ord("0"))
+            if keys.available:
+                want_settings = want_settings or keys.pressed([VK_F2]) or keys.pressed(
+                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True)
+            if want_settings and dashboard.stage_name == "main":
+                runtime.post("pause")
+                settings.toggle()
+            elif key in (ord("q"), ord("Q")):
+                break
+            elif key not in (-1, ord("o"), ord("O"), ord("0")):
+                runtime.post("key", key)
+            runtime.ui = dashboard.ui_state()
+            snap = runtime.wait_snapshot(.03)
+            if snap is not None:
+                dashboard.apply_snapshot(snap)
+                if snap.message:
+                    print(snap.message)
+            settings.update()
+        if runtime.error is not None:
+            print(f"[Error] runtime thread stopped: {runtime.error!r}", file=sys.stderr)
+    finally:
+        runtime.stop()
+        magnet.shutdown()
+        if mouse.scroll_target_finder is not None:
+            mouse.scroll_target_finder.shutdown()
+        if tray is not None:
+            tray.hide()
+        mouse.close()
+        settings.shutdown()
+        perf_log.close()
+        mouse.release_all()
+        tracker.close()
+        camera.release()
+        dashboard.close()
+        cv2.destroyAllWindows()
+    return 1 if runtime.error is not None else 0
+
+
+def run_dashboard(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log) -> int:
+    """`--ui tk`: Tk dashboard (Dan's palm engine). `--ui qt` uses run_qt (runtime thread).
+
+    Runs camera -> gestures -> mouse inline on the main thread, because the dashboard UI
+    must be polled there. Tray, headless mode, status overlay and UI aim assist belong to
+    the default pipeline loop in main() and are not wired into this mode yet.
+    """
+    dashboard = Dashboard(dry_run=args.dry_run)
+    paused = True
+    status_msg = ""
+    status_expire = 0.0
+    frame_count = 0
+    last_fling_count = 0
+    recent_action, recent_action_until = "", 0.0
+
+    print("=== Hand-Mouse Started ===")
+    if perf:
+        print(f"  Background performance: {', '.join(perf)}")
+    if camera.is_phone_web and camera.phone_server is not None:
+        print(f"  [Smartphone Browser Mode] Open this URL on your phone (Chrome/Safari):")
+        print(f"  >>> {camera.phone_server.url} <<<")
+    else:
+        print(f"  Camera Source : {camera.config.source}")
+    print(f"  Movement Mode : {engine.config.get('movement_mode')}")
+    print("  Fine Control: move your hand with NO pinch (relative + acceleration, [M] = absolute).")
+    print("  Make a FIST to move the same way at 20x DPI.")
+    print("  Tuck the THUMB, open the other four fingers and hold 0.4 s = show desktop (Win+D).")
+    print("  THUMB+PINKY opens the task switcher: point at a window, THUMB+MIDDLE opens it, THUMB+RING cancels.")
+    if engine.config.get("record_fling_enabled", False):
+        print("  Record & Fling ON: pinch THUMB+INDEX, draw a motion, release to replay it.")
+    else:
+        print("  THUMB+INDEX pinch = grab the page and scroll it like a touchscreen.")
+    print("  Thumb+Middle = Left Click, Thumb+Ring = Right Click.")
+    print("  Press 'O' (or '0', or F2 from any window) to open the SETTINGS window.")
+    print("  Press 'P' in window to switch to Smartphone Browser mode, 'C' for USB Webcam, 'Q' to quit.")
+    print(f"  Monitors: {len(mouse.screens)} (cursor can cross to any of them, [N] = jump to next)")
+
+    try:
+        while not dashboard.closed:
+            key = dashboard.poll()
+            if dashboard.closed:
+                break
+            if key == 27:
+                paused = True
+                mouse.close_switcher(confirm=False)
+                mouse.release_all()
+                engine.reset()
+                recent_action_until = 0.0
+                key = -1
+            ok, frame = camera.read()
+            loop_t0 = time.perf_counter()
+            if not ok or frame is None:
+                time.sleep(0.03)
+                continue
+
+            # Only run MediaPipe detection when we have an actual camera feed (not on the QR waiting screen)
+            should_detect = not camera.is_phone_web or (
+                camera.phone_server is not None and camera.phone_server.has_client
+            )
+
+            if should_detect:
+                detections = tracker.detect(frame)
+            else:
+                detections = []
+
+            fh, fw = frame.shape[:2]
+            mouse.frame_aspect = fh / max(1, fw)
+            if detections:
+                hand = detections[0]
+                result = engine.process(hand.landmarks)
+                if not paused:
+                    mouse.apply(result, engine.config)
+                if not paused and result.action in ("left_click", "right_click", "drag_toggle", "alt_tab",
+                                     "show_desktop", "task_switcher"):
+                    recent_action, recent_action_until = result.action, time.perf_counter() + 0.8
+
+                HandTracker.draw_hand(
+                    frame,
+                    hand.landmarks,
+                    pinch_guides(
+                        result.distances,
+                        engine.config,
+                        engine.pinched_fingers,
+                        action=result.action,
+                        gesture=result.active_gesture,
+                    ),
+                )
+                palm_pt = engine.palm_anchor_point(hand.landmarks)
+                draw_cursor_anchor(frame, hand.landmarks, palm_pt, result.is_moving)
+                draw_recording(frame, mouse.recorded_path)
+                if mouse.fling_count != last_fling_count:
+                    last_fling_count = mouse.fling_count
+                    status_msg = f"FLING! ~{mouse.last_fling_distance:.0f}px"
+                    status_expire = time.perf_counter() + 0.8
+            else:
+                result = engine.process(None)
+                if not paused:
+                    mouse.hand_lost(engine.config)
+
+            now = time.perf_counter()
+            if now > status_expire:
+                status_msg = ""
+            action = recent_action if now < recent_action_until else result.action
+            dashboard.show(frame, bool(detections), paused, action, camera.fps,
+                           tracker.last_detect_ms, status_msg)
+            frame_count += 1
+            if args.max_frames > 0 and frame_count >= args.max_frames:
+                break
+
+            settings.update()
+            perf_log.frame(tracker.last_detect_ms if should_detect else None,
+                           (time.perf_counter() - loop_t0) * 1000.0)
+            perf_log.tick(camera.fps, camera.dropped_frames)
+
+            # Settings window: physical-key polling works in Korean IME mode too.
+            # O / 0 while a Hand-Mouse window is focused, F2 from anywhere.
+            toggle_settings = key in (ord("o"), ord("O"), ord("0"))
+            if keys.available:
+                toggle_settings = toggle_settings or keys.pressed([VK_F2]) or keys.pressed(
+                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True
+                )
+            elif key in (ord("o"), ord("O"), ord("0")):
+                toggle_settings = True
+            if toggle_settings:
+                paused = True
+                mouse.close_switcher(confirm=False)
+                mouse.release_all()
+                engine.reset()
+                opened = settings.toggle()
+                status_msg = (
+                    "Settings window OPEN (sliders apply live, [S] to save)" if opened else "Settings window closed"
+                )
+                status_expire = time.perf_counter() + 2.0
+            if key in (ord("q"), ord("Q")):
+                break
+            elif key in (27, ord(" ")):
+                paused = key == 27 or not paused
+                mouse.close_switcher(confirm=False)
+                mouse.release_all()
+                engine.reset()
+                recent_action_until = 0.0
+                status_msg = "Mouse Control PAUSED" if paused else "Mouse Control RESUMED"
+                status_expire = now + 2.0
+            elif key in (ord("m"), ord("M")):
+                cur_mode = str(engine.config.get("movement_mode", "relative")).lower()
+                new_mode = "relative" if cur_mode == "absolute" else "absolute"
+                engine.set_movement_mode(new_mode)
+                mouse.release_all()
+                status_msg = f"Switched Movement Mode -> {new_mode.upper()}"
+                status_expire = now + 2.0
+            elif key in (ord("n"), ord("N")):
+                mouse.release_all()
+                target = mouse.cycle_monitor()
+                status_msg = f"Monitor {mouse.screens.monitors.index(target) + 1}/{len(mouse.screens)}"
+                status_expire = now + 2.0
+            elif key in (ord("+"), ord("=")):
+                thr = min(0.12, float(engine.config.get("pinch_threshold", 0.055)) + 0.005)
+                engine.config["pinch_threshold"] = round(thr, 4)
+                engine.config["release_threshold"] = round(thr + 0.02, 4)
+                status_msg = f"Pinch Threshold -> {thr:.3f} (More sensitive)"
+                status_expire = now + 2.0
+            elif key in (ord("-"), ord("_")):
+                thr = max(0.02, float(engine.config.get("pinch_threshold", 0.055)) - 0.005)
+                engine.config["pinch_threshold"] = round(thr, 4)
+                engine.config["release_threshold"] = round(thr + 0.02, 4)
+                status_msg = f"Pinch Threshold -> {thr:.3f} (Stricter)"
+                status_expire = now + 2.0
+            elif key in (ord("["), ord("]")):
+                # Fling distance: ']' farther, '[' shorter (x1.2 per press, saved with 'S')
+                cur = float(engine.config.get("fling_strength", 1.0))
+                new = cur * 1.2 if key == ord("]") else cur / 1.2
+                new = round(max(0.1, min(5.0, new)), 3)
+                engine.config["fling_strength"] = new
+                status_msg = f"Fling Distance -> {new:.2f} ({'farther' if key == ord(']') else 'shorter'}, [S] to save)"
+                status_expire = now + 2.0
+            elif key in (ord("r"), ord("R")):
+                engine.load_config()
+                status_msg = "Reloaded config/gestures.json"
+                status_expire = now + 2.0
+            elif key in (ord("s"), ord("S")):
+                saved_path = engine.save_config()
+                status_msg = f"Saved config to {saved_path.name}"
+                status_expire = now + 2.0
+            elif key in (ord("p"), ord("P")):
+                camera.switch_source("phone")
+                status_msg = "Switched to Smartphone Browser Camera Mode"
+                status_expire = now + 2.5
+            elif key in (ord("c"), ord("C")):
+                if camera.is_phone_web:
+                    camera.switch_source(0)
+                    status_msg = "Switched to USB Webcam 0"
+                elif isinstance(camera.config.source, int):
+                    next_idx = (camera.config.source + 1) % 3
+                    if camera.switch_source(next_idx):
+                        status_msg = f"Switched to Camera Index {next_idx}"
+                    else:
+                        camera.switch_source(0)
+                        status_msg = "Reverted to Camera Index 0"
+                status_expire = now + 2.0
+    finally:
+        mouse.close()
+        settings.shutdown()
+        perf_log.close()
+        mouse.release_all()
+        tracker.close()
+        camera.release()
+        dashboard.close()
+        cv2.destroyAllWindows()
+
+    return 0
+
+
+def _safe_console() -> None:
+    """Never crash on print(): Korean status text on a console that cannot encode it
+    (an English Windows console is cp1252) becomes '?' instead of UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main() -> int:
     _log_to_file_without_console()
+    _safe_console()
     args = parse_args()
     perf = keep_responsive_in_background()
 
+    if args.profile is not None:
+        profiles.RUN_OVERRIDE = "" if args.profile.strip().lower() in ("none", "없음", "") else args.profile.strip()
     engine = GestureEngine(config_path=args.config)
+    print(f"  Profile       : {engine.profile_name or '(none)'}"
+          + ("" if not args.profile or engine.profile_name else f"  [Warn] profile '{args.profile}' not found"))
     if args.mode:
         engine.set_movement_mode(args.mode)
+    # Setting "start_in_tray": same as passing --headless (the flag always wins when given)
+    if engine.config.get("start_in_tray", False):
+        args.headless = True
 
     chosen_source = "phone" if args.phone_web else args.source
+    def cfg_int(key: str, default: int) -> int:
+        try:
+            value = int(engine.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
     cam_cfg = CameraConfig(
         source=CameraStream.parse_source(chosen_source),
         mirror=not args.no_mirror,
         phone_port=args.phone_port,
+        # What we ask the webcam for (config keys); actual_mode() shows what it gave
+        width=cfg_int("camera_width", 1280),
+        height=cfg_int("camera_height", 720),
+        fps=cfg_int("camera_fps", 60),
     )
     camera = CameraStream(cam_cfg)
     if not camera.open():
@@ -319,11 +673,24 @@ def main() -> int:
         )
         return 1
 
-    tracker = HandTracker(num_hands=1)
+    tracker_cfg = tracker_options(engine.config)
+    tracker = HandTracker(num_hands=2 if args.ui == "qt" else 1, **tracker_cfg)
+    mode = camera.actual_mode()
+    print(f"  Camera opened : {mode[0]}x{mode[1]} @ {mode[2]} fps (requested "
+          f"{cam_cfg.width}x{cam_cfg.height} @ {cam_cfg.fps})" if mode else "  Camera opened : (mode unknown)")
+    print("  Tracker       : detection {min_detection_confidence} / presence {min_presence_confidence} / "
+          "tracking {min_tracking_confidence}, detect width {detect_max_width}".format(**tracker_cfg))
     mouse = MouseController(dry_run=args.dry_run)
+    mouse.window_probe = window_center_at       # page scrolling keeps the cursor in the middle of its window
+    mouse.scroll_target_finder = ScrollTargetFinder(lambda: engine.config)    # ...of the scroll region under the cursor
+    mouse.scroll_target_finder.start()
     settings = SettingsPanel(engine)
     keys = KeyPoller()
     perf_log = PerfLog(Path(__file__).resolve().parent / "logs" / "perf_latest.csv")
+    if args.ui == "qt":
+        return run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
+    if args.ui:
+        return run_dashboard(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
     # Aim assist: slow the cursor near clickable UI (reads engine.config live, [Settings] toggles it)
     magnet = UITargetMagnet(lambda: engine.config)
     mouse.slowdown_provider = magnet.factor
@@ -375,6 +742,7 @@ def main() -> int:
     print("  Thumb+Middle = Left Click, Thumb+Ring = Right Click.")
     print("  Press 'O' (or '0', or F2 from any window) to open the SETTINGS window.")
     print("  Press 'P' in window to switch to Smartphone Browser mode, 'C' for USB Webcam, 'Q' to quit.")
+    print(f"  Monitors: {len(mouse.screens)} (cursor can cross to any of them, [N] = jump to next)")
     if tray is not None:
         print("  System tray icon: pause / camera window / status overlay / settings / quit.")
     if args.headless:
@@ -398,6 +766,13 @@ def main() -> int:
     def toggle_settings() -> None:
         opened = settings.toggle()
         say("Settings window OPEN (sliders apply live, [S] to save)" if opened else "Settings window closed")
+
+    def next_monitor() -> None:
+        def task() -> str:
+            mouse.release_all()
+            target = mouse.cycle_monitor()
+            return f"Monitor {mouse.screens.monitors.index(target) + 1}/{len(mouse.screens)}"
+        pipeline.post(task)
 
     def switch_mode() -> None:
         def task() -> str:
@@ -500,6 +875,8 @@ def main() -> int:
                 set_paused(not pipeline.paused)
             elif key in (ord("m"), ord("M")):
                 switch_mode()
+            elif key in (ord("n"), ord("N")):
+                next_monitor()
             elif key in (ord("+"), ord("=")):
                 thr = min(0.12, float(engine.config.get("pinch_threshold", 0.055)) + 0.005)
                 engine.config["pinch_threshold"] = round(thr, 4)
@@ -530,6 +907,8 @@ def main() -> int:
     finally:
         pipeline.stop()
         magnet.shutdown()
+        if mouse.scroll_target_finder is not None:
+            mouse.scroll_target_finder.shutdown()
         if tray is not None:
             tray.stop()
         if overlay is not None:
@@ -550,6 +929,11 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except SystemExit:
         raise
+    except KeyboardInterrupt:
+        # Ctrl+C in the terminal: main()'s finally blocks already released the mouse,
+        # camera and windows; no traceback for a normal way to quit.
+        print("[Info] Ctrl+C: closed.", file=sys.stderr)
+        raise SystemExit(130)
     except BaseException:
         import traceback
 
