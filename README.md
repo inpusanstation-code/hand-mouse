@@ -16,6 +16,46 @@
 
 ---
 
+## 💻 다른 PC에서 이어서 작업하기 (TCN 학습 브랜치)
+
+이 브랜치(`feat/tcn-training-app-transition`)는 손짓 판정을 학습 모델(TCN)로 보완하는 작업이다. 다른 PC에서 그대로 이어 하려면:
+
+1. **준비물**: Windows, Git, 인터넷. Python은 따로 깔 필요 없다(uv가 3.12를 받아 온다). GPU 필요 없음.
+2. **코드 받기**
+   ```powershell
+   git clone https://github.com/inpusanstation-code/hand-mouse.git
+   cd hand-mouse
+   git switch feat/tcn-training-app-transition
+   ```
+   (이미 받아 둔 폴더면 `git fetch` 후 `git switch feat/tcn-training-app-transition`, `git pull`)
+3. **uv 설치** (없을 때만, 한 번): `run.bat`을 한 번 실행하면 자동으로 설치된다. 직접 하려면
+   ```powershell
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+   ```
+4. **라이브러리 설치** (처음 한 번, 수 분): 화면(Qt)과 학습(torch 등) 묶음을 함께 설치한다.
+   ```powershell
+   uv sync --locked --extra qt --extra train
+   ```
+   - `--extra qt`: Qt 화면(PySide6). `--extra train`: TCN 학습·실행(torch CPU 판 약 200 MB, onnx, onnxruntime, onnxscript).
+   - **주의**: 이후에도 `uv run`/`uv sync`에는 늘 `--extra qt --extra train`을 붙인다. 빼면 uv가 이 둘을 지운다.
+5. **앱 실행** (손바닥 모드, 녹화·손짓 확인 포함)
+   ```powershell
+   uv run --locked --extra qt --extra train python main.py --ui qt
+   ```
+6. **잘 되는지 확인** (선택): `uv run --locked --extra qt --extra train pytest -q` → 1개(`test_the_corner_badge_text_follows_the_mode`, 이전부터 실패)를 빼고 모두 통과해야 한다.
+
+### 그 PC에서 할 일
+- **카메라 메모부터**: `config/gestures.json`의 `"camera_note"`를 그 PC의 카메라로 바꾼다(예: `"노트북 웹캠, 회사 PC"`). 녹화 파일마다 기록되어, 어느 PC·카메라 데이터인지 섞이지 않는다. 지금 값은 집 PC 폰 카메라다.
+- **설정값은 집 PC 폰 카메라에 맞춘 것**이다(`CLAUDE.md` 참고). 카메라가 다르면 느낌이 다를 수 있다.
+- **녹화**: Qt 왼쪽 패널 "학습 데이터 녹화" → 안내 녹화(약 15분) 또는 평소 녹화. 파일은 `recordings/`에 쌓인다(`docs/recording.md`).
+- **학습**: 녹화를 모은 뒤
+  ```powershell
+  uv run --locked --extra qt --extra train python scripts/train_tcn.py --folds
+  ```
+  자세별로 "규칙 vs TCN" 인식·오작동 수를 보여 주고 `models/gesture_tcn.onnx`를 새로 만든다(CPU로 수 분). 앱을 다시 켜면 "손짓 확인 (TCN)"이 새 모델을 쓴다.
+- **Claude Code로 이어 할 때**: 이 폴더를 열면 `CLAUDE.md`(이 브랜치의 출처, 맞춘 값, 지금 상태와 다음 할 일)를 먼저 읽는다. 다음 할 일은 "이 앱을 TCN 학습 앱으로 바꾸기"다.
+- **올릴 때**: 이 브랜치에 커밋·푸시한다(`main`에 바로 올리지 않는다). 녹화 파일(`recordings/*.jsonl.gz`, 17분에 약 10 MB)도 함께 올리면 다른 PC에서 학습에 쓸 수 있다.
+
 ## 🚀 시작하기
 
 ### 1. 환경 설정 및 실행
