@@ -47,6 +47,12 @@ TASKS = (
 )
 
 
+def tasks_for(focus: str = ""):
+    """All tasks, or only the one gesture the training center asked to record more of ("focused recording")."""
+    picked = tuple(t for t in TASKS if t.key == focus)
+    return picked or TASKS
+
+
 class GuidedSession:
     def __init__(self, config: Optional[Dict[str, Any]] = None, tasks=TASKS, conditions=CONDITIONS) -> None:
         self.config: Dict[str, float] = dict(DEFAULTS)

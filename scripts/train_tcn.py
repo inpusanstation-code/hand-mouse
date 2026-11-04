@@ -40,6 +40,17 @@ RULE_ACTION = {"thumb_index": "scroll_grab", "thumb_ring": "right_click"}
 CLICKY = {"right_click", "left_click", "task_switcher"}
 STARTY = {"scroll_grab", "drag_hold"}
 WINDOW = 15
+PROGRESS = False          # --progress: one JSON object per line on stdout (the app's training center reads them)
+
+
+def emit(event: str, **info) -> None:
+    """Progress for the app (JSON lines with --progress) or for a person reading the console."""
+    if PROGRESS:
+        print(json.dumps({"event": event, **info}, ensure_ascii=False), flush=True)
+    elif event == "epoch" and (info["epoch"] % 5 == 0 or info["epoch"] == info["epochs"]):
+        print(f"    epoch {info['epoch']:2d}  loss {info['loss']:.3f}", flush=True)
+    elif event in ("note",):
+        print(info.get("text", ""), flush=True)
 
 
 # ---------------------------------------------------------------- data
@@ -109,7 +120,7 @@ def augment(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def train(x, y, epochs: int, seed: int = 0):
+def train(x, y, epochs: int, seed: int = 0, stage: str = "", losses=None):
     torch.manual_seed(seed)
     np.random.seed(seed)
     model = TCN()
@@ -128,9 +139,11 @@ def train(x, y, epochs: int, seed: int = 0):
             loss = lossf(model(augment(xt[idx])), yt[idx])
             loss.backward()
             opt.step()
-            total += float(loss) * len(idx)
-        if ep % 5 == 4 or ep == epochs - 1:
-            print(f"    epoch {ep + 1:2d}  loss {total / len(perm):.3f}")
+            total += float(loss.detach()) * len(idx)
+        avg = total / len(perm)
+        if losses is not None:
+            losses.append(round(avg, 4))
+        emit("epoch", stage=stage, epoch=ep + 1, epochs=epochs, loss=round(avg, 4))
     return model
 
 
@@ -206,6 +219,34 @@ def evaluate(session, conds, prob=None, thr=0.7, k=3):
     return {"reps": {t: (recog[t], total[t]) for t in total}, "misfires": dict(misfires), "confused": confused}
 
 
+def free_minutes(session, conds) -> float:
+    n = sum(1 for f in session["frames"] if (f.get("label") or {}).get("phase") == "free"
+            and (f.get("label") or {}).get("condition_index") in conds)
+    return n / 30.0 / 60.0
+
+
+def per_gesture(summary, windows_per_class, train_acc):
+    """Scores per gesture for the training center: held-out recognition, misfires per minute, data, fit."""
+    out = {}
+    for c, name in enumerate(CLASSES):
+        g = {"windows": int(windows_per_class.get(name, 0)), "train_accuracy": train_acc.get(name)}
+        if name in RULE_ACTION:
+            a = sum(m["tcn"]["reps"].get(name, (0, 0))[0] for m in summary)
+            b = sum(m["tcn"]["reps"].get(name, (0, 0))[1] for m in summary)
+            ra = sum(m["rules"]["reps"].get(name, (0, 0))[0] for m in summary)
+            g.update(recognised=a, total=b, rate=round(a / b, 3) if b else None,
+                     rules_rate=round(ra / b, 3) if b else None)
+        else:
+            mins = sum(m.get("free_minutes", 0.0) for m in summary)
+            tcn = sum(sum(m["tcn"]["misfires"].values()) for m in summary)
+            rules = sum(sum(m["rules"]["misfires"].values()) for m in summary)
+            g.update(free_minutes=round(mins, 2), misfires=tcn, rules_misfires=rules,
+                     misfires_per_min=round(tcn / mins, 2) if mins else None,
+                     rules_misfires_per_min=round(rules / mins, 2) if mins else None)
+        out[name] = g
+    return out
+
+
 def show(name, r):
     reps = "  ".join(f"{t} {a}/{b}" for t, (a, b) in sorted(r["reps"].items()))
     mis = sum(r["misfires"].values())
@@ -222,43 +263,61 @@ def main() -> int:
     ap.add_argument("--thr", type=float, default=0.7)
     ap.add_argument("--k", type=int, default=3, help="frames in a row above the threshold that count as the gesture")
     ap.add_argument("--no-export", action="store_true")
+    ap.add_argument("--progress", action="store_true", help="JSON progress lines for the app")
     a = ap.parse_args()
+    global PROGRESS
+    PROGRESS = a.progress
 
     paths = sorted(glob.glob(a.recordings))
     if not paths:
+        emit("error", text=f"녹화가 없어요: {a.recordings}")
         print("no recordings found:", a.recordings)
         return 1
     t0 = time.perf_counter()
     sessions = load(paths)
     conds = sorted({int(c) for s in sessions for c in s["cond"] if c >= 0})
     xa, ya = pick(sessions, conds)
-    print(f"{len(paths)} recording(s), postures {conds}, {len(ya)} labelled windows {dict(Counter(CLASSES[i] for i in ya))}"
-          f"  ({time.perf_counter() - t0:.1f} s to load)")
+    per_class = dict(Counter(CLASSES[i] for i in ya))
+    if not PROGRESS:
+        print(f"{len(paths)} recording(s), postures {conds}, {len(ya)} labelled windows {per_class}"
+              f"  ({time.perf_counter() - t0:.1f} s to load)")
+    emit("loaded", recordings=len(paths), postures=conds, windows=int(len(ya)), per_class=per_class,
+         folds=len(conds) if a.folds else (0 if a.test_condition < 0 else 1))
 
     held = conds if a.folds else ([] if a.test_condition < 0 else [a.test_condition])
     summary = []
     for test in held:
         train_conds = [c for c in conds if c != test]
         x, y = pick(sessions, train_conds)
-        print(f"\n== held-out posture {test} (train on {train_conds}, {len(y)} windows)")
+        if not PROGRESS:
+            print(f"\n== held-out posture {test} (train on {train_conds}, {len(y)} windows)")
+        emit("fold_start", posture=test, fold=held.index(test) + 1, folds=len(held))
         t1 = time.perf_counter()
-        model = train(x, y, a.epochs)
-        print(f"    trained in {time.perf_counter() - t1:.0f} s")
+        model = train(x, y, a.epochs, stage=f"fold{test}")
+        if not PROGRESS:
+            print(f"    trained in {time.perf_counter() - t1:.0f} s")
         for s in sessions:
             prob = predict(model, s["x"])
             rule = evaluate(s, [test])
             tcn = evaluate(s, [test], prob, a.thr, a.k)
-            show("rules", rule)
-            show("TCN", tcn)
-            summary.append((test, rule, tcn))
+            if not PROGRESS:
+                show("rules", rule)
+                show("TCN", tcn)
+            summary.append((test, rule, tcn, free_minutes(s, [test])))
+            emit("fold_result", posture=test, rules=rule, tcn=tcn)
 
     if a.no_export:
         return 0
     old = ROOT / "models" / "gesture_tcn.onnx.data"
     if old.exists():
         old.unlink()                         # an earlier export kept the weights apart
-    print(f"\n== final model on all postures {conds}")
-    model = train(xa, ya, a.epochs)
+    if not PROGRESS:
+        print(f"\n== final model on all postures {conds}")
+    emit("final_start")
+    losses: list = []
+    model = train(xa, ya, a.epochs, stage="final", losses=losses)
+    pred = predict(model, xa).argmax(1)
+    train_acc = {name: round(float((pred[ya == c] == c).mean()), 3) for c, name in enumerate(CLASSES) if (ya == c).any()}
     out = ROOT / "models" / "gesture_tcn.onnx"
     model.eval()
     torch.onnx.export(model, torch.zeros(1, WINDOW, FEATURES), str(out), input_names=["x"], output_names=["logits"],
@@ -266,18 +325,23 @@ def main() -> int:
                       external_data=False)
     if not summary and (ROOT / "models" / "gesture_tcn.json").exists():
         # (--test-condition -1: only the final model; keep the held-out results of the last full run)
-        summary = [(r["posture"], r["rules"], r["tcn"]) for r in
+        summary = [(r["posture"], r["rules"], r["tcn"], r.get("free_minutes", 0.0)) for r in
                    json.loads((ROOT / "models" / "gesture_tcn.json").read_text(encoding="utf-8")).get("held_out_results", [])]
+    results = [{"posture": t, "rules": r, "tcn": m, "free_minutes": round(fm, 2)} for t, r, m, fm in summary]
     info = {
         "classes": CLASSES, "window": WINDOW, "features": FEATURES, "feature_version": FEATURE_VERSION,
         "threshold": a.thr, "frames_in_a_row": a.k, "epochs": a.epochs,
         "trained": time.strftime("%Y-%m-%d %H:%M:%S"),
         "data": [{"file": Path(s["path"]).name, "pc": s["meta"].get("pc"), "camera": s["meta"].get("camera"),
                   "frames": len(s["frames"])} for s in sessions],
-        "held_out_results": [{"posture": t, "rules": r, "tcn": m} for t, r, m in summary],
+        "held_out_results": results,
+        "loss_curve": losses, "train_accuracy": train_acc,
+        "per_gesture": per_gesture(results, per_class, train_acc),
     }
     (ROOT / "models" / "gesture_tcn.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"saved {out.name} ({out.stat().st_size // 1024} KB) and gesture_tcn.json")
+    if not PROGRESS:
+        print(f"saved {out.name} ({out.stat().st_size // 1024} KB) and gesture_tcn.json")
+    emit("done", model=out.name, kb=out.stat().st_size // 1024, per_gesture=info["per_gesture"])
     return 0
 
 

@@ -5,7 +5,7 @@ import time
 import math
 
 import cv2
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, Property, QSettings, Signal, Slot, QUrl
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Property, QSettings, QTimer, Signal, Slot, QUrl
 from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
@@ -52,6 +52,7 @@ class QtDashboard(QObject):
     overlayChanged = Signal()         # overlay shown / hidden / moved
     hiddenToTray = Signal()           # the window was closed into the tray
     trackingActiveChanged = Signal()  # only when the test window opens or closes
+    trainingChanged = Signal()        # training center: data, scores, training job, export
 
     def __init__(self, dry_run=False, *, hide_to_tray=False, start_hidden=False,
                  overlay=False, overlay_corner="top-right"):
@@ -95,6 +96,18 @@ class QtDashboard(QObject):
         self.rec_mode = "off"                                   # dataset recording: off | guided | free
         self.rec_advance = 0                                    # +1 per press of "start" in guided recording
         self.rec_view = None                                    # latest recording view from the runtime
+        self.rec_focus = ""                                     # guided recording of one gesture only
+        self.model_version = 0                                  # +1 per newly trained model (runtime reloads the gate)
+        from src.training_center import TrainingJob
+        self.training_job = TrainingJob()
+        self.training_rows = []                                 # one row per gesture (src/training_center.gesture_rows)
+        self.training_info = ("", "")                           # (data line, model line)
+        self.training_busy = ""                                 # "읽는 중…" / "내보내는 중…"
+        self.training_note = ""
+        self._training_was_running = False
+        self.training_timer = QTimer()
+        self.training_timer.setInterval(400)
+        self.training_timer.timeout.connect(self._training_tick)
         from src.gesture_gate import DEFAULT_MODEL
         self.tcn_gate = DEFAULT_MODEL.exists()                  # intent check by the trained model: on when one exists
         self.palm_axes_view = (False, "", 0.0, "", False)       # running, prompt, progress, note, saved
@@ -405,7 +418,159 @@ class QtDashboard(QObject):
         if mode not in ("off", "guided", "free") or (mode != "off" and (self.stage_name != "main" or self.use_index_pointer)):
             return
         self.rec_mode = mode
+        self.rec_focus = ""
         self.stateChanged.emit()
+
+    @Property(str, notify=stateChanged)
+    def recFocus(self):
+        return self.rec_focus
+
+    # ------------------------------------------------------------------ training center (src/training_center.py)
+    @Slot()
+    def openTraining(self):
+        self.refreshTraining()
+        self.training_timer.start()
+
+    @Slot()
+    def closeTraining(self):
+        if not self.training_job.running:
+            self.training_timer.stop()
+
+    @Slot()
+    def refreshTraining(self):
+        """Re-read recordings and the model's scores in the background (a new recording takes a few seconds)."""
+        if self.training_busy:
+            return
+        self.training_busy = "녹화 읽는 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from src import training_center as tc
+            try:
+                summary = tc.dataset_summary()
+                report = tc.model_report()
+                rows = tc.gesture_rows(summary, report)
+                files = [f for f in summary["files"] if "error" not in f]
+                frames = sum(f.get("frames", 0) for f in files)
+                data = f"녹화 {len(files)}개 · {frames / 30 / 60:.0f}분 ({frames:,}프레임)"
+                model = (f"모델: {report.get('trained')} 학습 · 녹화 {len(report.get('data', []))}개로" if report
+                         else "모델: 아직 없음 (학습하세요)")
+                self.training_rows, self.training_info = rows, (data, model)
+            except Exception as exc:
+                self.training_note = f"읽지 못했어요: {exc}"
+            self.training_busy = ""
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot()
+    def startTraining(self):
+        if self.training_job.start():
+            self.training_note = ""
+            self._training_was_running = True
+            self.training_timer.start()
+            self.trainingChanged.emit()
+
+    @Slot()
+    def stopTraining(self):
+        self.training_job.stop()
+
+    @Slot()
+    def exportModel(self):
+        if self.training_busy:
+            return
+        self.training_busy = "내보내는 중… (녹화 전체를 데이터셋으로 묶어요)"
+        self.trainingChanged.emit()
+
+        def work():
+            from src import training_center as tc
+            try:
+                out = tc.export_package()
+                self.training_note = f"내보냈어요: exports/{out.name}.zip"
+                self._export_dir = str(out.parent)
+            except Exception as exc:
+                self.training_note = f"내보내지 못했어요: {exc}"
+            self.training_busy = ""
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot()
+    def openExports(self):
+        import os
+        from src.training_center import EXPORT_DIR
+        EXPORT_DIR.mkdir(exist_ok=True)
+        os.startfile(str(EXPORT_DIR))  # noqa: S606 - Windows explorer on our own folder
+
+    @Slot(str)
+    def focusRecord(self, key):
+        """Guided recording of one gesture only (from a training center row)."""
+        if self.stage_name != "main" or self.use_index_pointer:
+            self.training_note = "집중 녹화는 손바닥(Dan) 포인터에서 돼요. 왼쪽에서 '손바닥 (Dan)'을 고르세요."
+            self.trainingChanged.emit()
+            return
+        self.rec_mode, self.rec_focus = "guided", key
+        self.stateChanged.emit()
+
+    def _training_tick(self):
+        job = self.training_job
+        if self._training_was_running and not job.running:
+            self._training_was_running = False
+            s = job.snapshot()
+            if s.get("error"):
+                self.training_note = s["error"]
+            else:
+                self.training_note = "학습 끝! 새 모델의 성적을 보여 드려요."
+                self.model_version += 1
+                self.stateChanged.emit()
+            self.refreshTraining()
+        self.trainingChanged.emit()
+
+    @Property("QVariantList", notify=trainingChanged)
+    def trainingRows(self):
+        return list(self.training_rows)
+
+    @Property(str, notify=trainingChanged)
+    def trainingData(self):
+        return self.training_info[0]
+
+    @Property(str, notify=trainingChanged)
+    def trainingModel(self):
+        return self.training_info[1]
+
+    @Property(str, notify=trainingChanged)
+    def trainingBusy(self):
+        return self.training_busy
+
+    @Property(str, notify=trainingChanged)
+    def trainingNote(self):
+        return self.training_note
+
+    @Property(bool, notify=trainingChanged)
+    def trainingRunning(self):
+        return self.training_job.running
+
+    @Property(str, notify=trainingChanged)
+    def trainingStage(self):
+        s = self.training_job.snapshot()
+        if not s.get("stage"):
+            return ""
+        text = s["stage"]
+        if s.get("running") and s.get("epoch"):
+            text += f" · 반복 {s['epoch']}/{s['epochs']} · 손실 {s.get('loss', 0):.3f}"
+        if s.get("running"):
+            text += f" · {int(time.time() - s['started'])}초"
+        return text
+
+    @Property(float, notify=trainingChanged)
+    def trainingProgress(self):
+        return float(self.training_job.snapshot().get("progress", 0.0))
+
+    @Property("QVariantList", notify=trainingChanged)
+    def trainingLosses(self):
+        return list(self.training_job.snapshot().get("losses", []))[-60:]
 
     @Property(bool, notify=stateChanged)
     def tcnGate(self):
@@ -583,6 +748,7 @@ class QtDashboard(QObject):
             palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
             palm_axes_reset=self.palm_axes_requests[2],
             rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate,
+            rec_focus=self.rec_focus, model_version=self.model_version,
         )
 
     def apply_snapshot(self, snap):

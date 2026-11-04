@@ -10,7 +10,7 @@
   "threshold": 0.7,
   "frames_in_a_row": 3,
   "epochs": 25,
-  "trained": "2026-11-05 03:39:12",
+  "trained": "2026-11-05 04:18:48",
   "data": [
     {
       "file": "20261105-030947-guided.jsonl.gz",
@@ -68,7 +68,8 @@
           "thumb_ring": 2
         },
         "confused": 0
-      }
+      },
+      "free_minutes": 2.99
     },
     {
       "posture": 1,
@@ -107,7 +108,8 @@
           "thumb_ring": 0
         },
         "confused": 5
-      }
+      },
+      "free_minutes": 2.99
     },
     {
       "posture": 2,
@@ -147,7 +149,67 @@
           "thumb_ring": 2
         },
         "confused": 0
-      }
+      },
+      "free_minutes": 2.99
     }
-  ]
+  ],
+  "loss_curve": [
+    0.9194,
+    0.6568,
+    0.5395,
+    0.4756,
+    0.4511,
+    0.4171,
+    0.4174,
+    0.3902,
+    0.3845,
+    0.3737,
+    0.3785,
+    0.3601,
+    0.353,
+    0.347,
+    0.3295,
+    0.3378,
+    0.3247,
+    0.3434,
+    0.3264,
+    0.3183,
+    0.316,
+    0.3148,
+    0.3206,
+    0.3,
+    0.3176
+  ],
+  "train_accuracy": {
+    "none": 0.826,
+    "thumb_index": 0.908,
+    "thumb_ring": 0.996
+  },
+  "per_gesture": {
+    "none": {
+      "windows": 19464,
+      "train_accuracy": 0.826,
+      "free_minutes": 8.97,
+      "misfires": 6,
+      "rules_misfires": 51,
+      "misfires_per_min": 0.67,
+      "rules_misfires_per_min": 5.69
+    },
+    "thumb_index": {
+      "windows": 2030,
+      "train_accuracy": 0.908,
+      "recognised": 38,
+      "total": 45,
+      "rate": 0.844,
+      "rules_rate": 0.556
+    },
+    "thumb_ring": {
+      "windows": 2093,
+      "train_accuracy": 0.996,
+      "recognised": 36,
+      "total": 45,
+      "rate": 0.8,
+      "rules_rate": 0.556
+    }
+  }
 }

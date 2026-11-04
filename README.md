@@ -38,7 +38,10 @@
    ```
    - `--extra qt`: Qt 화면(PySide6). `--extra train`: TCN 학습·실행(torch CPU 판 약 200 MB, onnx, onnxruntime, onnxscript).
    - **주의**: 이후에도 `uv run`/`uv sync`에는 늘 `--extra qt --extra train`을 붙인다. 빼면 uv가 이 둘을 지운다.
-5. **앱 실행** (손바닥 모드, 녹화·손짓 확인 포함)
+5. **가장 쉬운 방법: `studio.bat` 두 번 클릭** → 번호 메뉴(앱 실행 / 학습 센터 리포트 / TCN 학습 / 모델 내보내기 / 시험). 라이브러리 설치까지 알아서 하고, 고를 때마다 실제 명령과 옵션 뜻을 보여 준다. 자세한 내용은 [docs/training-studio.md](docs/training-studio.md).
+   앱 위쪽의 **[학습 센터]**에서 동작별 데이터 양·인식률·오작동을 보고, 부족한 동작만 **[집중 녹화]**, **[학습 시작]**, **[내보내기]**까지 한 화면에서 한다.
+
+   직접 실행하려면 (손바닥 모드, 녹화·손짓 확인 포함)
    ```powershell
    uv run --locked --extra qt --extra train python main.py --ui qt
    ```

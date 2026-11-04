@@ -243,6 +243,7 @@ ApplicationWindow {
                 TextLabel { text: "MANUX"; font.pixelSize: 26; font.bold: true }
                 TextLabel { text: "INPUT STUDIO"; font.pixelSize: 11; font.letterSpacing: 1.4; color: window.muted }
                 Item { Layout.fillWidth: true }
+                ActionButton { text: "학습 센터"; onClicked: trainingCenter.open() }
                 ActionButton {
                     text: dashboard.chosenHand ? dashboard.chosenHand + " · 다시 설정" : "사용할 손 설정"
                     onClicked: dashboard.beginHandSetup()
@@ -619,6 +620,193 @@ ApplicationWindow {
                         font.pixelSize: 12
                     }
                 }
+            }
+        }
+    }
+
+    // Training center (src/training_center.py): data per gesture, scores, focused recording, training, export
+    Popup {
+        id: trainingCenter
+        anchors.centerIn: parent
+        width: Math.min(860, window.width - 40)
+        height: Math.min(660, window.height - 40)
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onOpened: dashboard.openTraining()
+        onClosed: dashboard.closeTraining()
+        padding: 20
+        background: Rectangle { radius: 16; color: "white"; border.color: window.line }
+        contentItem: ColumnLayout {
+            spacing: 10
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    spacing: 2
+                    TextLabel { text: "학습 센터"; font.pixelSize: 22; font.bold: true }
+                    TextLabel {
+                        text: "녹화 → 학습 → 동작별 성적 확인 → 부족한 동작 집중 녹화 → 다시 학습 → 내보내기"
+                        font.pixelSize: 12; color: window.muted
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                ActionButton { text: "새로고침"; enabled: dashboard.trainingBusy === ""; onClicked: dashboard.refreshTraining() }
+                ActionButton { text: "닫기"; onClicked: trainingCenter.close() }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Chip { text: dashboard.trainingData !== "" ? dashboard.trainingData : "녹화 읽는 중…" }
+                Chip { text: dashboard.trainingModel !== "" ? dashboard.trainingModel : "모델 확인 중…" }
+                Item { Layout.fillWidth: true }
+                TextLabel { visible: dashboard.trainingBusy !== ""; text: dashboard.trainingBusy; font.pixelSize: 12; color: window.muted }
+            }
+            TextLabel {
+                Layout.fillWidth: true
+                text: "인식 = 학습에 쓰지 않은 자세에서 맞힌 비율 (처음 보는 상황에서의 실력) · 학습 = 학습한 데이터를 맞힌 비율 · 괄호는 규칙만 썼을 때"
+                font.pixelSize: 11; color: window.muted; wrapMode: Text.Wrap
+            }
+            ScrollView {
+                id: trainScroll
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: availableWidth
+                ColumnLayout {
+                    width: trainScroll.availableWidth
+                    spacing: 8
+                    Repeater {
+                        model: dashboard.trainingRows
+                        delegate: Rectangle {
+                            id: row
+                            required property var modelData
+                            Layout.fillWidth: true
+                            implicitHeight: rowBody.implicitHeight + 24
+                            radius: 12
+                            color: modelData.level === "need" ? "#FFF8EA" : "#F7FAFB"
+                            border.color: modelData.level === "need" ? "#F2B544" : window.line
+                            RowLayout {
+                                id: rowBody
+                                anchors.fill: parent
+                                anchors.margins: 12
+                                spacing: 14
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 5
+                                    RowLayout {
+                                        spacing: 8
+                                        TextLabel { text: row.modelData.name; font.pixelSize: 16; font.bold: true }
+                                        Chip {
+                                            warn: row.modelData.level === "need"
+                                            text: row.modelData.level === "ok" ? "좋아요" : row.modelData.level === "need" ? "더 녹화" : "다시 학습"
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        TextLabel { text: "데이터"; font.pixelSize: 12; color: window.muted; Layout.preferredWidth: 40 }
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            Layout.maximumWidth: 260
+                                            height: 8; radius: 4; color: "#E3E9EE"
+                                            Rectangle {
+                                                width: parent.width * Math.max(0, Math.min(1, row.modelData.data_ratio))
+                                                height: parent.height; radius: 4
+                                                color: row.modelData.data_ratio >= 1 ? "#45E0B4" : "#F2B544"
+                                            }
+                                        }
+                                        TextLabel { text: row.modelData.data_text; font.pixelSize: 12 }
+                                    }
+                                    RowLayout {
+                                        spacing: 16
+                                        TextLabel { text: row.modelData.score_text; font.pixelSize: 13; font.bold: true }
+                                        TextLabel { text: row.modelData.fit_text; font.pixelSize: 12; color: window.muted }
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: "→ " + row.modelData.advice
+                                        font.pixelSize: 12
+                                        color: row.modelData.level === "need" ? "#8A5A00" : window.muted
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                                ActionButton {
+                                    text: "집중 녹화"
+                                    accent: row.modelData.level === "need"
+                                    enabled: !dashboard.trainingRunning
+                                    onClicked: { dashboard.focusRecord(row.modelData.key); trainingCenter.close() }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    TextLabel {
+                        Layout.fillWidth: true
+                        text: dashboard.trainingStage !== "" ? dashboard.trainingStage
+                              : "학습: 자세 하나씩 빼고 평가한 뒤 전체로 최종 모델을 만들어요 (CPU로 몇 분)"
+                        font.pixelSize: 13; wrapMode: Text.Wrap
+                    }
+                    Rectangle {
+                        visible: dashboard.trainingRunning || dashboard.trainingProgress > 0
+                        Layout.fillWidth: true
+                        height: 6; radius: 3; color: "#E3E9EE"
+                        Rectangle {
+                            width: parent.width * Math.max(0, Math.min(1, dashboard.trainingProgress))
+                            height: parent.height; radius: 3; color: "#45E0B4"
+                        }
+                    }
+                    Canvas {
+                        id: lossChart
+                        visible: dashboard.trainingLosses.length > 1
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 34
+                        property var losses: dashboard.trainingLosses
+                        onLossesChanged: requestPaint()
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.reset()
+                            var v = losses
+                            if (!v || v.length < 2) return
+                            var hi = Math.max.apply(null, v), lo = Math.min.apply(null, v)
+                            var span = Math.max(1e-6, hi - lo)
+                            ctx.strokeStyle = "#16846E"
+                            ctx.lineWidth = 2
+                            ctx.beginPath()
+                            for (var i = 0; i < v.length; i++) {
+                                var x = i / (v.length - 1) * (width - 4) + 2
+                                var y = 3 + (1 - (v[i] - lo) / span) * (height - 6)
+                                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+                            }
+                            ctx.stroke()
+                        }
+                    }
+                    TextLabel {
+                        Layout.fillWidth: true
+                        visible: dashboard.trainingNote !== ""
+                        text: dashboard.trainingNote
+                        font.pixelSize: 12; color: window.muted; wrapMode: Text.Wrap
+                    }
+                }
+                ActionButton {
+                    text: dashboard.trainingRunning ? "학습 멈춤" : "학습 시작"
+                    accent: !dashboard.trainingRunning
+                    enabled: dashboard.trainingBusy === "" && !dashboard.recActive
+                    onClicked: dashboard.trainingRunning ? dashboard.stopTraining() : dashboard.startTraining()
+                }
+                ActionButton {
+                    text: "내보내기"
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                    onClicked: dashboard.exportModel()
+                }
+                ActionButton { text: "폴더 열기"; onClicked: dashboard.openExports() }
             }
         }
     }

@@ -31,7 +31,7 @@ from src.motion_mode import ACTION_LABELS, MotionMode
 from src.palm_axes import PalmAxesCalibration, valid_axes
 from src.elbow_pivot import ElbowPivot
 from src.pose_tracker import DEFAULT_POSE_MODEL, PoseTracker, pick_arm
-from src.guided_recording import GuidedSession
+from src.guided_recording import GuidedSession, tasks_for
 from src.recorder import SessionRecorder
 from src.gesture_gate import DEFAULT_MODEL as GATE_MODEL, GestureGate, load_predictor
 from src.gesture_engine import GestureEngine, GestureResult
@@ -66,6 +66,8 @@ class UiState:
     rec_mode: str = "off"               # dataset recording (src/recorder.py): "off" | "guided" | "free"
     rec_advance: int = 0                # +1 per press of "start" in guided recording
     tcn_gate: bool = False              # right click / scroll grab confirmed by the trained model (src/gesture_gate.py)
+    rec_focus: str = ""                 # guided recording of one gesture only (training center "집중 녹화"); "" = all
+    model_version: int = 0              # +1 when the training center saved a new model: reload the gate
 
 
 @dataclass
@@ -701,6 +703,10 @@ class QtRuntime:
 
     def _gate_for(self, ui) -> Optional[GestureGate]:
         """The intent checker when it is switched on (and the model loads), else None."""
+        version = getattr(ui, "model_version", 0)
+        if version != getattr(self, "_model_version", 0):     # a new model was trained: load it next time
+            self._model_version = version
+            self.gate, self._gate_failed = None, False
         if not ui.tcn_gate or self._gate_failed:
             return None
         if self.gate is None:
@@ -740,13 +746,17 @@ class QtRuntime:
     def _recording_mode(self, t0: float, ui) -> bool:
         """Start / stop / steer the recording. True while a guided recording runs (the mouse must not move)."""
         mode = ui.rec_mode if ui.stage == "main" and not ui.use_index_pointer else "off"
-        if mode != self._rec_mode:
+        focus = getattr(ui, "rec_focus", "") if mode == "guided" else ""
+        if mode != self._rec_mode or focus != getattr(self, "_rec_focus", ""):
             self._stop_recording(t0)
             self._rec_mode = mode
+            self._rec_focus = focus
             if mode in ("guided", "free"):
                 self.mouse.release_all()
-                self._rec = SessionRecorder(self.rec_dir, mode, self._rec_meta(mode), now=t0)
-                self._guided = GuidedSession(self.engine.config) if mode == "guided" else None
+                meta = self._rec_meta(mode)
+                meta["focus"] = focus
+                self._rec = SessionRecorder(self.rec_dir, mode, meta, now=t0)
+                self._guided = GuidedSession(self.engine.config, tasks=tasks_for(focus)) if mode == "guided" else None
                 self._rec_adv_seen = ui.rec_advance
         if self._guided is not None:
             if ui.rec_advance != self._rec_adv_seen:
