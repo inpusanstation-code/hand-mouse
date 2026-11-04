@@ -92,6 +92,11 @@ class QtDashboard(QObject):
         self.profile = profiles.get_active(DEFAULT_CONFIG_PATH.parent)   # calibration profile in use
         self.motion_request = 0                                 # +1 per press of the motion-mode button
         self.palm_axes_requests = [0, 0, 0]                     # start / cancel / reset presses (palm cursor direction)
+        self.rec_mode = "off"                                   # dataset recording: off | guided | free
+        self.rec_advance = 0                                    # +1 per press of "start" in guided recording
+        self.rec_view = None                                    # latest recording view from the runtime
+        from src.gesture_gate import DEFAULT_MODEL
+        self.tcn_gate = DEFAULT_MODEL.exists()                  # intent check by the trained model: on when one exists
         self.palm_axes_view = (False, "", 0.0, "", False)       # running, prompt, progress, note, saved
         self.motion_state = (False, 0.0, "", 0.0, 0.0)           # (on, seconds left, last command, entering, leaving)
         self.motion_exit_until = 0.0                             # the "motion mode off" notice stays until then
@@ -363,6 +368,64 @@ class QtDashboard(QObject):
             return f"{prompt}  ·  {note} {int(progress * 100)}%"
         return prompt
 
+    # ------------------------------------------------------------------ dataset recording (src/recorder.py)
+    def _rec(self, key, default):
+        return (self.rec_view or {}).get(key, default)
+
+    @Property(str, notify=stateChanged)
+    def recMode(self):
+        return self.rec_mode
+
+    @Property(bool, notify=stateChanged)
+    def recActive(self):
+        return self.rec_view is not None
+
+    @Property(bool, notify=stateChanged)
+    def recWaiting(self):
+        return bool(self._rec("waiting", False))
+
+    @Property(str, notify=stateChanged)
+    def recPrompt(self):
+        return str(self._rec("prompt", ""))
+
+    @Property(str, notify=stateChanged)
+    def recSub(self):
+        return str(self._rec("sub", ""))
+
+    @Property(float, notify=stateChanged)
+    def recProgress(self):
+        return float(self._rec("progress", 0.0))
+
+    @Property(float, notify=stateChanged)
+    def recOverall(self):
+        return float(self._rec("overall", 0.0))
+
+    @Slot(str)
+    def setRecMode(self, mode):
+        if mode not in ("off", "guided", "free") or (mode != "off" and (self.stage_name != "main" or self.use_index_pointer)):
+            return
+        self.rec_mode = mode
+        self.stateChanged.emit()
+
+    @Property(bool, notify=stateChanged)
+    def tcnGate(self):
+        return bool(self.tcn_gate)
+
+    @Property(bool, notify=stateChanged)
+    def tcnAvailable(self):
+        from src.gesture_gate import DEFAULT_MODEL
+        return DEFAULT_MODEL.exists()
+
+    @Slot(bool)
+    def setTcnGate(self, on):
+        self.tcn_gate = bool(on)
+        self.stateChanged.emit()
+
+    @Slot()
+    def recStart(self):
+        self.rec_advance += 1
+        self.stateChanged.emit()
+
     @Slot()
     def beginPalmCalibration(self):
         if self.stage_name != "main" or self.use_index_pointer:
@@ -519,6 +582,7 @@ class QtDashboard(QObject):
             show_fingertips=self.show_fingertips, profile=self.profile, motion_request=self.motion_request,
             palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
             palm_axes_reset=self.palm_axes_requests[2],
+            rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate,
         )
 
     def apply_snapshot(self, snap):
@@ -535,6 +599,10 @@ class QtDashboard(QObject):
         if snap.tracking is None:
             self.tracking_close_requested = False
         self.toggle_progress = getattr(snap, "toggle_progress", 0.0)
+        rec_view = getattr(snap, "rec", None)
+        if rec_view != self.rec_view:
+            self.rec_view = rec_view
+            self.stateChanged.emit()
         palm_view = getattr(snap, "palm_axes", None)
         if palm_view is not None and palm_view != self.palm_axes_view:
             self.palm_axes_view = palm_view

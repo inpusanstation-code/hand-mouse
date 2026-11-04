@@ -321,6 +321,21 @@ ApplicationWindow {
                                     onClicked: dashboard.resetPalmCalibration()
                                 }
                             }
+                            SectionLabel { visible: !dashboard.pointerOnly && dashboard.tcnAvailable; text: "손짓 확인 (TCN: 우클릭·스크롤)" }
+                            Segmented {
+                                visible: !dashboard.pointerOnly && dashboard.tcnAvailable
+                                options: [["off", "끔"], ["on", "켬"]]
+                                current: dashboard.tcnGate ? "on" : "off"
+                                onPicked: function (value) { dashboard.setTcnGate(value === "on") }
+                            }
+                            SectionLabel { visible: !dashboard.pointerOnly; text: "학습 데이터 녹화" }
+                            Segmented {
+                                visible: !dashboard.pointerOnly
+                                enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                                options: [["off", "끔"], ["guided", "안내 녹화"], ["free", "평소 녹화"]]
+                                current: dashboard.recMode
+                                onPicked: function (value) { dashboard.setRecMode(value) }
+                            }
                             ColumnLayout {
                                 visible: dashboard.pointerOnly
                                 Layout.fillWidth: true
@@ -533,6 +548,45 @@ ApplicationWindow {
                             wrapMode: Text.Wrap
                         }
                         ActionButton { text: "취소"; onClicked: dashboard.cancelPointerCalibration() }
+                    }
+                    RowLayout {
+                        visible: dashboard.recActive
+                        Layout.fillWidth: true
+                        spacing: 10
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            TextLabel {
+                                Layout.fillWidth: true
+                                visible: dashboard.recPrompt !== ""
+                                text: dashboard.recPrompt
+                                font.pixelSize: 22
+                                font.bold: true
+                                wrapMode: Text.Wrap
+                            }
+                            Rectangle {
+                                visible: dashboard.recMode === "guided" && dashboard.recPrompt !== ""
+                                Layout.fillWidth: true
+                                height: 6
+                                radius: 3
+                                color: "#E3E9EE"
+                                Rectangle {
+                                    width: parent.width * Math.max(0, Math.min(1, dashboard.recProgress))
+                                    height: parent.height
+                                    radius: 3
+                                    color: "#45E0B4"
+                                }
+                            }
+                            TextLabel {
+                                Layout.fillWidth: true
+                                text: dashboard.recSub
+                                font.pixelSize: 12
+                                color: window.muted
+                                wrapMode: Text.Wrap
+                            }
+                        }
+                        ActionButton { visible: dashboard.recWaiting; text: "시작"; onClicked: dashboard.recStart() }
+                        ActionButton { visible: dashboard.recMode !== "off"; text: "녹화 끝"; onClicked: dashboard.setRecMode("off") }
                     }
                     RowLayout {
                         visible: dashboard.palmCalibrating || (dashboard.palmAxesHint !== "" && !dashboard.calibratingPointer)

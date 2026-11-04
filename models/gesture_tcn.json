@@ -1,0 +1,153 @@
+{
+  "classes": [
+    "none",
+    "thumb_index",
+    "thumb_ring"
+  ],
+  "window": 15,
+  "features": 133,
+  "feature_version": "local3d-v1",
+  "threshold": 0.7,
+  "frames_in_a_row": 3,
+  "epochs": 25,
+  "trained": "2026-11-05 03:39:12",
+  "data": [
+    {
+      "file": "20261105-030947-guided.jsonl.gz",
+      "pc": "DESKTOP-09LB4VQ",
+      "camera": {
+        "source": "0",
+        "mode": [
+          1280,
+          720,
+          30.0
+        ],
+        "mirror": true,
+        "phone_web": false,
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC DESKTOP-09LB4VQ)"
+      },
+      "frames": 30697
+    }
+  ],
+  "held_out_results": [
+    {
+      "posture": 0,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            8,
+            15
+          ],
+          "thumb_index": [
+            10,
+            15
+          ]
+        },
+        "misfires": {
+          "left_click": 4,
+          "drag_hold": 2,
+          "right_click": 5,
+          "task_switcher": 2,
+          "scroll_grab": 2
+        },
+        "confused": 1
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            14,
+            15
+          ],
+          "thumb_index": [
+            13,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 2
+        },
+        "confused": 0
+      }
+    },
+    {
+      "posture": 1,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            11,
+            15
+          ],
+          "thumb_index": [
+            10,
+            15
+          ]
+        },
+        "misfires": {
+          "right_click": 4,
+          "left_click": 12,
+          "scroll_grab": 4,
+          "task_switcher": 1
+        },
+        "confused": 7
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            11,
+            15
+          ],
+          "thumb_index": [
+            13,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 1,
+          "thumb_ring": 0
+        },
+        "confused": 5
+      }
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            6,
+            15
+          ],
+          "thumb_index": [
+            5,
+            15
+          ]
+        },
+        "misfires": {
+          "right_click": 3,
+          "left_click": 5,
+          "drag_hold": 4,
+          "scroll_grab": 2,
+          "task_switcher": 1
+        },
+        "confused": 0
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            11,
+            15
+          ],
+          "thumb_index": [
+            12,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 1,
+          "thumb_ring": 2
+        },
+        "confused": 0
+      }
+    }
+  ]
+}

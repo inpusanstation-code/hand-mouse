@@ -98,6 +98,17 @@ class HandDetection:
     handedness: str  # "Left" or "Right"
     score: float
     from_crop: bool = False  # found in the hand-area crop (landmarks already mapped back)
+    # 3D joints in metres around the hand's centre (MediaPipe hand_world_landmarks): the same hand shape gives about the
+    # same values from any camera angle. Kept for the dataset recorder (src/recorder.py); None if the model gave none.
+    world: Optional[List[Tuple[float, float, float]]] = None
+
+
+def _world(result, idx: int) -> Optional[List[Tuple[float, float, float]]]:
+    """3D hand joints of detection `idx` (metres, hand-centred), or None."""
+    world = getattr(result, "hand_world_landmarks", None)
+    if not world or idx >= len(world) or not world[idx]:
+        return None
+    return [(float(p.x), float(p.y), float(p.z)) for p in world[idx]]
 
 
 def ensure_model_exists(model_path: Path = DEFAULT_MODEL_PATH) -> Path:
@@ -207,7 +218,8 @@ class HandTracker:
             if result.handedness and idx < len(result.handedness) and result.handedness[idx]:
                 handedness = result.handedness[idx][0].category_name or "Right"
                 score = float(result.handedness[idx][0].score or 1.0)
-            detections.append(HandDetection(landmarks=landmarks, handedness=handedness, score=score))
+            detections.append(HandDetection(landmarks=landmarks, handedness=handedness, score=score,
+                                            world=_world(result, idx)))
 
         return detections
 
@@ -276,7 +288,7 @@ class HandTracker:
                 handedness = result.handedness[idx][0].category_name or "Right"
                 score = float(result.handedness[idx][0].score or 1.0)
             detections.append(HandDetection(landmarks=landmarks, handedness=handedness, score=score,
-                                            from_crop=True))
+                                            from_crop=True, world=_world(result, idx)))
         return detections
 
     def close(self) -> None:

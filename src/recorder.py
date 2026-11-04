@@ -1,0 +1,116 @@
+"""
+Dataset recorder (2026-11-05): every frame of a session to `recordings/<time>-<mode>.jsonl.gz`, for training a
+gesture model (TCN) that checks / replaces the hand-written rules.
+
+One JSON object per line:
+- `{"type": "meta", ...}` first: schema, PC, user, camera (source, real mode, mirror, a free note such as "phone
+  camera"), control hand, profile, mode ("guided" | "free"), the rule thresholds in use. Recordings from different PCs
+  and cameras must never be mixed up (2026-11-04: tuning from the home PC's phone camera looked like the old webcam's).
+- `{"type": "frame", ...}` per camera frame: time, the hand's image joints (x, y, z), its 3D joints in metres
+  (`world`, nearly the same from any camera angle), handedness and score, the latest Pose shoulders / elbows / wrists,
+  the LABEL (what the user was asked to do, see src/guided_recording.py, or "none" while just using the mouse) and
+  what the RULES decided (action, gesture, multiplier, curl), the cursor.
+- `{"type": "event", ...}`: the user's "that was wrong" mark (F key / button) and the like.
+- `{"type": "end", ...}` last: frame counts per label.
+
+No camera images are stored. About 2-3 kB per frame before compression.
+"""
+from __future__ import annotations
+
+import getpass
+import gzip
+import json
+import socket
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+SCHEMA = "hand-mouse-recording/1"
+
+
+def _r(v: float, n: int = 4) -> float:
+    return round(float(v), n)
+
+
+def machine_info() -> Dict[str, str]:
+    info = {}
+    try:
+        info["pc"] = socket.gethostname()
+    except Exception:
+        pass
+    try:
+        info["user"] = getpass.getuser()
+    except Exception:
+        pass
+    return info
+
+
+class SessionRecorder:
+    def __init__(self, folder: Path, mode: str, meta: Dict[str, Any], now: Optional[float] = None) -> None:
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        self.path = folder / f"{stamp}-{mode}.jsonl.gz"
+        self._f = gzip.open(self.path, "wt", encoding="utf-8")
+        self.mode = mode
+        self.counts: Counter = Counter()
+        self.frames = 0
+        self.marks = 0
+        self._t0 = time.perf_counter() if now is None else now
+        self._write({"type": "meta", "schema": SCHEMA, "mode": mode, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                     **machine_info(), **meta})
+
+    def _write(self, obj: Dict[str, Any]) -> None:
+        self._f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    def frame(self, now: float, hand: Any = None, pose: Optional[Sequence[Sequence[float]]] = None,
+              label: Optional[Dict[str, Any]] = None, rule: Optional[Dict[str, Any]] = None,
+              cursor: Optional[Tuple[int, int]] = None) -> None:
+        rec: Dict[str, Any] = {"type": "frame", "t": _r(now - self._t0, 3)}
+        if hand is not None:
+            rec["lm"] = [[_r(p.x), _r(p.y), _r(p.z)] for p in hand.landmarks]
+            if getattr(hand, "world", None):
+                rec["world"] = [[_r(x, 5), _r(y, 5), _r(z, 5)] for x, y, z in hand.world]
+            rec["hand"] = [hand.handedness, _r(hand.score, 3)]
+        if pose is not None:
+            rec["pose"] = [[_r(v, 4) for v in p] for p in pose]
+        lab = dict(label or {"target": "none"})
+        rec["label"] = lab
+        if rule:
+            rec["rule"] = rule
+        if cursor is not None:
+            rec["cursor"] = [int(cursor[0]), int(cursor[1])]
+        self._write(rec)
+        self.frames += 1
+        self.counts[str(lab.get("target", "none")) if hand is not None else "no_hand"] += 1
+
+    def event(self, now: float, kind: str, info: Optional[Dict[str, Any]] = None) -> None:
+        self._write({"type": "event", "t": _r(now - self._t0, 3), "kind": kind, **(info or {})})
+        if kind == "mark":
+            self.marks += 1
+
+    def close(self) -> Path:
+        if self._f is not None:
+            self._write({"type": "end", "frames": self.frames, "counts": dict(self.counts), "marks": self.marks})
+            self._f.close()
+            self._f = None
+        return self.path
+
+
+def read_session(path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(meta, frames, events) of a recording."""
+    meta: Dict[str, Any] = {}
+    frames: List[Dict[str, Any]] = []
+    events: List[Dict[str, Any]] = []
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            kind = obj.get("type")
+            if kind == "meta":
+                meta = obj
+            elif kind == "frame":
+                frames.append(obj)
+            elif kind == "event":
+                events.append(obj)
+    return meta, frames, events
