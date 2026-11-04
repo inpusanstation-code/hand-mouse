@@ -93,6 +93,8 @@ class QtDashboard(QObject):
         self.motion_request = 0                                 # +1 per press of the motion-mode button
         self.motion_state = (False, 0.0, "", 0.0, 0.0)           # (on, seconds left, last command, entering, leaving)
         self.motion_exit_until = 0.0                             # the "motion mode off" notice stays until then
+        self.toggle_progress = 0.0                               # progress of the on/off sign hold
+        self.close_state = (0.0, 0.0)                            # (hold progress 0..1, seconds left to confirm) of the close-window sign
         self.motion_badge = (False, "")                          # (visible, text) as last shown
         saved_anchor = self.preferences.value("pointerAnchor", "index", type=str)
         # Which point of the hand the cursor follows: index fingertip or palm centre.
@@ -307,6 +309,15 @@ class QtDashboard(QObject):
             return True, text + (f" · {last}" if last else "")
         if entering >= 0.2:
             return True, f"모션 모드 진입 중… {int(entering * 100)}%"
+        progress, pending, notice = (tuple(self.close_state) + ("",))[:3]
+        if notice:
+            return True, notice
+        if self.toggle_progress >= 0.15:
+            return True, f"마우스 제어 켜기/끄기 자세 유지 중… {int(self.toggle_progress * 100)}%"
+        if progress >= 0.15:
+            return True, (f"창 닫는 중… {int(progress * 100)}%" if pending > 0 else f"창 닫기 자세 유지 중… {int(progress * 100)}%")
+        if pending > 0:
+            return True, f"창 닫기? 같은 손 모양 한 번 더 ({pending:.0f}초)"
         if time.perf_counter() < self.motion_exit_until:
             return True, "모션 모드 꺼짐"
         return False, ""
@@ -486,6 +497,9 @@ class QtDashboard(QObject):
                 self.set_tracking_view(snap.tracking)
         if snap.tracking is None:
             self.tracking_close_requested = False
+        self.toggle_progress = getattr(snap, "toggle_progress", 0.0)
+        if snap.close_sign is not None:
+            self.close_state = snap.close_sign
         if snap.motion is not None:
             if self.motion_state[0] and not snap.motion[0]:
                 self.motion_exit_until = time.perf_counter() + 1.8       # keep a short "off" notice on screen

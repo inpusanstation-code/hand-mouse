@@ -31,9 +31,10 @@ def test_glides_from_current_position_to_target_over_one_frame():
     it.set_target(100, 100, now=0.0)
     it.set_target(130, 100, now=FRAME)        # next camera frame
     assert it.position_at(FRAME) == pytest.approx((100, 100))
-    assert it.position_at(FRAME + FRAME / 2) == pytest.approx((115, 100), abs=0.5)
+    # the glide takes glide_fraction (0.5) of a frame interval: the cursor is there early instead of one frame late
+    assert it.position_at(FRAME + FRAME / 4) == pytest.approx((115, 100), abs=0.5)
     assert it.position_at(FRAME * 2) == pytest.approx((130, 100))
-    assert it.done_at(FRAME * 2)
+    assert it.done_at(FRAME * 1.5)
     it.close()
 
 

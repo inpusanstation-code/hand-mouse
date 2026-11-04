@@ -25,6 +25,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import cv2
 
 from src.failure_log import FailureRecorder
+from src.close_sign import CloseSign
+from src.toggle_sign import ToggleSign
 from src.motion_mode import ACTION_LABELS, MotionMode
 from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
@@ -75,6 +77,8 @@ class Snapshot:
     failures: Optional[Tuple[str, str]] = None            # summary, last file (when changed)
     recent_line: Optional[str] = None                     # new tracking result line
     message: str = ""                                      # one-off console message
+    toggle_progress: float = 0.0                          # progress 0..1 of the on/off sign hold
+    close_sign: Optional[Tuple[float, float, str]] = None  # (progress 0..1 of the close-window hold, seconds left to confirm, notice)
     motion: Optional[Tuple[bool, float, str, float, float]] = None  # on, seconds left (0 = no timeout), last command, entering 0..1, leaving 0..1
 
 
@@ -131,6 +135,9 @@ class QtRuntime:
         self._det_path = ""
         self._applied_profile = engine.profile_name
         self.motion = MotionMode(engine.config)
+        self.close_sign = CloseSign(engine.config)
+        self.toggle_sign = ToggleSign(engine.config)
+        self._close_notice, self._close_notice_until = "", 0.0
         self._motion_seen = 0
         self._motion_last = ""
         self._was_dragging = False
@@ -318,7 +325,9 @@ class QtRuntime:
             self.hand_crop.update(detections[0].landmarks, frame.shape[1], frame.shape[0])
         else:
             self.hand_crop.reset()
-        motion_active = self._motion(t0, ui, detections)
+        toggle_hold = self._toggle_sign(t0, ui, detections)
+        motion_active = (not toggle_hold) and self._motion(t0, ui, detections)
+        close_hold = (not motion_active) and (not toggle_hold) and self._close_sign(t0, ui, detections)
         if self._had_hand and not detections:
             mouse.close_switcher(confirm=False)
             mouse.release_all()
@@ -392,7 +401,7 @@ class QtRuntime:
                 color = (189, 229, 70) if number == 1 or number in contacts else (245, 245, 245)
                 cv2.circle(frame, (px, py), 10, (49, 35, 17), -1, cv2.LINE_AA)
                 cv2.putText(frame, str(number), (px - 5, py + 5), cv2.FONT_HERSHEY_SIMPLEX, .46, color, 1, cv2.LINE_AA)
-        elif detections and not index_mode and not motion_active:
+        elif detections and not index_mode and not motion_active and not close_hold and not toggle_hold:
             hand = detections[0]
             result = engine.process(hand.landmarks)
             if not self.paused:
@@ -432,6 +441,9 @@ class QtRuntime:
             recent_line=self._pending_recent, message=self._pending_message,
             motion=(self.motion.active, self.motion.remaining(t0), self._motion_last, self.motion.entering(t0),
                     self.motion.leaving(t0)),
+            toggle_progress=self.toggle_sign.progress(t0),
+            close_sign=(self.close_sign.progress(t0), self.close_sign.pending(t0),
+                        self._close_notice if time.perf_counter() < self._close_notice_until else ""),
         )
         self._pending_failures = self._pending_recent = None
         self._pending_message = ""
@@ -452,6 +464,81 @@ class QtRuntime:
                 return True
         return bool(self.mouse.is_dragging or self.mouse.scroll_coasting)
 
+    def _toggle_sign(self, t0: float, ui, detections) -> bool:
+        """The V sign held still switches the mouse control on / off (like the Space key). It keeps watching while the control is
+        off. True while the sign is held with the control ON (the cursor and pinches are suspended, so the fingers do not move it)."""
+        ready = ui.stage == "main" and not ui.calibrating and not ui.use_index_pointer and self.test is None
+        if not ready or not detections:
+            if self.toggle_sign.progress(t0) > 0 or self.toggle_sign.last_pose:
+                self.toggle_sign.update(t0, None)
+            return False
+        blocked = False
+        if not self.paused:
+            quiet = self.toggle_sign.cfg("toggle_sign_quiet")
+            for g in (self.engine, self.pointer.gestures):
+                last = max(g._index_released_at, g._scroll_released_at, g._pinky_fired_at,
+                           max(g._last_trigger_times.values(), default=-1e9))
+                if g._index_pinched or g._secondary_since or (t0 - last) < quiet:
+                    blocked = True
+            blocked = blocked or bool(self.mouse.is_dragging or self.mouse.scroll_coasting)
+        was_holding = self.toggle_sign.holding(t0)
+        event = self.toggle_sign.update(t0, detections[0].landmarks, blocked=blocked)
+        if event is not None:
+            self.mouse.release_all()
+            self.engine.reset()
+            self.pointer.reset()
+            self._key(ord(" "), t0)                         # same as the Space key: toggles the control
+            text = "마우스 제어 꺼짐 (V 손 모양)" if self.paused else "마우스 제어 켜짐 (V 손 모양)"
+            self._close_notice, self._close_notice_until = text, time.perf_counter() + 2.5
+            self.failures.trigger(t0, "toggle_sign", note=text)
+        holding = self.toggle_sign.holding(t0) and not self.paused
+        if holding and not was_holding:
+            self.mouse.release_all()
+            self.engine.reset()
+            self.pointer.reset()
+        return holding
+
+    def _close_sign(self, t0: float, ui, detections) -> bool:
+        """The rock sign held still asks to close the window; once more within a few seconds sends Alt+F4.
+        True while the sign is held (the pinch controls are suspended then, so the folded fingers do not run the cursor)."""
+        ready = ui.stage == "main" and not self.paused and not ui.calibrating and not ui.use_index_pointer
+        if not ready or not detections:
+            if self.close_sign.progress(t0) > 0 or self.close_sign.last_pose:
+                self.close_sign.update(t0, None)
+            return False
+        quiet = self.close_sign.cfg("close_sign_quiet")
+        blocked = False
+        for g in (self.engine, self.pointer.gestures):
+            last = max(g._index_released_at, g._scroll_released_at, g._pinky_fired_at,
+                       max(g._last_trigger_times.values(), default=-1e9))
+            if g._index_pinched or g._secondary_since or (t0 - last) < quiet:
+                blocked = True
+        blocked = blocked or bool(self.mouse.is_dragging or self.mouse.scroll_coasting)
+        was_holding = self.close_sign.holding(t0)
+        event = self.close_sign.update(t0, detections[0].landmarks, blocked=blocked)
+        if event is not None:
+            if event.kind == "ask":
+                self._say("창을 닫을까요? 4초 안에 같은 손(검지·새끼만 펴기)을 한 번 더 하면 닫습니다", 4.0)
+            elif event.kind == "close":
+                sent = self.mouse.send_motion_action("close_window")
+                info = dict(getattr(self.mouse, "last_close_info", {}) or {})
+                event.info.update({"sent": bool(sent), "window": info})
+                if sent:
+                    self._close_notice, self._close_notice_until = "창 닫기 보냄 (Alt+F4)", time.perf_counter() + 2.0
+                elif info.get("own"):
+                    self._close_notice, self._close_notice_until = "이 앱이 앞에 있어 닫지 않음: 닫을 창을 앞에 두세요", time.perf_counter() + 3.0
+                else:
+                    self._close_notice, self._close_notice_until = "닫을 수 없는 창 (바탕화면·작업표시줄)", time.perf_counter() + 3.0
+                self._say(self._close_notice, 3.0)
+            if event.kind in ("ask", "close"):
+                self.failures.trigger(t0, f"close_{event.kind}", note=json.dumps(event.info, ensure_ascii=False))
+        holding = self.close_sign.holding(t0)
+        if holding and not was_holding:
+            self.mouse.release_all()
+            self.engine.reset()
+            self.pointer.reset()
+        return holding
+
     def _motion(self, t0: float, ui, detections) -> bool:
         """Run motion mode for this frame. True while it is on (the pinch controls are then suspended)."""
         ready = ui.stage == "main" and not self.paused and not ui.calibrating
@@ -465,6 +552,8 @@ class QtRuntime:
             return False
         lm = detections[0].landmarks if detections else None
         event = self.motion.update(t0, lm, request=request, blocked=self._motion_blocked(t0))
+        if self._motion_last.startswith("창 닫기?") and self.motion.close_pending(t0) <= 0:
+            self._motion_last = ""            # the question ran out
         if event is not None:
             if event.kind == "enter":
                 self.mouse.release_all()
@@ -474,9 +563,12 @@ class QtRuntime:
                 self._say("모션 모드 켜짐: 손을 펴고 좌우로 쓸어 보세요", 3.0)
             elif event.kind == "exit":
                 self._say(f"모션 모드 꺼짐 ({event.info.get('why')})", 2.0)
+            elif event.kind == "close_ask":
+                self._motion_last = "창 닫기? 한 번 더 아래로"
+                self._say("창을 닫을까요? 3초 안에 손을 올렸다 한 번 더 아래로 쓸면 닫습니다", 3.0)
             elif event.kind == "swipe":
-                self.mouse.send_motion_action(event.action)
-                self._motion_last = ACTION_LABELS.get(event.action, event.action)
+                sent = self.mouse.send_motion_action(event.action)
+                self._motion_last = ACTION_LABELS.get(event.action, event.action) if sent else "닫을 수 없는 창"
                 self._say(f"모션: {self._motion_last}", 1.5)
             if self.failures.trigger(t0, f"motion_{event.kind}", note=json.dumps(event.info, ensure_ascii=False)):
                 pass
@@ -499,16 +591,31 @@ class QtRuntime:
             "dk": getattr(g, "last_desktop", None),            # show-desktop posture: tuck, hold, activity
             "motion": True if self.motion.active else None,
             "mo_miss": self.motion.last_miss if self.motion.active else None,   # biggest refused stroke and why
+            "sign": [self.close_sign.last_pose, round(self.close_sign.progress(t0), 2), round(self.toggle_sign.progress(t0), 2)],   # rock sign pose?, its hold progress, V sign progress
             "pk": getattr(g, "last_pinky", None),               # thumb+pinky acceptance conditions
             "hold": getattr(g, "last_hold", None),   # thumb+index: (hold dist, release thr, tip dist)
             "d": {k: round(float(v), 3) for k, v in d.items()} if isinstance(d, dict) and d else None,
             "click_style": ui_style(self.ui) if index_mode else None,
         }
+        # Win+D fired: keep the seconds before it (a firing used to leave no record unless another event was near)
+        if action == "show_desktop":
+            if self.failures.trigger(t0, "desktop", note=json.dumps(getattr(g, "last_desktop", None))):
+                self._say("기록: 바탕화면 보기")
+        # a right / left click fired: keep the seconds before it too (a false click used to leave no record)
+        if action in ("right_click", "left_click") and not self.paused:
+            if self.failures.trigger(t0, "click", note=f"{action} {json.dumps(d, ensure_ascii=False) if isinstance(d, dict) else ''}"):
+                self._say("기록: 클릭")
         # a drag starting (button down) is an event worth keeping with the seconds before it
         dragging = action == "drag_hold"
         if dragging and not self._was_dragging and not self.paused:
             if self.failures.trigger(t0, "drag_started", note=f"held_ms={held}"):
                 self._say("기록: 드래그 시작")
+        # a drag ending: keep the last seconds too (a stroke longer than the 3 s before drag_started was lost)
+        if dragging and not self._was_dragging:
+            self._drag_began = t0
+        if self._was_dragging and not dragging and not self.paused and t0 - getattr(self, "_drag_began", t0) >= 0.3:
+            if self.failures.trigger(t0, "drag_ended", note=f"seconds={t0 - self._drag_began:.2f}"):
+                self._say("기록: 드래그 끝", 1.0)
         self._was_dragging = dragging
         # scroll inertia: keep the numbers of every launch / refusal (raw vs used speed, axis, directions)
         li = getattr(self.mouse, "last_inertia", None)

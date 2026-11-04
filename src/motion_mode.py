@@ -42,22 +42,39 @@ ACTION_KEYS: Dict[str, Tuple[str, ...]] = {
     "forward": ("alt", "right"),
     "tab_prev": ("ctrl", "shift", "tab"),
     "tab_next": ("ctrl", "tab"),
+    "close_window": ("alt", "f4"),     # only after the two-step confirmation below
 }
-ACTION_LABELS = {"back": "뒤로", "forward": "앞으로", "tab_prev": "이전 탭", "tab_next": "다음 탭"}
+ACTION_LABELS = {"back": "뒤로", "forward": "앞으로", "tab_prev": "이전 탭", "tab_next": "다음 탭", "close_window": "창 닫기"}
 DEFAULT_ACTIONS = {
     "nav": {"left": "back", "right": "forward"},
     "tab": {"left": "tab_prev", "right": "tab_next"},
 }
 
 DEFAULTS: Dict[str, Any] = {
+    "motion_close_enabled": 1.0,     # 1 = a downward swipe asks to close the window (Alt+F4), a second one within motion_close_confirm does it
+    "motion_close_confirm": 3.0,     # s the question stays open
+    "motion_close_min_dy": 0.15,     # net downward travel of the palm centre, frame widths
+    "motion_close_min_time": 0.10,
+    "motion_close_min_speed": 0.7,   # frame widths per s (faster than the horizontal swipes: a hand that is merely lowered is slower)
+    "motion_close_max_dx": 0.5,      # |dx| <= this * dy
+    "motion_close_cooldown": 0.8,    # s between two downward strokes (the raised hand must come back up first)
     "motion_enter_hold": 0.8,        # s the entry pose must be held
-    "motion_enter_still": 0.05,      # palm centre may move this much (frame widths) during the hold
+    "motion_enter_still": 0.03,      # palm centre may move this much (frame widths) during the hold
     "motion_enter_grace": 0.2,       # s the pose may drop out during the hold (a noisy frame) without starting over
     "motion_enter_quiet": 1.0,       # s after the last pinch / scroll / drag before entering
     "motion_timeout": 0.0,           # s without a swipe and motion mode ends (0 = it stays on: toggle)
     "motion_hand_lost_exit": 0.0,    # s without a hand and it ends (0 = never)
     "motion_thumb_out": 0.85,        # thumb_tuck >= this = thumb stuck out (entry pose; 5 % of ordinary fists reach 0.9)
-    "motion_fold_ratio": 1.2,        # finger curl ratio <= this = folded (a real fist is 0.6-0.9; a thumbs-up hand 0.7-1.3)
+    "motion_thumb_straight": 0.85,   # the thumb counts as stretched out at this straightness (tip-to-base over the three segments): the
+                                     # logs show 0.95-1.0 for a thumbs-up and 0.4-0.7 for every bent / folded / tucked thumb
+    "motion_thumb_up": 0.7,          # the entry thumb must also point UP (cos of its angle to straight up >= this, ~45 deg): thumbs-up. A
+                                     # stretched thumb pointing elsewhere is kept free for other commands (logs: thumbs-up 0.8-1.0)
+    "motion_thumb_len": 0.5,         # the thumb tip must also be this far (palm lengths) from its base: a fist whose thumb lies on the
+                                     # index is far from the ring/pinky knuckles too (tuck 1.2-1.4) but its thumb is folded (0.2-0.3)
+    "motion_max_palm_ratio": 1.7,    # a fist pointing at the camera foreshortens the palm (width / length 2.0-2.2 in the logs vs 0.9-1.5 for a
+                                     # thumbs-up), which inflates every thumb measure and made the pose look like a thumbs-up
+    "motion_fold_ratio": 1.05,       # finger curl ratio <= this = folded. A thumbs-up hand sits at 0.7-0.9 (median 0.77); a half fist
+                                     # (fingers loosely curled, the hand moving the cursor at 5-15x) at 1.0-1.4: 1.2 let it toggle the mode
     "motion_open_ratio": 1.3,        # a finger counts as fully extended at this curl ratio (extended ones sit at 1.5-1.8)
     "motion_open_min": 1.0,          # a stroke with any finger below this in any frame is refused ("bent")
     "motion_open_ratio_tab": 1.25,   # the same two lines for a stroke with the thumb tucked (finger ratios read lower then)
@@ -107,7 +124,13 @@ def hand_features(landmarks: Sequence[Any]) -> Dict[str, Any]:
     tuck = min(d2(pts[THUMB_TIP], pts[13]), d2(pts[THUMB_TIP], pts[17])) / palm_len
     cx = sum(pts[i][0] for i in PALM_POINTS) / len(PALM_POINTS)
     cy = sum(pts[i][1] for i in PALM_POINTS) / len(PALM_POINTS)
-    return {"curl": tuple(curl), "thumb_tuck": tuck, "palm": (cx, cy)}
+    thumb_len = d2(pts[THUMB_TIP], pts[2]) / palm_len     # thumb tip from its base: ~0.2-0.35 folded, 0.65-1.2 stuck out
+    segs = d3(pts[1], pts[2]) + d3(pts[2], pts[3]) + d3(pts[3], pts[4])
+    thumb_straight = d3(pts[1], pts[4]) / segs if segs > 1e-6 else 0.0   # 1.0 = the thumb is stretched out, wherever it points; 0.4-0.7 bent
+    tdx, tdy = pts[THUMB_TIP][0] - pts[2][0], pts[THUMB_TIP][1] - pts[2][1]
+    thumb_up = -tdy / math.hypot(tdx, tdy) if math.hypot(tdx, tdy) > 1e-6 else 0.0   # cos of the angle between the thumb and "up" on the screen
+    palm_ratio = d2(pts[5], pts[17]) / palm_len           # palm width / length: ~0.9-1.3 palm to the camera, 2+ when a fist points AT it
+    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy)}
 
 
 @dataclass
@@ -127,7 +150,7 @@ class MotionMode:
             for variant, mapping in config["motion_actions"].items():
                 if variant in self._actions and isinstance(mapping, dict):
                     for side, action in mapping.items():
-                        if side in ("left", "right") and action in ACTION_KEYS:
+                        if side in ("left", "right") and action in ACTION_KEYS and action != "close_window":
                             self._actions[variant][side] = action
         self.active = False
         self._entered_at = 0.0
@@ -150,6 +173,8 @@ class MotionMode:
         self._last_swipe_t = -1e9
         self._last_swipe_dir = 0
         self._last_swipe_speed = 0.0
+        self._close_ask_t = -1e9         # when the "close the window?" question was asked
+        self._close_last_t = -1e9
         self.last_features: Optional[Dict[str, Any]] = None
         self.last_swipe: Optional[Dict[str, Any]] = None
         self.entered_by = ""
@@ -177,6 +202,10 @@ class MotionMode:
             return 0.0
         return max(0.0, min(1.0, (now - self._exit_since) / self.cfg("motion_enter_hold")))
 
+    def close_pending(self, now: float) -> float:
+        """Seconds left to confirm closing the window (0 = nothing asked)."""
+        return max(0.0, self.cfg("motion_close_confirm") - (now - self._close_ask_t)) if self.active else 0.0
+
     def thumb_variant(self, tuck: float) -> Optional[str]:
         if tuck >= self.cfg("motion_thumb_nav"):
             return "nav"
@@ -186,7 +215,15 @@ class MotionMode:
 
     def entry_pose(self, f: Dict[str, Any]) -> bool:
         """Thumb stuck out and the other four fingers folded."""
-        return (f["thumb_tuck"] >= self.cfg("motion_thumb_out")
+        # The thumb is "out" when it is stretched (straight) and long, wherever it points. It used to be "far from the ring and
+        # little-finger knuckles", which depends on where the thumb is: a thumbs-up pointing sideways failed, a fist with the
+        # thumb bent underneath passed.
+        straight = f.get("thumb_straight")
+        thumb_out = (straight >= self.cfg("motion_thumb_straight")) if straight is not None             else f["thumb_tuck"] >= self.cfg("motion_thumb_out")
+        return (thumb_out
+                and f.get("thumb_up", 1.0) >= self.cfg("motion_thumb_up")
+                and f.get("thumb_len", 9.9) >= self.cfg("motion_thumb_len")
+                and f.get("palm_ratio", 0.0) <= self.cfg("motion_max_palm_ratio")
                 and max(f["curl"]) <= self.cfg("motion_fold_ratio"))
 
     def open_hand(self, f: Dict[str, Any]) -> bool:
@@ -220,6 +257,7 @@ class MotionMode:
         self._last_swipe_t = -1e9
         self._last_swipe_dir = 0
         self._last_swipe_speed = 0.0
+        self._close_ask_t = self._close_last_t = -1e9
         return MotionEvent("enter", {"how": how})
 
     def _exit(self, now: float, why: str) -> MotionEvent:
@@ -227,6 +265,7 @@ class MotionMode:
         self._hist.clear()
         self._enter_since = None
         self._exit_since = None
+        self._close_ask_t = -1e9
         return MotionEvent("exit", {"why": why, "seconds": round(now - self._entered_at, 2)})
 
     # ------------------------------------------------------------------ per frame
@@ -344,6 +383,10 @@ class MotionMode:
         if not self._settled or now - self._last_swipe_t < self.cfg("motion_swipe_cooldown"):
             return None
         h = list(self._hist)
+        if self.cfg("motion_close_enabled") >= 1.0:
+            down = self._down_stroke(now, h)
+            if down is not None:
+                return down
         best_miss: Optional[Dict[str, Any]] = None
         for start in range(len(h) - 3):
             ev, miss = self._stroke(now, h[start:], h)
@@ -353,6 +396,46 @@ class MotionMode:
             if miss is not None and (best_miss is None or abs(miss["dx"]) > abs(best_miss["dx"])):
                 best_miss = miss
         self.last_miss = best_miss
+        return None
+
+    def _down_stroke(self, now: float, h: List[Tuple[float, float, float, bool, Optional[str], float, float]]
+                     ) -> Optional[MotionEvent]:
+        """A fast straight DOWNWARD stroke of the open hand: the first asks to close the window, a second within
+        motion_close_confirm closes it. (Image y grows downward, so dy > 0 is down.)"""
+        if now - self._close_last_t < self.cfg("motion_close_cooldown"):
+            return None
+        for start in range(len(h) - 3):
+            seg = h[start:]
+            dt, dx, dy = seg[-1][0] - seg[0][0], seg[-1][1] - seg[0][1], seg[-1][2] - seg[0][2]
+            if dy < self.cfg("motion_close_min_dy") or dt < self.cfg("motion_close_min_time"):
+                continue
+            if abs(dx) > self.cfg("motion_close_max_dx") * dy or dy / dt < self.cfg("motion_close_min_speed"):
+                continue
+            path = sum(math.hypot(seg[k + 1][1] - seg[k][1], seg[k + 1][2] - seg[k][2]) for k in range(len(seg) - 1))
+            if path > self.cfg("motion_swipe_straight") * math.hypot(dx, dy):
+                continue
+            tucked = sum(1 for w in h if w[5] <= self.cfg("motion_thumb_tab"))
+            suffix = "_tab" if tucked >= self.cfg("motion_tab_frames") else ""
+            open_thr, bent_thr = self.cfg("motion_open_ratio" + suffix), self.cfg("motion_open_min" + suffix)
+            if not (seg[0][6] >= open_thr and seg[-1][6] >= open_thr):
+                continue
+            if sum(1 for q in seg if q[6] >= open_thr) / len(seg) < self.cfg("motion_swipe_open_frac"):
+                continue
+            if min(w[6] for w in h) < bent_thr:
+                continue
+            recent = [q for q in seg if seg[-1][0] - q[0] <= 0.15]
+            if len(recent) < 2 or recent[-1][2] - recent[0][2] < self.cfg("motion_recent_move"):
+                continue
+            info = {"dx": round(dx, 3), "dy": round(dy, 3), "seconds": round(dt, 2), "speed": round(dy / dt, 2)}
+            self._close_last_t = self._last_activity = now
+            self._settled = False
+            self._hist.clear()
+            if now - self._close_ask_t <= self.cfg("motion_close_confirm"):
+                self._close_ask_t = -1e9
+                self.last_swipe = {**info, "variant": "down", "side": "down", "action": "close_window"}
+                return MotionEvent("swipe", self.last_swipe, "close_window")
+            self._close_ask_t = now
+            return MotionEvent("close_ask", info)
         return None
 
     def _stroke(self, now: float, seg: List[Tuple[float, float, float, bool, Optional[str], float, float]],

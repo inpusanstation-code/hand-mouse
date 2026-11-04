@@ -19,8 +19,16 @@ def hand(cx=0.5, cy=0.5, fingers="open", thumb="out", bent=(), half=()):
             pts[mcp + 3] = (x, y - 0.025)            # this finger only half extended (curl ratio ~1.2)
         pts[mcp + 1], pts[mcp + 2] = (x, y - 0.02), (x, y - 0.05)
     p13 = mcps[13]
-    pts[4] = {"out": (cx - 0.15, cy + 0.05), "tucked": (cx + 0.02, cy + 0.03),
+    pts[4] = {"out": (cx - 0.10, cy - 0.06), "tucked": (cx + 0.02, cy + 0.03),
               "mid": (p13[0] - 0.06, p13[1])}[thumb]
+    # thumb joints: in a line from the base when it is stretched out, zig-zagged otherwise
+    bx, by = wrist
+    tx, ty = pts[4]
+    dx, dy = tx - bx, ty - by
+    k = 0.0 if thumb == "out" else 0.55
+    pts[1] = (bx, by)
+    pts[2] = (bx + dx / 3 - dy * k * 0.5, by + dy / 3 + dx * k * 0.5)
+    pts[3] = (bx + dx * 2 / 3 + dy * k * 0.5, by + dy * 2 / 3 - dx * k * 0.5)
     return [SimpleNamespace(x=pts[i][0], y=pts[i][1], z=0.0) for i in range(21)]
 
 
@@ -204,7 +212,9 @@ def test_the_command_mapping_can_be_changed_but_only_to_known_commands():
     ev, t = run(mm, [hand(cx=0.4)] * 40, t0=t)
     ev, t = run(mm, swipe_frames(0.4, 0.7), t0=t)
     assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]     # the unknown command was refused
-    assert set(ACTION_KEYS) == {"back", "forward", "tab_prev", "tab_next"}
+    assert set(ACTION_KEYS) == {"back", "forward", "tab_prev", "tab_next", "close_window"}
+    mm2 = MotionMode({"motion_actions": {"nav": {"left": "close_window"}}})        # Alt+F4 only through the two-step question
+    assert mm2._actions["nav"]["left"] == "back"
 
 
 def test_entering_progress_is_reported_while_the_pose_is_held():
@@ -344,15 +354,114 @@ def test_a_noisy_frame_does_not_throw_away_a_hold_but_a_long_dropout_does():
     assert not mm.active
 
 
-def test_the_entry_pose_is_forgiving_about_a_thumbs_up_hand_that_is_not_perfect():
+def test_the_entry_pose_accepts_a_thumbs_up_hand_but_not_a_half_fist():
     mm = MotionMode()
     f = hand_features(hand(fingers="folded", thumb="out"))
     assert mm.entry_pose(f)
-    f["curl"] = (1.18, 0.9, 0.85, 1.0)                                 # the index only loosely folded
+    f["curl"] = (1.02, 0.9, 0.85, 1.0)                                 # the index only loosely folded: still a thumbs-up
     assert mm.entry_pose(f)
-    f["thumb_tuck"] = 0.9                                              # the thumb not fully out
-    assert mm.entry_pose(f)
-    f["thumb_tuck"] = 0.7
-    assert not mm.entry_pose(f)                                        # ... but a thumb half across is a fist
-    f["thumb_tuck"], f["curl"] = 1.2, (1.4, 0.9, 0.85, 1.0)
+    f["thumb_tuck"] = 0.5                                              # a straight thumb counts wherever it points (its distance
+    assert mm.entry_pose(f)                                            # from the other knuckles no longer matters)
+    f["thumb_tuck"] = 0.9
+    f["curl"] = (1.18, 1.1, 1.0, 1.05)                                 # a half fist (the cursor-speed shape): not the entry pose
+    assert not mm.entry_pose(f)
+    f["curl"], f["thumb_straight"] = (0.9, 0.9, 0.85, 1.0), 0.6
+    assert not mm.entry_pose(f)                                        # a bent thumb (folded, tucked, lying under the fist) is a fist
+    f["thumb_straight"], f["curl"] = 1.0, (1.4, 0.9, 0.85, 1.0)
     assert not mm.entry_pose(f)                                        # a finger really out is not a thumbs-up
+
+
+def test_a_half_fist_held_still_does_not_switch_motion_mode_on():
+    """2026-11-04: moving the cursor in the half-fist shape (thumb out, fingers loosely curled) and pausing toggled the mode."""
+    mm = MotionMode()
+    half = hand(fingers="folded", thumb="out")
+    for p in half[:0]:
+        pass
+    # fingers loosely curled: tips at ratio ~1.15 (folded() puts them at 0.8)
+    pts = [type(p)(x=p.x, y=p.y, z=0.0) for p in half]
+    for tip, mcp in ((8, 5), (12, 9), (16, 13), (20, 17)):
+        pts[tip] = type(pts[tip])(x=pts[mcp].x, y=pts[mcp].y - 0.015, z=0.0)       # a little above the knuckle: ratio ~1.15
+    assert max(hand_features(pts)["curl"]) > 1.05
+    events, _ = run(mm, [pts] * 60)                                    # held still for 2 s
+    assert not mm.active and not events
+
+
+def test_a_fist_whose_thumb_lies_on_the_index_is_not_the_entry_pose():
+    """Logged 2026-11-04: a fist with the thumb beside the index (far from the ring/pinky knuckles, but folded) toggled the mode."""
+    from src.motion_mode import MotionMode
+    m = MotionMode()
+    base = {"curl": (0.7, 0.6, 0.6, 0.6), "palm": (0.5, 0.5)}
+    assert m.entry_pose({**base, "thumb_tuck": 1.3, "thumb_len": 0.25}) is False     # folded thumb
+    assert m.entry_pose({**base, "thumb_tuck": 1.3, "thumb_len": 0.8}) is True       # thumbs-up
+
+
+# ---------------------------------------------------------------------- closing the window (Alt+F4), two steps
+def down_frames(y_from=0.35, y_to=0.65, n=10, thumb="out", fingers="open", cx=0.5):
+    return [hand(cx=cx, cy=y_from + (y_to - y_from) * i / (n - 1), thumb=thumb, fingers=fingers) for i in range(n)]
+
+
+def test_one_downward_swipe_only_asks_and_a_second_one_closes_the_window():
+    mm, t = entered()
+    ev, t = run(mm, down_frames(), t0=t)
+    assert [e.kind for e in ev] == ["close_ask"] and mm.close_pending(t) > 2.0       # nothing is sent yet
+    ev, t = run(mm, [hand(cy=0.35)] * 25, t0=t)                                      # the hand comes back up and rests
+    ev, t = run(mm, down_frames(), t0=t)
+    assert [(e.kind, e.action) for e in ev] == [("swipe", "close_window")]
+    ev, t = run(mm, [hand(cy=0.35)] * 25 + down_frames(), t0=t)                      # asked again from scratch, not closed
+    assert [e.kind for e in ev] == ["close_ask"]
+
+
+def test_the_close_question_runs_out_and_is_cancelled_by_leaving_motion_mode():
+    mm, t = entered()
+    ev, t = run(mm, down_frames(), t0=t)
+    ev, t = run(mm, [hand(cy=0.35)] * 100, t0=t)                                     # more than 3 s later
+    assert mm.close_pending(t) == 0
+    ev, t = run(mm, down_frames(), t0=t)
+    assert [e.kind for e in ev] == ["close_ask"]                                     # a new question, no closing
+    mm.update(t, None, request="off")
+    assert mm.close_pending(t) == 0
+
+
+def test_slow_lowering_sideways_or_bent_hands_do_not_ask():
+    for frames in (down_frames(n=40),                                                # slow
+                   down_frames(cx=0.5)[:4],                                          # too short
+                   [hand(cx=0.5 + 0.2 * i / 9, cy=0.35 + 0.3 * i / 9) for i in range(10)],   # diagonal
+                   [hand(cy=0.35 + 0.3 * i / 9, bent=(9,)) for i in range(10)]):     # a folded finger
+        mm, t = entered()
+        ev, _ = run(mm, frames, t0=t)
+        assert not [e for e in ev if e.kind in ("close_ask", "swipe")]
+
+
+def test_a_horizontal_swipe_is_not_a_close_question():
+    mm, t = entered()
+    ev, _ = run(mm, swipe_frames(0.7, 0.4), t0=t)
+    assert [e.kind for e in ev] == ["swipe"] and ev[0].action == "back"
+
+
+def test_a_fist_pointing_at_the_camera_is_not_the_entry_pose():
+    """Logged 2026-11-04 16:37: palm down, fist towards the camera - the palm is foreshortened (width / length ~2), which inflated
+    the thumb measures and passed for a thumbs-up."""
+    mm = MotionMode()
+    base = {"curl": (0.9, 0.8, 0.5, 0.8), "thumb_tuck": 1.5, "thumb_len": 0.7, "palm": (0.5, 0.5)}
+    assert mm.entry_pose({**base, "palm_ratio": 1.1}) is True                 # thumbs-up, palm to the camera
+    assert mm.entry_pose({**base, "palm_ratio": 2.1}) is False                # fist pointing at the camera
+
+
+def test_a_fist_with_the_thumb_bent_underneath_is_not_the_entry_pose_whatever_the_thumb_distances():
+    """Logged 2026-11-04 16:43: a fist with the thumb underneath toggled the mode; the old test was 'thumb far from the knuckles'."""
+    mm = MotionMode()
+    fist = {"curl": (0.8, 0.7, 0.5, 0.7), "thumb_tuck": 1.6, "thumb_len": 0.9, "palm_ratio": 1.1, "palm": (0.5, 0.5)}
+    assert mm.entry_pose({**fist, "thumb_straight": 0.62}) is False
+    assert mm.entry_pose({**fist, "thumb_straight": 0.97}) is True
+    assert mm.entry_pose({**fist, "thumb_straight": 0.97, "thumb_tuck": 0.3}) is True      # a straight thumb pointing along the fist
+
+
+def test_only_a_thumb_pointing_up_enters_other_directions_stay_free():
+    mm = MotionMode()
+    base = {"curl": (0.8, 0.7, 0.5, 0.7), "thumb_tuck": 1.6, "thumb_len": 0.9, "thumb_straight": 0.98, "palm_ratio": 1.1, "palm": (0.5, 0.5)}
+    assert mm.entry_pose({**base, "thumb_up": 1.0}) is True                  # thumbs-up
+    assert mm.entry_pose({**base, "thumb_up": 0.8}) is True                  # leaning
+    assert mm.entry_pose({**base, "thumb_up": 0.0}) is False                 # pointing sideways
+    assert mm.entry_pose({**base, "thumb_up": -1.0}) is False                # thumbs-down
+    f = hand_features(hand(fingers="folded", thumb="out"))
+    assert f["thumb_up"] > 0.8 and mm.entry_pose(f)                          # the synthetic thumbs-up hand

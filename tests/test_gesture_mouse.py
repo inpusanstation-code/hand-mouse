@@ -75,7 +75,7 @@ def test_built_in_defaults():
     assert D["movement_mode"] == "relative"
     assert D["relative_gain_min"] == pytest.approx(0.35)
     assert D["relative_gain_max"] == pytest.approx(1.2)
-    assert D["fist_dpi_multiplier"] == pytest.approx(25.0)      # open hand 1x ... fist 25x, in between by how far the fingers are curled (2026-11-04)
+    assert D["fist_dpi_multiplier"] == pytest.approx(30.0)      # open hand 1x ... fist 30x, in between by how far the fingers are curled (2026-11-04)
     assert D["shape_dpi_min"] == pytest.approx(1.0) and D["shape_dpi_enabled"] is True
     assert D["switcher_navigation"] == "pointer"
     assert D["scroll_gain"] == pytest.approx(36000.0)   # 1.5x the original 24000: scrolls further per hand move (2026-11-04 request)
@@ -229,7 +229,7 @@ def test_middle_ring_pinky_pinch_survive_flicker():
     """These used to flicker: jitter across the threshold / a 1-frame dropout / the
     neighbour finger drifting close all reset the confirmation every frame."""
     for finger, tip_name, action, jitter in (
-        ("middle", "middle", "left_click", [0.050, 0.056, 0.049, 0.060, 0.051, 0.058]),  # around 0.052
+        ("middle", "middle", "left_click", [0.038, 0.044, 0.037, 0.050, 0.039, 0.046]),  # around 0.04
         ("ring", "ring", "right_click", [0.042, 0.048, 0.041, 0.060, 0.043, 0.050]),     # around 0.044
     ):
         engine = GestureEngine()
@@ -620,6 +620,21 @@ def test_engine_reports_pinch_point_for_grab():
     assert res.cursor_point == pytest.approx((0.50, 0.70))
 
 
+def thumb_chain(pts, tip, straight):
+    """Put thumb joints 1-3 between the thumb base (landmark 1, at the wrist here) and `tip` (landmark 4): in a line when the
+    thumb is stretched out, zig-zagged (straightness ~0.6) when it is folded or resting on the fingers."""
+    base = pts[1] if pts[1] != pts[4] else pts[0]
+    pts[1] = Point3D(pts[0].x, pts[0].y)
+    bx, by = pts[1].x, pts[1].y
+    dx, dy = tip.x - bx, tip.y - by
+    px, py = -dy, dx                                   # perpendicular
+    k = 0.0 if straight else 0.55
+    pts[2] = Point3D(bx + dx / 3 + px * k * 0.5, by + dy / 3 + py * k * 0.5)
+    pts[3] = Point3D(bx + dx * 2 / 3 - px * k * 0.5, by + dy * 2 / 3 - py * k * 0.5)
+    pts[4] = tip
+    return pts
+
+
 def make_real_hand(curled: bool, shift: tuple[float, float] = (0.0, 0.0)) -> List[Point3D]:
     """Hand with real joint geometry: wrist below, MCPs above it, tips extended or curled."""
     sx, sy = shift
@@ -630,7 +645,7 @@ def make_real_hand(curled: bool, shift: tuple[float, float] = (0.0, 0.0)) -> Lis
         pts[tip_i - 1] = Point3D(x + sx, (0.66 if curled else 0.50) + sy)  # DIP
         pts[tip_i] = Point3D(x + sx, (0.68 if curled else 0.40) + sy)
     # Thumb tip: in a fist it rests right next to the curled index tip (would read as a pinch)
-    pts[4] = Point3D((0.465 if curled else 0.36) + sx, (0.67 if curled else 0.62) + sy)
+    thumb_chain(pts, Point3D((0.465 if curled else 0.36) + sx, (0.67 if curled else 0.62) + sy), straight=not curled)
     return pts
 
 
@@ -647,7 +662,7 @@ def test_fist_is_detected_and_overrides_pinches():
     fists = [r for r in results if r.active_gesture == "fist"]
     assert len(fists) >= 4                       # after fist_confirm_time (0.12 s)
     assert all(r.action == "move_cursor" and r.is_moving for r in fists)
-    assert all(r.dpi_multiplier == pytest.approx(25.0) for r in fists)
+    assert all(r.dpi_multiplier == pytest.approx(30.0) for r in fists)
 
     # Open the hand again -> back to normal movement, and no click from the fingers opening
     for _ in range(6):
@@ -1097,11 +1112,15 @@ def test_switcher_fist_moves_gently():
 
 
 # ------------------------------------------------------------------ show desktop (Win+D)
-def make_desktop_hand(tucked: bool = True, shift: tuple[float, float] = (0.0, 0.0)) -> List[Point3D]:
-    """Four fingers extended; thumb tucked across the palm (near the ring/pinky MCPs)."""
+def make_desktop_hand(tucked: bool = True, shift: tuple[float, float] = (0.0, 0.0), horizontal: bool = True) -> List[Point3D]:
+    """Four fingers extended; thumb tucked across the palm (near the ring/pinky MCPs). Since 2026-11-04 the fingers lie
+    HORIZONTALLY (the hand turned a quarter turn about the wrist, fingers pointing to the right); `horizontal=False` = upright."""
     h = make_real_hand(curled=False, shift=shift)
     sx, sy = shift
     h[4] = Point3D(0.535 + sx, 0.63 + sy) if tucked else Point3D(0.36 + sx, 0.62 + sy)
+    if horizontal:
+        wx, wy = 0.5 + sx, 0.8 + sy
+        h = [Point3D(wx - (p.y - wy), wy + (p.x - wx), p.z) for p in h]
     return h
 
 
@@ -1111,7 +1130,7 @@ def test_thumb_tucked_four_fingers_open_shows_desktop_once_per_hold():
     actions = [r.action for r in out]
     assert actions.count("show_desktop") == 1
     first = actions.index("show_desktop")
-    assert 0.6 <= first / 30 <= 0.7  # after desktop_hold (0.6 s since 2026-11-04; was 0.4)
+    assert 0.4 <= first / 30 <= 0.5  # after desktop_hold (0.4 s since 2026-11-04 evening; 0.6 s earlier that day, 0.4 before)
     assert out[first].active_gesture == "thumb_tucked_open"
     # Cursor keeps moving while the posture is held (it is an open hand)
     assert all(r.is_moving for r in out if r.action != "show_desktop")
@@ -1857,16 +1876,23 @@ def test_long_press_drag_moves_the_cursor_at_15x():
     drags = [r for r in out if r.action == "drag_hold"]
     assert drags and all(r.dpi_multiplier == pytest.approx(15.0) for r in drags)
 
-    def moved(mult):
+    def moved(mult, dx=0.01, dt=0.2, precision=False):
         ctrl = MouseController(dry_run=True, screen_size=(1920, 1080))
         cfg = dict(REL_CFG)
+        cfg["drag_precision"] = precision
+        cfg["cursor_max_step"] = 0.0                  # the per-frame cap is tested separately
         res = lambda x: GestureResult(active_gesture="thumb_middle_pinch", action="drag_hold",
                                       cursor_point=(x, 0.5), is_moving=True, dpi_multiplier=mult)
         ctrl.apply(res(0.50), cfg, now=0.0)
         start = ctrl.last_screen_pos[0]
-        ctrl.apply(res(0.51), cfg, now=0.2)    # slow (0.05 frame widths/s): min gain
+        ctrl.apply(res(0.50 + dx), cfg, now=dt)    # slow (0.05 frame widths/s): min gain
         return ctrl.last_screen_pos[0] - start
     assert moved(15.0) == pytest.approx(15 * moved(1.0), rel=0.1)
+    # drag precision (2026-11-04): a slow stroke is moved at ~2.5x (about 1:1 with the hand after the slow-speed gain), a fast one at the full 15x
+    slow15, slow1 = moved(15.0, precision=True), moved(1.0, precision=True)
+    assert slow15 == pytest.approx(2.5 * slow1, rel=0.15)                    # slow: drag_precision_min (2.5x), not the full 15x
+    fast_dx, fast_dt = 0.008, 0.0057                                          # ~1.4 frame widths/s, small enough to stay on the screen
+    assert moved(15.0, fast_dx, fast_dt, precision=True) == pytest.approx(15 * moved(1.0, fast_dx, fast_dt, precision=True), rel=0.1)
 
 
 @pytest.mark.record_off
@@ -1876,7 +1902,7 @@ def test_ring_needs_a_real_touch_middle_unchanged():
     assert "right_click" not in [r.action for r in out]
     out, _ = _run(GestureEngine(), [_thumb_on(16, 0.035)] * 8)   # touching
     assert "right_click" in [r.action for r in out]
-    out, _ = _run(GestureEngine(), [_thumb_on(12, 0.048)] * 8)   # middle keeps its distance
+    out, _ = _run(GestureEngine(), [_thumb_on(12, 0.036)] * 8)   # middle: a touch (0.04 limit)
     assert "left_click" in [r.action for r in out]
 
 
@@ -2191,7 +2217,7 @@ def test_thumb_out_with_four_folded_fingers_is_the_motion_pose_not_a_fist():
     h = make_real_hand(curled=True)
     far = Point3D(h[0].x - 0.30, h[0].y)            # the thumb tip well away from the palm
     pose = list(h)
-    pose[4] = far
+    thumb_chain(pose, far, straight=True)
     out, _ = _run(GestureEngine(), [pose] * 8)
     assert all(r.active_gesture == "motion_pose" and r.cursor_point is None and r.action == "none" for r in out)
     out, _ = _run(GestureEngine(), [h] * 8)         # an ordinary fist still is one
@@ -2284,7 +2310,7 @@ def _shape_hand(tip_y, thumb=(0.30, 0.64)):
     for _, tip_i in GestureEngine.FINGER_JOINTS:
         h[tip_i] = Point3D(h[tip_i].x, tip_y)
         h[tip_i - 1] = Point3D(h[tip_i].x, (tip_y + 0.60) / 2)
-    h[4] = Point3D(*thumb)
+    thumb_chain(h, Point3D(*thumb), straight=True)
     return h
 
 
@@ -2301,19 +2327,19 @@ def _last(hands, config=None):
 def test_shape_dpi_runs_from_the_minimum_to_the_maximum_on_a_log_scale():
     e = GestureEngine()
     assert e.shape_dpi(2.0) == pytest.approx(1.0) and e.shape_dpi(1.45) == pytest.approx(1.0)      # open
-    assert e.shape_dpi(0.85) == pytest.approx(25.0) and e.shape_dpi(0.3) == pytest.approx(25.0)    # fist
-    assert e.shape_dpi(1.15) == pytest.approx(5.0, rel=0.01)                                      # halfway = the geometric mean
+    assert e.shape_dpi(0.85) == pytest.approx(30.0) and e.shape_dpi(0.3) == pytest.approx(30.0)    # fist
+    assert e.shape_dpi(1.15) == pytest.approx(30 ** 0.5, rel=0.01)                                      # halfway = the geometric mean
     values = [e.shape_dpi(c) for c in (1.4, 1.3, 1.2, 1.1, 1.0, 0.9)]
-    assert values == sorted(values) and values[0] > 1.0 and values[-1] < 25.0
+    assert values == sorted(values) and values[0] > 1.0 and values[-1] < 30.0
 
 
 def test_the_cursor_speed_follows_how_far_the_hand_is_curled():
     open_, loose, half, fist = (_last([_shape_hand(y)] * 10) for y in (0.40, 0.52, 0.55, 0.68))
     assert open_.dpi_multiplier == 1.0 and open_.hand_shape == "open" and open_.action == "move_cursor"
-    assert 1.0 < loose.dpi_multiplier < half.dpi_multiplier < 25.0 and half.hand_shape == "half"
+    assert 1.0 < loose.dpi_multiplier < half.dpi_multiplier < 30.0 and half.hand_shape == "half"
     assert half.action == "move_cursor" and half.is_moving
     f = _last([make_real_hand(curled=True)] * 10)
-    assert f.hand_shape == "fist" and f.dpi_multiplier == pytest.approx(25.0)             # a real fist is the maximum
+    assert f.hand_shape == "fist" and f.dpi_multiplier == pytest.approx(30.0)             # a real fist is the maximum
 
 
 def test_closing_the_hand_speeds_the_cursor_up_smoothly_and_opening_slows_it_down_again():
@@ -2341,3 +2367,179 @@ def test_the_speed_steps_are_settings():
     steep = _last([_shape_hand(0.55)] * 8, {"shape_dpi_curve": 2.0})
     assert flat.dpi_multiplier > _last([_shape_hand(0.55)] * 8).dpi_multiplier > steep.dpi_multiplier
     assert _last([_shape_hand(0.55)] * 8, {"shape_dpi_min": 2.0}).dpi_multiplier > _last([_shape_hand(0.55)] * 8).dpi_multiplier
+
+
+def test_a_half_fist_with_the_thumb_out_moves_the_cursor_fast_instead_of_freezing_it():
+    """Thumb out + fingers loosely curled is the usual shape of the fast cursor move. Only fully folded fingers (the
+    thumbs-up pose of motion mode) freeze the cursor, so moving in the half fist does not stall."""
+    half = _last([_shape_hand(0.57)] * 8)            # curl ~1.15, the thumb far from the fingers
+    assert half.action == "move_cursor" and half.dpi_multiplier > 3.0 and half.active_gesture != "motion_pose"
+    folded = _last([_shape_hand(0.66)] * 8)          # curl 0.7: the entry pose, the cursor stays
+    assert folded.active_gesture in ("motion_pose", "fist") and folded.action in ("none", "move_cursor")
+
+
+def test_show_desktop_waits_after_the_fingers_were_curled():
+    """A hand opening from a (half) fist lands in the desktop posture; that must not fire Win+D."""
+    def first_fire(prefix):
+        e = GestureEngine()
+        out = [e.process(h, timestamp=1.0 + i / 30) for i, h in enumerate(prefix + [make_desktop_hand()] * 120)]
+        fires = [i for i, r in enumerate(out) if r.action == "show_desktop"]
+        return fires[0] if fires else None
+    plain = first_fire([])
+    after_fist = first_fire([make_real_hand(curled=True)] * 10)
+    after_half = first_fire([_shape_hand(0.56)] * 10)
+    assert plain is not None and plain <= 15                         # about 0.4 s
+    assert after_fist is not None and after_fist >= 10 + 55           # not before ~2 s after the fist
+    assert after_half is not None and after_half >= 10 + 55
+    e = GestureEngine()
+    e.config.update(desktop_after_curl=0.0, desktop_after_activity=0.0)    # the guards can be switched off
+    out = [e.process(h, timestamp=1.0 + i / 30) for i, h in enumerate([make_real_hand(curled=True)] * 10 + [make_desktop_hand()] * 30)]
+    assert any(r.action == "show_desktop" for r in out)
+
+
+def test_a_half_fist_with_the_thumb_near_the_middle_finger_is_not_a_click_but_a_close_contact_still_is():
+    """Moving the cursor with a half-fist rests the thumb 0.04-0.06 from the curled middle tip (logged 2026-11-04:
+    a left click and a 1 s drag). A deliberate pinch in a curled hand touches closer."""
+    def thumb_near_middle(gap):
+        h = _shape_hand(0.58)                      # curl 1.1: a half-fist
+        mid = h[12]
+        h[8] = Point3D(h[8].x, 0.45)               # index lifted away, so only the middle finger is a candidate
+        h[4] = Point3D(mid.x, mid.y + gap)
+        return h
+    def actions(gap):
+        e = GestureEngine()
+        return {e.process(thumb_near_middle(gap), timestamp=1.0 + i / 30).action for i in range(40)}
+    assert "left_click" not in actions(0.036) and "drag_hold" not in actions(0.036)
+    assert "left_click" in actions(0.02)
+    e = GestureEngine()
+    e.config.update(click_curled_threshold=0.06, click_threshold=0.06)           # the stricter contact can be switched off
+    assert "left_click" in {e.process(thumb_near_middle(0.036), timestamp=1.0 + i / 30).action for i in range(40)}
+
+
+def test_a_thumb_brushing_the_index_while_a_half_fist_opens_does_not_grab_but_a_held_pinch_does():
+    """Logged 2026-11-04: scrolls started 0-0.1 s after the hand was a half fist (the thumb crosses the index while opening)."""
+    def grabs(prefix_frames, touch_frames):
+        e = GestureEngine()
+        half = _shape_hand(0.58)
+        touch = _shape_hand(0.45)                      # open-ish hand with the thumb on the index tip
+        touch[4] = Point3D(touch[8].x + 0.005, touch[8].y + 0.005)
+        t, out = 1.0, []
+        for h in [half] * prefix_frames + [touch] * touch_frames:
+            out.append(e.process(h, timestamp=t).action); t += 1 / 30
+        return out
+    brief = grabs(10, 4)                               # 0.13 s of contact right after the half fist
+    assert "grab" not in brief and "scroll_grab" not in brief
+    held = grabs(10, 20)                               # 0.67 s of contact: a deliberate pinch
+    assert any(a in ("grab", "scroll_grab") for a in held)
+    assert any(a in ("grab", "scroll_grab") for a in grabs(0, 4))     # without a half fist before it the pinch is quick
+
+
+def test_a_quick_double_tap_with_a_small_opening_gives_two_clicks():
+    """Logged 2026-11-04: in a fast tap-tap the finger opens only ~0.03 between the taps and the second tap lasts 1-3 frames."""
+    def clicks(config=None):
+        e = GestureEngine()
+        if config:
+            e.config.update(config)
+        frames = [_thumb_on(12, 0.015)] * 5 + [_thumb_on(12, 0.032)] * 2 + [_thumb_on(12, 0.015)] * 2 + [make_real_hand(curled=False)] * 6
+        return [e.process(h, timestamp=1.0 + i / 30).action for i, h in enumerate(frames)].count("left_click")
+    assert clicks() == 2
+    assert clicks({"click_follow_confirm": 0.06, "click_rise_release": 9.0}) == 1       # without the follow-up rules the second tap is lost
+
+
+def test_the_rock_sign_and_a_thumb_resting_on_a_deeply_folded_middle_finger_do_not_click():
+    """Logged 2026-11-04: forming the close-window sign (index and little finger up, middle and ring folded, the thumb laid on
+    them) clicked right and left every time; a half fist with the thumb on a deeply folded middle finger clicked left."""
+    rock = _thumb_on(16, 0.015, tip_y=0.66)                       # ring folded, the thumb on it
+    rock[12] = Point3D(rock[12].x, 0.66)                          # middle folded too; index and little finger stay up
+    assert _fired(rock) == []
+    resting = _shape_hand(0.62)                                   # a half fist: every finger curled to ~0.9
+    resting[12] = Point3D(resting[12].x, 0.64)                    # the middle one a little deeper (0.8)
+    resting[4] = Point3D(resting[12].x, resting[12].y + 0.01)     # the thumb resting on it
+    assert "left_click" not in _fired(resting)
+    pinch = _thumb_on(12, 0.01, tip_y=0.64)                       # a deliberate pinch folds the middle finger to ~0.8 but the others stay up
+    assert "left_click" in _fired(pinch)
+    assert _fired(_thumb_on(12, 0.02)) == ["left_click"]          # an ordinary middle pinch still clicks
+
+
+def _tilted_desktop_hand(degrees_from_horizontal: float):
+    """The horizontal desktop hand turned further about the wrist (positive = the fingers rise)."""
+    import math as _m
+    h = make_desktop_hand()
+    wx, wy = h[0].x, h[0].y
+    a = _m.radians(degrees_from_horizontal)
+    c, s_ = _m.cos(a), _m.sin(a)
+    return [Point3D(wx + (p.x - wx) * c + (p.y - wy) * s_, wy - (p.x - wx) * s_ + (p.y - wy) * c, p.z) for p in h]
+
+
+def test_show_desktop_needs_the_four_fingers_lying_horizontally():
+    """2026-11-04: the posture is narrowed to a hand turned sideways (fingers pointing left or right); an upright open hand with the
+    thumb tucked - an ordinary resting hand - no longer qualifies."""
+    def fires(frames):
+        out, _ = _run(GestureEngine(), frames)
+        return [r.action for r in out].count("show_desktop")
+    assert fires([make_desktop_hand()] * 40) == 1                         # fingers to the right
+    assert fires([make_desktop_hand(horizontal=False)] * 40) == 0         # upright
+    assert fires([_tilted_desktop_hand(25)] * 40) == 1                    # a little off horizontal still counts
+    assert fires([_tilted_desktop_hand(60)] * 40) == 0                    # too steep
+    mirrored = [Point3D(1.0 - p.x, p.y, p.z) for p in make_desktop_hand()]
+    assert fires([mirrored] * 40) == 1                                    # fingers to the left (the other hand / the other way round)
+
+
+def test_a_held_pinch_survives_the_fingers_wobbling_apart_but_opening_fully_releases_it():
+    """Logged 2026-11-04: drags broke off when thumb and middle wobbled 0.04-0.05 apart while the hand moved; the neighbour then took over."""
+    def actions(gaps):
+        e = GestureEngine()
+        out = [e.process(_thumb_on(12, g), timestamp=1.0 + i / 30) for i, g in enumerate(gaps)]
+        return [r.active_gesture for r in out]
+    steady = [0.015] * 15 + [0.05, 0.055, 0.045, 0.058, 0.05] * 4            # held 0.5 s, then wobbling at 0.045-0.058
+    assert all(g == "thumb_middle_pinch" for g in actions(steady)[15:])
+    opened = [0.015] * 15 + [0.09] * 8                                        # really opened
+    assert actions(opened)[-1] != "thumb_middle_pinch"
+    tap = [0.015] * 3 + [0.055] * 10                                          # a tap that opens only to 0.055 is released (double-click re-arm)
+    assert actions(tap)[-1] != "thumb_middle_pinch"
+
+
+def test_the_cursor_step_per_frame_is_capped_and_the_rest_follows_in_the_next_frames():
+    from src.mouse_controller import MouseController
+    ctrl = MouseController(dry_run=True)
+    cfg = dict(GestureEngine().config)
+    cfg.update(movement_mode="relative", tremor_filter=False, smoothing=1.0, cursor_max_step=0.12)
+    ctrl.dpi_multiplier = 30.0
+    ctrl.frame_aspect = 0.5625
+    t = 1.0
+    ctrl._compute_target_screen_pos((0.5, 0.5), cfg, t)                      # anchor
+    start = ctrl.last_screen_pos
+    xs = []
+    for k in range(6):
+        t += 1 / 30
+        x, y = ctrl._compute_target_screen_pos((0.54, 0.5), cfg, t)           # one flick of 0.04 frame widths, then still
+        xs.append(x)
+    cap = 0.12 * ctrl.screen_w
+    steps = [b - a for a, b in zip([start[0]] + xs, xs)]
+    assert max(steps) <= cap + 1.5                                           # one flick of 0.04 x 30 would be ~2300 px at once
+    assert [s_ > 0 for s_ in steps[:3]] == [True, True, True]                # the rest follows over the next frames (a visible path) ...
+    assert sum(1 for s_ in steps if s_ > 0) <= 4                             # ... but only a bounded amount: the cursor does not coast on
+
+
+def _shifted(hand, dx, dy=0.0):
+    return [Point3D(p.x + dx, p.y + dy, p.z) for p in hand]
+
+
+@pytest.mark.record_off
+def test_moving_the_hand_while_the_middle_pinch_is_held_starts_the_drag_at_once():
+    """2026-11-04, Paint: the cursor sat still for the first second of a pinch, so nothing could be drawn. Now a hand that moves
+    while the pinch is held starts the drag without waiting; a still or wobbling pinch is still just a click."""
+    pinch = _thumb_on(12, 0.02)
+    def actions(frames):
+        e = GestureEngine()
+        return [e.process(h, timestamp=1.0 + i / 30).action for i, h in enumerate(frames)]
+    still = actions([pinch] * 20)                                              # 0.67 s, no movement
+    assert "drag_hold" not in still and still.count("left_click") == 1
+    wobble = actions([_shifted(pinch, 0.004 * (-1) ** i) for i in range(20)])
+    assert "drag_hold" not in wobble
+    moving = actions([pinch] * 5 + [_shifted(pinch, 0.012 * k) for k in range(1, 16)])   # then the hand travels 0.18 frame widths
+    assert "drag_hold" in moving and moving.index("drag_hold") < 20            # long before the 1 s long press (30 frames)
+    off = GestureEngine()
+    off.config["drag_on_move"] = False
+    out = [off.process(h, timestamp=1.0 + i / 30).action for i, h in enumerate([pinch] * 5 + [_shifted(pinch, 0.012 * k) for k in range(1, 16)])]
+    assert "drag_hold" not in out

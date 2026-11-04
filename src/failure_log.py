@@ -286,6 +286,6 @@ class FailureRecorder:
     def summary_text(self) -> str:
         if not self.counts:
             return "아직 저장된 기록이 없습니다."
-        names = {"lost_while_moving": "이동 중 놓침", "lost_mid_frame": "화면 안에서 놓침", "manual": "직접 표시", "drag_started": "드래그 시작", "inertia": "관성 스크롤",
-                 "motion_enter": "모션 모드 켜짐", "motion_swipe": "모션 스와이프", "motion_exit": "모션 모드 꺼짐"}
+        names = {"lost_while_moving": "이동 중 놓침", "lost_mid_frame": "화면 안에서 놓침", "manual": "직접 표시", "drag_started": "드래그 시작", "drag_ended": "드래그 끝", "inertia": "관성 스크롤",
+                 "motion_enter": "모션 모드 켜짐", "motion_swipe": "모션 스와이프", "motion_exit": "모션 모드 꺼짐", "motion_close_ask": "창 닫기 질문", "close_ask": "창 닫기 질문(손 모양)", "close_close": "창 닫기(손 모양)", "toggle_sign": "켜기/끄기(손 모양)", "desktop": "바탕화면 보기", "click": "클릭"}
         return " · ".join(f"{names.get(k, k)} {v}건" for k, v in self.counts.items())

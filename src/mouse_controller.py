@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
+import sys
 import threading
 import time
 from collections import deque
@@ -211,6 +213,8 @@ class MouseController:
 
         # Smooth ~144 Hz cursor motion between 30 fps camera updates (real mode only)
         self.interpolation: bool = False
+        self._rel_carry: Tuple[float, float] = (0.0, 0.0)   # cursor distance held back by cursor_max_step, paid out in the next frames
+        self.last_close_info: Dict[str, Any] = {}      # the window the last Alt+F4 request met (see foreground_info)
         self._interp: Optional[CursorInterpolator] = None if dry_run else CursorInterpolator()
 
         # Hand-tremor stabilization (One Euro filter + deadband) for cursor movement
@@ -276,6 +280,7 @@ class MouseController:
             # (Re)start from wherever the cursor is: no jump after a click, throw or hand loss
             self.anchor_hand_pos = (hx, hy)
             self._rel_pos = (float(self.last_screen_pos[0]), float(self.last_screen_pos[1]))
+            self._rel_carry = (0.0, 0.0)
             self._rel_t = now
             self._smoothed_pos = self._rel_pos
             return self.last_screen_pos
@@ -291,10 +296,35 @@ class MouseController:
         dy = (sy - ay) * self.frame_aspect  # physical units (frame widths)
         speed = math.hypot(dx, dy) / dt
         t = max(0.0, min(1.0, (speed - v_lo) / (v_hi - v_lo)))
-        gain = (g_min + (g_max - g_min) * t) * self.dpi_multiplier
+        mult = self.dpi_multiplier
+        if self.is_dragging and mult > 1.0 and config.get("drag_precision", True):
+            # Dragging (drawing, writing) needs fine control at slow hand speed, a long drag across the screen needs the big
+            # multiplier at fast hand speed: 1x when the hand is slow, the full multiplier when it is fast (2026-11-04: the
+            # hand moved at 0.1 frame widths/s while drawing in Paint, with the full 15x the strokes were jagged scribbles).
+            d_min = max(1.0, float(config.get("drag_precision_min", 2.5)))
+            d_lo = max(0.0, float(config.get("drag_precision_low", 0.3)))
+            d_hi = max(d_lo + 1e-6, float(config.get("drag_precision_high", 1.2)))
+            td = max(0.0, min(1.0, (speed - d_lo) / (d_hi - d_lo)))
+            mult = max(1.0, min(mult, d_min) + (mult - min(mult, d_min)) * td)
+        gain = (g_min + (g_max - g_min) * t) * mult
 
-        px, py = self.screens.clamp(self._rel_pos[0] + dx * self.screen_w * gain,
-                                    self._rel_pos[1] + dy * self.screen_w * gain)
+        # The fast hand shapes multiply hand noise and quick flicks (up to 30x): logged 2026-11-04, one frame moved the cursor 500-1000 px
+        # while the hand moved ~60 px, which looks like a jump without a path. A frame may move the cursor at most cursor_max_step of the
+        # screen width; the rest is carried into the next frames (bounded, so the cursor does not coast long after the hand stops).
+        step_x = dx * self.screen_w * gain + self._rel_carry[0]
+        step_y = dy * self.screen_w * gain + self._rel_carry[1]
+        cap = float(config.get("cursor_max_step", 0.12)) * self.screen_w
+        mag = math.hypot(step_x, step_y)
+        if cap > 0 and mag > cap:
+            k = cap / mag
+            rest = (step_x * (1 - k), step_y * (1 - k))
+            rest_mag = math.hypot(*rest)
+            keep = min(1.0, 2.0 * cap / rest_mag) if rest_mag > 0 else 1.0
+            self._rel_carry = (rest[0] * keep, rest[1] * keep)
+            step_x, step_y = step_x * k, step_y * k
+        else:
+            self._rel_carry = (0.0, 0.0)
+        px, py = self.screens.clamp(self._rel_pos[0] + step_x, self._rel_pos[1] + step_y)
         self._rel_pos = (px, py)
         self._smoothed_pos = self._rel_pos
         return int(round(px)), int(round(py))
@@ -1024,11 +1054,45 @@ class MouseController:
         if not self.dry_run and self._interp is not None:
             self._interp.snap(*self.last_screen_pos)
 
+    @staticmethod
+    def foreground_info() -> Dict[str, Any]:
+        """What Alt+F4 would hit: window class, title, whether it is this app. For the safety check and the log."""
+        info: Dict[str, Any] = {"cls": "", "title": "", "own": False, "ok": False}
+        if sys.platform != "win32":
+            return info
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return info
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, buf, 256)
+            info["cls"] = buf.value
+            user32.GetWindowTextW(hwnd, buf, 256)
+            info["title"] = buf.value[:40]
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            info["own"] = pid.value == os.getpid()
+            info["ok"] = (not info["own"]) and info["cls"] not in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+        except Exception:
+            pass
+        return info
+
+    def _safe_to_close_foreground(self) -> bool:
+        """Alt+F4 only for an ordinary application window: never this app itself, the desktop or the taskbar
+        (Alt+F4 on the desktop opens Windows' shut-down dialog)."""
+        self.last_close_info = self.foreground_info()
+        return bool(self.last_close_info["ok"])
+
     def send_motion_action(self, action_id: str) -> bool:
         """Send one command of motion mode (back / forward / tab_prev / tab_next). Unknown ids are refused."""
         from src.motion_mode import ACTION_KEYS
         keys = ACTION_KEYS.get(action_id)
         if keys is None:
+            return False
+        if action_id == "close_window" and not self.dry_run and not self._safe_to_close_foreground():
+            self.event_log.append("motion:close_window_refused")
             return False
         self.event_log.append(f"motion:{action_id}")
         if not self.dry_run:
@@ -1161,7 +1225,7 @@ class MouseController:
             # Replaying the recorded path: hand movement is ignored until it finishes
             self._tick_playback(now)
         elif (
-            index_tip is None and result.is_moving and result.cursor_point is not None
+            index_tip is None and result.is_moving and result.cursor_point is not None and action != "drag_hold"
             and self._double_click_hold(result, cfg, now)
         ):
             pass  # cursor held for a possible second click

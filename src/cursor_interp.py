@@ -35,6 +35,7 @@ class CursorInterpolator:
     def __init__(self, set_pos: Callable[[int, int], None] = os_set_cursor_pos, rate_hz: float = 144.0) -> None:
         self._set_pos = set_pos
         self.rate_hz = rate_hz
+        self.glide_fraction = 0.5          # share of the frame interval the glide takes (1.0 = until the next frame, ~17 ms more lag)
         self._lock = threading.Lock()
         self._from: Optional[Point] = None
         self._to: Optional[Point] = None
@@ -71,7 +72,7 @@ class CursorInterpolator:
             self._from = cur if cur is not None else (float(x), float(y))
             self._to = (float(x), float(y))
             self._t0 = now
-            self._dur = self._interval
+            self._dur = self._interval * self.glide_fraction     # reach the target early: less lag, still smooth at 144 Hz
         self._ensure_thread()
         self._wake.set()
 
