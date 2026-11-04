@@ -21,13 +21,13 @@ from src.motion_mode import hand_features
 
 DEFAULTS: Dict[str, Any] = {
     "toggle_sign_enabled": 1.0,      # 0 = off
-    "toggle_sign_hold": 1.0,         # s the sign is held still
-    "toggle_sign_still": 0.03,       # palm centre may move this much (frame widths) during the hold
+    "toggle_sign_hold": 0.6,         # s the sign is held still (1.0 until 2026-11-04 night: with the quiet time it took ~2 s)
+    "toggle_sign_still": 0.05,       # palm centre may move this much (frame widths) during the hold (was 0.03)
     "toggle_sign_grace": 0.2,        # s the sign may drop out of the hold (a noisy frame) without starting over
     "toggle_sign_up_ratio": 1.4,     # index and middle finger at least this extended (curl ratio)
     "toggle_sign_fold_ratio": 1.15,  # ring and little finger at most this
     "toggle_sign_gap": 0.3,          # and the extended ones this much above the folded ones
-    "toggle_sign_quiet": 1.0,        # s after the last pinch / scroll / drag / click before a hold may start (control on)
+    "toggle_sign_quiet": 0.5,        # s after the last pinch / scroll / drag / click before a hold may start (control on; was 1.0)
 }
 
 

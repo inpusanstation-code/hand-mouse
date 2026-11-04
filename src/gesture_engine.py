@@ -119,18 +119,33 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "shape_dpi_curve": 1.0,          # < 1 speeds up sooner when the fingers start to curl, > 1 later
     "shape_curl_smooth": 0.4,        # smoothing of the curl between frames (1 = none)
     "shape_freeze_distance": 0.03,   # curled hand: only a thumb this close to a fingertip freezes the cursor
+    # Half fist (the fast cursor shape) while the hand is moving faster than this (frame widths / s): no "about to
+    # pinch" freeze and no new pinch. Pinches are made with the hand nearly still; moving the cursor with a half fist
+    # kept the thumb 0.03-0.045 from the curled fingers, which stopped the cursor (40 % of half-fist frames) and
+    # started scrolls / drags (22 %) in the 2026-11-04 22:2x logs. 0 = off.
+    "curled_moving_speed": 0.3,
+    # Half fist: thumb+index grab (scroll) needs this close relative to the hand size (instead of pinch_size_ratio).
+    "curled_pinch_size_ratio": 0.13,
+    # Half fist: thumb+middle (left click) needs this close relative to the hand size, and a held thumb+middle does
+    # not turn into a drag while the hand is half curled (the drags in those logs all came from that).
+    "curled_click_size_ratio": 0.15,
     "pinky_tuck_ratio": 0.8,
     "gesture_exclusive_time": 1.0,
-    "desktop_thumb_tuck": 0.45,
+    "desktop_thumb_tuck": 0.6,
     "desktop_hold": 0.4,
     "desktop_horizontal_min": 0.7,
+    # Optional: measure "sideways" against the way the open hand usually points, learned slowly (seconds
+    # of the average, starting from "up in the image"). 0 = off: sideways is horizontal in the image.
+    # Off by default: this user's resting hand already leans 45-60 degrees, and while practising the
+    # gesture the average drifted toward the sideways hand until it stopped working (2026-11-04 logs).
+    "desktop_usual_tau": 0.0,
     "desktop_still_move": 0.03,
     "side_pinch_exclusive": True,
     "desktop_after_activity": 1.0,
     "desktop_after_curl": 2.0,
     "desktop_extended_ratio": 1.55,
     "desktop_min_palm_width": 0.45,
-    "desktop_min_tip_gap": 0.08,
+    "desktop_min_tip_gap": 0.0,
     "pinky_click_threshold": 0.05,
     "pinky_ring_dominance": 0.85,
     "pinky_ring_min_gap": 0.025,
@@ -188,10 +203,41 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "click_keep_after": 0.3,
     "click_keep_limit": 0.06,
     "side_pinch_gap": 0.2,
+    # Thumb+ring (right click) and thumb+pinky (task switcher) do not START while the hand is half curled
+    # (the fast cursor shape) or within this many seconds after: the curled ring / little finger lies next to
+    # the thumb there (2026-11-04 logs: right clicks and switchers fired while moving with a half fist).
+    "side_pinch_after_curl": 0.4,
+    # ... and after a half fist the thumb must first leave the ring / little finger (this far relative to the hand
+    # size) before a pinch with it counts: opening the hand left the thumb resting 0.17-0.2 from the ring tip, and a
+    # right click fired the moment side_pinch_after_curl ran out (2026-11-04 23:1x logs). 0 = off.
+    "side_rearm_ratio": 0.35,
     "click_curled_below": 1.4,
     "click_curled_threshold": 0.03,
+    # A pinch STARTS only when the thumb is also this close relative to the hand size (largest of wrist -> index /
+    # middle / little-finger knuckle and 1.4 x the knuckle width, in the image). The distance thresholds above are in
+    # image units, so a hand that looks small (far from the camera, a phone camera) got a much looser touch: in the
+    # 2026-11-04 logs many pinches never came closer than 1/4 of the hand (ring 19 of 42, pinky 23 of 78) - the
+    # fingers did not touch. Releasing still uses the image-unit thresholds. 0 = off.
+    "pinch_size_ratio": 0.2,
+    "click_size_ratio": 0.22,
+    "ring_click_size_ratio": 0.25,
+    "pinky_click_size_ratio": 0.25,
     "click_release_grace": 0.03,
     "drag_hold_threshold": 0.035,
+    # Thumb+index+middle drag also needs the middle tip this close relative to the hand size: grabbing the page with
+    # thumb+index keeps the middle tip right beside it (0.022-0.034, 0.2-0.28 of the hand) and turned most scroll
+    # strokes into drags (2026-11-04 22:1x logs). 0 = off.
+    "drag_hold_size_ratio": 0.15,
+    # Scrolling with thumb+index: the grab ends as soon as the fingers have opened (index this much farther than its
+    # closest during the grab) AND the hand heads back from the far end of the stroke by scroll_return_distance
+    # (frame widths). The return stroke for the next scroll was read as a scroll the other way: the fingers
+    # were still under the release distance (0.03-0.04 vs 0.06) while the hand came back. 0 = off.
+    "scroll_return_open": 0.012,
+    "scroll_return_distance": 0.015,
+    # After such a return release, a new grab does not start while the hand still travels back (against the last
+    # stroke) faster than this (frame widths / s), for up to scroll_return_block s: the return was re-grabbed.
+    "scroll_return_speed": 0.15,
+    "scroll_return_block": 1.0,
     "drag_hold_entry_window": 0.25,
     "double_click_window": 0.45,
     "double_click_move_tolerance": 0.03,
@@ -212,7 +258,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "action": "show_desktop",
             "enabled": True,
             "cooldown": 1.5,
-            "description": "엄지만 접고 나머지 네 손가락 펴기 (0.4초 유지): 바탕화면 보기 Win+D",
+            "description": "엄지만 접고 나머지 네 손가락 펴서 손가락이 옆(가로)을 향하게 (0.4초 유지): 바탕화면 보기 Win+D",
         },
         "thumb_index_pinch": {
             "action": "grab",
@@ -355,6 +401,8 @@ class GestureEngine:
         self._curl_s: Optional[float] = None   # smoothed mean finger curl ratio (cursor speed by hand shape)
         self._last_halffist_at: float = -1e9    # last time the hand was a half fist or tighter (mean curl <= pinch_after_curl_below)
         self._last_curled_at: float = -1e9      # last time the fingers were curled (fist, half fist, thumbs-up pose)
+        self._side_block_until: float = -1e9   # half fist with the thumb on the ring / little finger: no middle pinch either
+        self._side_armed: Dict[str, bool] = {"ring": True, "pinky": True, "index": True}   # the thumb left that finger since the last half fist
         self.last_hold = None   # (hold distance, release threshold, tip distance) while thumb+index is held
         self._long_fired: Dict[str, bool] = {}   # long press reached: this pinch is now a drag
         self._index_released_at: float = -1e9
@@ -365,6 +413,13 @@ class GestureEngine:
         self._lost_since: Optional[float] = None
         self._index_release_since: Optional[float] = None
         self._index_pinched_since: float = -1e9
+        self._grab_min_d = 9.0                    # closest thumb-index distance during this grab
+        self._grab_start: Optional[Tuple[float, float]] = None
+        self._grab_far: Optional[Tuple[float, float]] = None
+        self._grab_far_d = 0.0
+        self._return_dir: Optional[Tuple[float, float]] = None   # unit direction of the stroke a return release ended
+        self._return_at = -1e9
+        self._prev_palm: Optional[Tuple[float, float, float]] = None   # x, y (square units), t of the previous frame
         self._pinch_candidate_since: Optional[float] = None
         self._desktop_since: Optional[float] = None
         self._desktop_anchor: Optional[Tuple[float, float]] = None
@@ -374,6 +429,12 @@ class GestureEngine:
         # other out while it is in progress and for a moment after it fires
         self._pinky_fired_at: float = -1e9
         self._desktop_fired_at: float = -1e9
+        # Frame height / width, set by the caller each frame: landmark x and y are normalised
+        # separately, so directions must be corrected to square pixels.
+        self.frame_aspect: float = 9.0 / 16.0
+        # Usual pointing direction of the open hand (radians, 0 = up in the image), learned slowly.
+        self._usual_dir: Optional[float] = None
+        self._usual_t: Optional[float] = None
 
     @property
     def is_pinched(self) -> bool:
@@ -628,6 +689,22 @@ class GestureEngine:
         }
 
         cursor_point_early = self.palm_anchor_point(pts)
+        # palm velocity (square units / s), for telling a return stroke from a new grab
+        palm_v = None
+        if cursor_point_early is not None:
+            asp = max(0.2, min(5.0, float(self.frame_aspect or 0.5625)))
+            px, py = cursor_point_early[0], cursor_point_early[1] * asp
+            if self._prev_palm is not None and 1e-3 < now - self._prev_palm[2] < 0.2:
+                dt = now - self._prev_palm[2]
+                palm_v = ((px - self._prev_palm[0]) / dt, (py - self._prev_palm[1]) / dt)
+            self._prev_palm = (px, py, now)
+        hand_size = max(self._dist_2d(pts[self.WRIST], pts[5]), self._dist_2d(pts[self.WRIST], pts[self.MIDDLE_MCP]),
+                        self._dist_2d(pts[self.WRIST], pts[17]), 1.4 * self._dist_2d(pts[5], pts[17]))
+        distances["hand_size"] = hand_size
+
+        def size_cap(key: str, thr: float) -> float:
+            ratio = float(self.config.get(key, 0.0))
+            return min(thr, ratio * hand_size) if ratio > 0 and hand_size > 1e-6 else thr
 
         # 0. Fist (all four fingers curled) -> fast move. Checked first: in a fist the thumb
         # rests on the index/middle fingers and must not be read as a pinch or click.
@@ -722,23 +799,50 @@ class GestureEngine:
         distances["curl_mean"] = sum(ratios) / 4.0
         distances["curl_2d"] = sum(self._dist_2d(pts[t], _w) / max(1e-6, self._dist_2d(pts[m], _w)) for m, t in self.FINGER_JOINTS) / 4.0
         palm_width = self._dist_2d(pts[5], pts[17]) / palm_len
-        # How horizontal the fingers lie: |dx| / length of wrist -> middle fingertip (1 = pointing sideways, 0 = up / down)
-        _fv = self._dist_2d(pts[self.WRIST], pts[12])
-        finger_horiz = abs(pts[12].x - pts[self.WRIST].x) / _fv if _fv > 1e-6 else 0.0
+        # How far the fingers are turned sideways from the way the hand usually points:
+        # |sin| of the turn of wrist -> middle fingertip (1 = turned 90 degrees, 0 = as usual / reversed).
+        # In square pixels; with no usual direction yet, "usual" is up in the image.
+        aspect = max(0.2, min(5.0, float(self.frame_aspect or 9.0 / 16.0)))
+        _fx, _fy = pts[12].x - _w.x, (pts[12].y - _w.y) * aspect
+        finger_dir = math.atan2(_fx, -_fy) if math.hypot(_fx, _fy) > 1e-6 else None
+        finger_horiz = 0.0
+        if finger_dir is not None:
+            usual = self._usual_dir if self._usual_dir is not None else 0.0
+            finger_horiz = abs(math.sin(finger_dir - usual))
         distances["finger_horiz"] = finger_horiz
         exclusive = float(self.config.get("gesture_exclusive_time", 1.0))
-        desktop_posture = (
-            not self._index_pinched
-            and self._is_enabled("thumb_tucked_open")
+        # The hand shape alone (four straight fingers, thumb tucked, turned sideways, palm visible).
+        # Turned sideways, the tucked thumb tip shows up next to the pinky tip in the image, which
+        # used to start a thumb+pinky pinch (task switcher) first; that pinch is not started in this shape.
+        desktop_shape = (
+            self._is_enabled("thumb_tucked_open")
             and min(ratios) > float(self.config.get("desktop_extended_ratio", 1.55))
-            and thumb_tuck <= float(self.config.get("desktop_thumb_tuck", 0.45))
+            and thumb_tuck <= float(self.config.get("desktop_thumb_tuck", 0.6))
             and finger_horiz >= float(self.config.get("desktop_horizontal_min", 0.7))
             and palm_width >= float(self.config.get("desktop_min_palm_width", 0.45))
+        )
+        desktop_posture = (
+            not self._index_pinched
+            and desktop_shape
             and "pinky" not in self._secondary_since
             and not self._secondary_since
-            and min(d_index, d_middle, d_ring, d_pinky) > float(self.config.get("desktop_min_tip_gap", 0.08))
+            and min(d_index, d_middle, d_ring, d_pinky) > float(self.config.get("desktop_min_tip_gap", 0.0))
             and (now - self._pinky_fired_at) >= exclusive
         )
+        # Learn the usual direction from an ordinary open hand (thumb not tucked, fingers straight).
+        if (
+            finger_dir is not None
+            and float(self.config.get("desktop_usual_tau", 0.0)) > 0
+            and not desktop_posture
+            and thumb_tuck > float(self.config.get("desktop_thumb_tuck", 0.6)) + 0.15
+            and min(ratios) > 1.3
+        ):
+            # Starts from "up" and moves slowly, so a hand briefly held sideways is not taken as the usual one.
+            usual = self._usual_dir if self._usual_dir is not None else 0.0
+            dt = max(0.0, min(0.5, now - (self._usual_t if self._usual_t is not None else now)))
+            k = 1.0 - math.exp(-dt / max(0.1, float(self.config.get("desktop_usual_tau", 0.0))))
+            self._usual_dir = usual + k * math.atan2(math.sin(finger_dir - usual), math.cos(finger_dir - usual))
+            self._usual_t = now
         # The posture is also an ordinary resting/pointing open hand, so it counts only for a hand that
         # holds still (palm centre within desktop_still_move of where the hold began) and that did not
         # just finish another gesture (a scroll, drag, click or pinch within desktop_after_activity).
@@ -798,6 +902,23 @@ class GestureEngine:
         curled = shape_mult > 1.15
         if curled:
             self._last_curled_at = now
+        moving_limit = float(self.config.get("curled_moving_speed", 0.0))
+        curled_moving = (curled and moving_limit > 0 and palm_v is not None
+                         and math.hypot(*palm_v) > moving_limit and not self._index_pinched and not self._secondary_since)
+        # Thumb+index (scroll grab) after a half fist: the thumb lay along the curled index the whole time and the grab
+        # started the moment the hand opened (2026-11-05 00:xx logs). Like the ring / little finger (side_rearm_ratio):
+        # the thumb must first leave the index, with the hand open for side_pinch_after_curl.
+        rearm_i = float(self.config.get("side_rearm_ratio", 0.0))
+        if rearm_i <= 0:
+            self._side_armed["index"] = True
+        elif (curled and not self._index_pinched and palm_v is not None
+              and math.hypot(*palm_v) > float(self.config.get("curled_rearm_speed", 0.15))):
+            # only while MOVING the cursor with the half fist: a still hand curling the other fingers to pinch
+            # thumb+index on purpose (an "OK" shape) is a real grab
+            self._side_armed["index"] = False
+        elif (d_index > rearm_i * hand_size
+              and now - self._last_curled_at >= float(self.config.get("side_pinch_after_curl", 0.4))):
+            self._side_armed["index"] = True
         # (an "OK" pinch curls the other three fingers but not the index, so it is not a half fist)
         if self._curl_s <= float(self.config.get("pinch_after_curl_below", 1.15)) and ratios[0] <= 1.35:
             self._last_halffist_at = now
@@ -815,7 +936,14 @@ class GestureEngine:
             # click with the index merely nearby must not grab / scroll the page). Both tips
             # together (drag) are about equally close, so that still pinches.
             middle_clearly_closer = d_middle < d_index * float(self.config.get("click_neighbor_ratio", 0.85))
-            can_pinch = d_index <= pinch_threshold and not index_tucked and not middle_clearly_closer
+            can_pinch = (d_index <= size_cap("curled_pinch_size_ratio" if curled else "pinch_size_ratio", pinch_threshold)
+                         and not index_tucked and not middle_clearly_closer and not curled_moving
+                         and self._side_armed["index"])
+            if can_pinch and self._return_dir is not None and palm_v is not None and (
+                    now - self._return_at) < float(self.config.get("scroll_return_block", 1.0)):
+                back_speed = -(palm_v[0] * self._return_dir[0] + palm_v[1] * self._return_dir[1])
+                if back_speed > float(self.config.get("scroll_return_speed", 0.15)):
+                    can_pinch = False            # still travelling back for the next stroke: not a new grab
             # Opening a (half) fist drags the thumb across the index for a moment: logged 2026-11-04, scrolls started
             # 0.0-0.1 s after the hand was a half fist. Right after one the touch must hold longer.
             after_halffist = (now - self._last_halffist_at) < float(self.config.get("pinch_after_curl_window", 0.5))
@@ -831,6 +959,7 @@ class GestureEngine:
             if can_pinch:
                 self._index_pinched = True
                 self._index_pinched_since = now
+                self._grab_min_d, self._grab_start, self._grab_far, self._grab_far_d = d_index, cursor_point_early, cursor_point_early, 0.0
                 self._pinch_candidate_since = None
                 self._index_release_since = None
         else:
@@ -848,7 +977,28 @@ class GestureEngine:
                                   self._dist_2d(pts[self.THUMB_IP], index)) if d <= joint_limit]
             d_hold = min([d_index] + joints)
             self.last_hold = (round(d_hold, 4), round(rel_thr, 4), round(d_index, 4))  # for the failure log
-            if d_hold > rel_thr:
+            # Return stroke: fingers opened and the hand heading back from the far end of the stroke -> released now.
+            returning = False
+            open_gap = float(self.config.get("scroll_return_open", 0.012))
+            if scrolling and open_gap > 0 and self._grab_start is not None and cursor_point_early is not None:
+                aspect = max(0.2, min(5.0, float(self.frame_aspect or 0.5625)))
+                p = cursor_point_early
+                self._grab_min_d = min(self._grab_min_d, d_index)
+                far_d = math.hypot(p[0] - self._grab_start[0], (p[1] - self._grab_start[1]) * aspect)
+                if far_d > self._grab_far_d:
+                    self._grab_far, self._grab_far_d = p, far_d
+                back = math.hypot(p[0] - self._grab_far[0], (p[1] - self._grab_far[1]) * aspect)
+                returning = (d_index > self._grab_min_d + open_gap
+                             and back >= float(self.config.get("scroll_return_distance", 0.015)))
+            if returning:
+                sx, sy = self._grab_far[0] - self._grab_start[0], (self._grab_far[1] - self._grab_start[1]) * aspect
+                n = math.hypot(sx, sy)
+                self._return_dir, self._return_at = ((sx / n, sy / n) if n > 1e-6 else None), now
+                self._index_pinched = False
+                self._index_release_since = None
+                self._index_released_at = now
+                self._scroll_released_at = now
+            elif d_hold > rel_thr:
                 self._close_since = None
                 if self._index_release_since is None:
                     self._index_release_since = now
@@ -890,7 +1040,10 @@ class GestureEngine:
         if not self._middle_hold_pinched:
             # all three tips really together: an index merely NEAR the thumb during a
             # thumb+middle click must not turn it into a drag
-            if self._index_pinched and in_entry_window and d_middle <= drag_thr and d_index <= drag_thr:
+            mid_thr = drag_thr
+            if float(self.config.get("drag_hold_size_ratio", 0.0)) > 0:
+                mid_thr = size_cap("drag_hold_size_ratio", drag_thr)
+            if self._index_pinched and in_entry_window and d_middle <= mid_thr and d_index <= drag_thr:
                 if self._drag_since is None:
                     self._drag_since = now
                 if (now - self._drag_since) >= drag_confirm:
@@ -1026,7 +1179,9 @@ class GestureEngine:
                     clear_of_index = not (d_index < dist * float(self.config.get("click_neighbor_ratio", 0.85)))
                 else:
                     clear_of_index = True
-                if dist <= thr and clear_of_index and entry_ok and not locked:
+                size_key = {"middle": "curled_click_size_ratio" if curled else "click_size_ratio",
+                            "ring": "ring_click_size_ratio", "pinky": "pinky_click_size_ratio"}.get(finger, "")
+                if dist <= size_cap(size_key, thr) and clear_of_index and entry_ok and not locked:
                     self._secondary_since[finger] = now
                     self._held_min.pop(finger, None)
                     self._secondary_off.pop(finger, None)
@@ -1089,6 +1244,29 @@ class GestureEngine:
         resting_on_middle = ratios[1] < 1.0 and (ratios[0] + ratios[2] + ratios[3]) / 3.0 <= float(
             self.config.get("click_resting_others", 1.1))
         rock_like = (ratios[0] >= 1.1 and ratios[3] >= 1.3 and ratios[1] <= 1.15 and ratios[2] <= 1.15)
+        after_curl_side = (now - self._last_curled_at) < float(self.config.get("side_pinch_after_curl", 0.4)) or curled_moving
+        rearm = float(self.config.get("side_rearm_ratio", 0.0))
+        for f_name, f_dist in (("ring", d_ring), ("pinky", d_pinky)):
+            if rearm <= 0:
+                self._side_armed[f_name] = True
+            elif curled and f_name not in self._secondary_since:
+                self._side_armed[f_name] = False
+            elif f_dist > rearm * hand_size and not after_curl_side:
+                self._side_armed[f_name] = True     # away from it with the hand open for side_pinch_after_curl
+        # With the ring / little finger pinch held back, a thumb resting there in a near fist would otherwise be
+        # taken as a middle pinch (left click in a fist); keep the middle back too while it rests there (+0.3 s).
+        # Only near a fist: in a looser half fist, thumb+middle clicks are wanted (most left clicks in the logs).
+        if (after_curl_side and self._curl_s is not None
+                and self._curl_s <= float(self.config.get("pinch_after_curl_below", 1.15))
+                and (d_ring <= float(self.config.get("ring_click_threshold", 0.044)) or d_pinky <= pinky_thr)):
+            self._side_block_until = now + 0.3
+        # V sign (control on/off, src/toggle_sign.py): the thumb holds the folded ring / little finger down,
+        # which held a thumb+ring pinch (and fired right clicks) and kept the sign from counting. A right click
+        # can have the same curl (index and middle straight), so the V also needs index and middle spread apart:
+        # tips at least v_sign_spread x their knuckle gap (V holds in the logs: 2.3-2.5; clicks with the fingers together 1.05-1.45).
+        v_spread = self._dist_2d(index, middle) / max(1e-6, self._dist_2d(pts[5], pts[self.MIDDLE_MCP]))
+        v_like = (ratios[0] >= 1.3 and ratios[1] >= 1.3 and ratios[2] <= 1.2 and ratios[3] <= 1.2
+                  and v_spread >= float(self.config.get("v_sign_spread", 1.8)))
         # Only the finger NEAREST the thumb (of middle / ring / pinky) may start a pinch.
         # Neighbours sit right next to each other, so "clearly closer than the neighbour"
         # rules blocked real pinches (both touching -> nothing) and letting each finger
@@ -1096,14 +1274,15 @@ class GestureEngine:
         nearest = min((("middle", d_middle), ("ring", d_ring), ("pinky", d_pinky)), key=lambda kv: kv[1])[0]
         # A finger curled deep into the palm (fist) with the thumb resting on it is no click
         middle_ok = confirmed("middle", d_middle, dip(self.MIDDLE_TIP), click_threshold,
-                              entry_ok=ratios[1] > click_tuck and nearest == "middle" and not fist_like and not rock_like and not resting_on_middle,
+                              entry_ok=ratios[1] > click_tuck and nearest == "middle" and not fist_like and not rock_like and not v_like and not resting_on_middle and now >= self._side_block_until,
                               keep_ok=ratios[1] > click_tuck * 0.5)
         # thumb+ring has its own (slightly stricter) distance: the ring tip often reads as
         # touching before it really does
         ring_thr = float(self.config.get("ring_click_threshold", 0.044))
         ring_ok = confirmed("ring", d_ring, dip(self.RING_TIP), ring_thr,
-                            entry_ok=ratios[2] > ring_tuck and nearest == "ring" and not fist_like and not rock_like,
-                            keep_ok=ratios[2] > ring_tuck * 0.5)
+                            entry_ok=(ratios[2] > ring_tuck and nearest == "ring" and not fist_like and not rock_like and not v_like
+                                      and not after_curl_side and self._side_armed["ring"]),
+                            keep_ok=ratios[2] > ring_tuck * 0.5 and not v_like)
         # Thumb+pinky (task switcher): the pinky tip is hard to reach and often hidden, so it
         # gets its own (larger) threshold
         # why a thumb+pinky contact is (not) accepted: kept for the failure log
@@ -1119,7 +1298,7 @@ class GestureEngine:
             }
         pinky_ok = confirmed(
             "pinky", d_pinky, dip(self.PINKY_TIP), pinky_thr,
-            keep_ok=ratios[3] > float(self.config.get("pinky_tuck_ratio", 0.8)) * 0.9,
+            keep_ok=ratios[3] > float(self.config.get("pinky_tuck_ratio", 0.8)) * 0.9 and not v_like,
             entry_ok=(
                 nearest == "pinky"
                 # pinky folded deep into the palm (fist): the thumb rests on it
@@ -1129,8 +1308,12 @@ class GestureEngine:
                 and d_pinky < d_ring * float(self.config.get("pinky_ring_dominance", 0.85))
                 and self._dist_2d(pts[self.RING_TIP], pts[self.PINKY_TIP])
                     > float(self.config.get("pinky_ring_min_gap", 0.025))
-                # not right after Win+D
+                # not right after Win+D, and not in the Win+D hand shape (straight pinky, thumb tucked)
                 and (now - self._desktop_fired_at) >= exclusive
+                and not desktop_shape
+                and not v_like
+                and not after_curl_side
+                and self._side_armed["pinky"]
             ),
         )
 
@@ -1194,6 +1377,7 @@ class GestureEngine:
                              and now - self._secondary_since["middle"] >= float(self.config.get("drag_move_min_time", 0.15)))
             if (
                 held == "middle"
+                and (not curled or self._long_fired.get("middle", False))
                 and self.config.get("long_press_drag", True)
                 and self._gesture_cfg("thumb_middle_pinch").get("action", "left_click") == "left_click"
                 and (
@@ -1241,9 +1425,11 @@ class GestureEngine:
         # release limit let the cursor drift right before the grab: 39 px p90 in the logs).
         approach = max(release_threshold, float(self.config.get("approach_freeze_distance", 0.045)))
         if curled and not self._index_pinched and not self._secondary_since:
-            # curled fingers rest near the thumb without pinching: only a thumb about to touch freezes the cursor
-            approach = max(release_threshold, float(self.config.get("shape_freeze_distance", 0.03)))
-        near_pinch = min(d_index, d_middle, d_ring, d_pinky) <= approach
+            # curled fingers rest near the thumb without pinching: only a thumb about to touch freezes the cursor.
+            # (It used to be max(release_threshold, 0.03), which with a 0.045 release limit was no tighter at all.)
+            # Same closeness a half-fist click needs (relative to the hand size), so it freezes only right before one.
+            approach = size_cap("curled_click_size_ratio", float(self.config.get("shape_freeze_distance", 0.03)))
+        near_pinch = min(d_index, d_middle, d_ring, d_pinky) <= approach and not curled_moving
         # Right after a scroll grab ends the hand is still moving up/down (the grab IS that motion):
         # the cursor would follow it (17 px median, 65 px p90 within 0.4 s in the logs). Hold it.
         holding = (now - self._scroll_released_at) < float(self.config.get("scroll_cursor_hold", 0.35))

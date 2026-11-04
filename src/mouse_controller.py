@@ -32,11 +32,15 @@ try:
     from src.cursor_interp import CursorInterpolator
     from src.filters import TremorStabilizer
     from src.gesture_engine import GestureResult
+    from src.palm_axes import apply_axes
+    from src.path_smoother import PathSmoother
     from src.screens import Monitor, ScreenLayout
 except ImportError:
     from cursor_interp import CursorInterpolator
     from filters import TremorStabilizer
     from gesture_engine import GestureResult
+    from palm_axes import apply_axes
+    from path_smoother import PathSmoother
     from screens import Monitor, ScreenLayout
 
 # Configure PyAutoGUI for zero-latency real-time control
@@ -228,6 +232,7 @@ class MouseController:
         self._abs_prev: Optional[Tuple[float, float]] = None  # last mapped point (fist boost)
         self._pointer_source = None
         self.dpi_multiplier: float = 1.0  # set per frame from GestureResult
+        self._path: Optional[PathSmoother] = None   # clean strokes for the fist cursor (src/path_smoother.py)
         # (x, y) -> speed multiplier in (0, 1]; set by main.py (UITargetMagnet.factor)
         self.slowdown_provider: Optional[Callable[[int, int], float]] = None
 
@@ -279,6 +284,8 @@ class MouseController:
         if self.anchor_hand_pos is None:
             # (Re)start from wherever the cursor is: no jump after a click, throw or hand loss
             self.anchor_hand_pos = (hx, hy)
+            if self._path is not None:
+                self._path.reset()
             self._rel_pos = (float(self.last_screen_pos[0]), float(self.last_screen_pos[1]))
             self._rel_carry = (0.0, 0.0)
             self._rel_t = now
@@ -294,6 +301,27 @@ class MouseController:
         self._rel_t = now
         dx = sx - ax
         dy = (sy - ay) * self.frame_aspect  # physical units (frame widths)
+        pivot = getattr(self, "elbow_pivot", None)   # src/elbow_pivot.py, set by the runtime that feeds it
+        bent = None
+        if self._pointer_source is None and pivot is not None and config.get("elbow_pivot", False):
+            # Palm / fist cursor about the (estimated) elbow: arc about it -> screen x, bending toward it -> screen y.
+            # Straightens the tilt AND the curve; until the elbow is known the step goes on as before.
+            bent = pivot.convert((ax, ay), (sx, sy), self.frame_aspect)
+        if bent is not None:
+            dx, dy = bent
+        elif self._pointer_source is None and config.get("palm_axes"):
+            # Palm / fist cursor: the measured up/down and left/right of this user's hand (src/palm_axes.py) become screen
+            # vertical / horizontal, e.g. a forearm swinging about an elbow on the chair no longer moves diagonally.
+            dx, dy = apply_axes(dx, dy, config["palm_axes"], float(config.get("palm_axes_strength", 0.6)))
+        if (self._pointer_source is None and config.get("path_smoothing", False) and not self.is_dragging
+                and self.dpi_multiplier >= float(config.get("path_min_multiplier", 1.15))):
+            # Fist / half-fist cursor: straight lines and smooth curves only (src/path_smoother.py), the wobble that
+            # 35x would turn into a zigzag is dropped.
+            if self._path is None:
+                self._path = PathSmoother(config)
+            dx, dy = self._path.step(now, dx, dy)
+        elif self._path is not None:
+            self._path.reset()
         speed = math.hypot(dx, dy) / dt
         t = max(0.0, min(1.0, (speed - v_lo) / (v_hi - v_lo)))
         mult = self.dpi_multiplier

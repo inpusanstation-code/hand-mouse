@@ -91,6 +91,8 @@ class QtDashboard(QObject):
         self.click_style = saved_click if saved_click in CLICK_STYLES else "pinch"
         self.profile = profiles.get_active(DEFAULT_CONFIG_PATH.parent)   # calibration profile in use
         self.motion_request = 0                                 # +1 per press of the motion-mode button
+        self.palm_axes_requests = [0, 0, 0]                     # start / cancel / reset presses (palm cursor direction)
+        self.palm_axes_view = (False, "", 0.0, "", False)       # running, prompt, progress, note, saved
         self.motion_state = (False, 0.0, "", 0.0, 0.0)           # (on, seconds left, last command, entering, leaving)
         self.motion_exit_until = 0.0                             # the "motion mode off" notice stays until then
         self.toggle_progress = 0.0                               # progress of the on/off sign hold
@@ -345,6 +347,39 @@ class QtDashboard(QObject):
         self.motion_request += 1
         self.stateChanged.emit()
 
+    # ------------------------------------------------------------------ palm / fist cursor direction (src/palm_axes.py)
+    @Property(bool, notify=stateChanged)
+    def palmCalibrating(self):
+        return bool(self.palm_axes_view[0])
+
+    @Property(bool, notify=stateChanged)
+    def palmCalibrated(self):
+        return bool(self.palm_axes_view[4])
+
+    @Property(str, notify=stateChanged)
+    def palmAxesHint(self):
+        running, prompt, progress, note, _ = self.palm_axes_view
+        if running:
+            return f"{prompt}  ·  {note} {int(progress * 100)}%"
+        return prompt
+
+    @Slot()
+    def beginPalmCalibration(self):
+        if self.stage_name != "main" or self.use_index_pointer:
+            return
+        self.palm_axes_requests[0] += 1
+        self.stateChanged.emit()
+
+    @Slot()
+    def cancelPalmCalibration(self):
+        self.palm_axes_requests[1] += 1
+        self.stateChanged.emit()
+
+    @Slot()
+    def resetPalmCalibration(self):
+        self.palm_axes_requests[2] += 1
+        self.stateChanged.emit()
+
     # ------------------------------------------------------------------ calibration profile
     @Property(str, notify=stateChanged)
     def profileLabel(self):
@@ -482,6 +517,8 @@ class QtDashboard(QObject):
             anchor=self.pointer_anchor, hand_crop=self.hand_crop, axes=self.axes,
             calibrating=self.calibrating, sensitivity=self.pointer_sensitivity,
             show_fingertips=self.show_fingertips, profile=self.profile, motion_request=self.motion_request,
+            palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
+            palm_axes_reset=self.palm_axes_requests[2],
         )
 
     def apply_snapshot(self, snap):
@@ -498,6 +535,10 @@ class QtDashboard(QObject):
         if snap.tracking is None:
             self.tracking_close_requested = False
         self.toggle_progress = getattr(snap, "toggle_progress", 0.0)
+        palm_view = getattr(snap, "palm_axes", None)
+        if palm_view is not None and palm_view != self.palm_axes_view:
+            self.palm_axes_view = palm_view
+            self.stateChanged.emit()
         if snap.close_sign is not None:
             self.close_state = snap.close_sign
         if snap.motion is not None:

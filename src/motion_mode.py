@@ -69,16 +69,19 @@ DEFAULTS: Dict[str, Any] = {
                                      # logs show 0.95-1.0 for a thumbs-up and 0.4-0.7 for every bent / folded / tucked thumb
     "motion_thumb_up": 0.7,          # the entry thumb must also point UP (cos of its angle to straight up >= this, ~45 deg): thumbs-up. A
                                      # stretched thumb pointing elsewhere is kept free for other commands (logs: thumbs-up 0.8-1.0)
-    "motion_thumb_len": 0.5,         # the thumb tip must also be this far (palm lengths) from its base: a fist whose thumb lies on the
-                                     # index is far from the ring/pinky knuckles too (tuck 1.2-1.4) but its thumb is folded (0.2-0.3)
+    "motion_thumb_len": 0.6,         # the thumb tip must also be this far (palm lengths) from its base: a fist whose thumb lies on the
+                                     # index is far from the ring/pinky knuckles too (tuck 1.2-1.4) but its thumb is folded (0.2-0.3).
+                                     # 0.5 until 2026-11-04 21:15: a fist turned knuckles-up with the bent thumb's tip toward the face
+                                     # read 0.48-0.6 and toggled the mode; real thumbs-ups 0.66-1.0
+    "motion_min_palm_ratio": 0.7,    # that knuckles-up fist shows the palm edge-on: width / length 0.44-0.63 vs 0.8-1.4 for a thumbs-up
     "motion_max_palm_ratio": 1.7,    # a fist pointing at the camera foreshortens the palm (width / length 2.0-2.2 in the logs vs 0.9-1.5 for a
                                      # thumbs-up), which inflates every thumb measure and made the pose look like a thumbs-up
     "motion_fold_ratio": 1.05,       # finger curl ratio <= this = folded. A thumbs-up hand sits at 0.7-0.9 (median 0.77); a half fist
                                      # (fingers loosely curled, the hand moving the cursor at 5-15x) at 1.0-1.4: 1.2 let it toggle the mode
     "motion_open_ratio": 1.3,        # a finger counts as fully extended at this curl ratio (extended ones sit at 1.5-1.8)
     "motion_open_min": 1.0,          # a stroke with any finger below this in any frame is refused ("bent")
-    "motion_open_ratio_tab": 1.25,   # the same two lines for a stroke with the thumb tucked (finger ratios read lower then)
-    "motion_open_min_tab": 0.95,
+    "motion_open_ratio_tab": 1.1,    # the same two lines for a stroke with the thumb tucked (finger ratios read lower then;
+    "motion_open_min_tab": 0.8,      # 1.25 / 0.95 until 2026-11-04 23:15: tab strokes were refused as "not open" / "bent")
     "motion_thumb_nav": 0.75,        # open hand + thumb_tuck >= this -> "nav"
     "motion_thumb_tab": 0.45,        # open hand + thumb_tuck <= this -> "tab"
     "motion_swipe_min_dx": 0.15,     # net horizontal travel, frame widths
@@ -87,6 +90,8 @@ DEFAULTS: Dict[str, Any] = {
     "motion_swipe_min_time": 0.12,   # shortest stroke, s
     "motion_swipe_straight": 1.5,    # path length <= this * net distance
     "motion_swipe_min_speed": 0.6,   # net distance / time, frame widths per s (the hand coming back is slower: 0.37 vs 0.48 median)
+    "motion_swipe_min_speed_tab": 0.4,  # the same for a stroke with the thumb tucked: tab strokes ran 0.4-0.58 in the 23:10 log
+                                        # (refused as "slow"); returning strokes are still caught by the return rules below
     "motion_swipe_open_frac": 0.85,  # share of the stroke's frames with ALL FOUR fingers fully extended
     "motion_swipe_cooldown": 0.5,    # s between swipes
     "motion_reverse_pause": 0.25,    # s the hand must rest after a swipe before the OPPOSITE direction counts
@@ -223,7 +228,7 @@ class MotionMode:
         return (thumb_out
                 and f.get("thumb_up", 1.0) >= self.cfg("motion_thumb_up")
                 and f.get("thumb_len", 9.9) >= self.cfg("motion_thumb_len")
-                and f.get("palm_ratio", 0.0) <= self.cfg("motion_max_palm_ratio")
+                and self.cfg("motion_min_palm_ratio") <= f.get("palm_ratio", 1.0) <= self.cfg("motion_max_palm_ratio")
                 and max(f["curl"]) <= self.cfg("motion_fold_ratio"))
 
     def open_hand(self, f: Dict[str, Any]) -> bool:
@@ -457,16 +462,16 @@ class MotionMode:
             why.append("short")
         if abs(dy) > self.cfg("motion_swipe_max_ratio") * abs(dx):
             why.append("vertical")
-        if speed < self.cfg("motion_swipe_min_speed"):
-            why.append("slow")
-        if path > self.cfg("motion_swipe_straight") * math.hypot(dx, dy):
-            why.append("curved")
         # The variant first: with the thumb tucked over the palm the finger ratios read lower (one real session:
         # the same open hand gave a median lowest-finger ratio of 1.0 vs 1.2 with the thumb out), so the
-        # "fully extended" and "bent" lines for a tab stroke sit a little lower.
+        # "fully extended" and "bent" lines for a tab stroke sit a little lower - and tab strokes were slower too.
         tucked = sum(1 for w in window if w[5] <= self.cfg("motion_thumb_tab"))
         variant = "tab" if tucked >= self.cfg("motion_tab_frames") else seg[-1][4]
         suffix = "_tab" if variant == "tab" else ""
+        if speed < self.cfg("motion_swipe_min_speed" + suffix):
+            why.append("slow")
+        if path > self.cfg("motion_swipe_straight") * math.hypot(dx, dy):
+            why.append("curved")
         open_thr, bent_thr = self.cfg("motion_open_ratio" + suffix), self.cfg("motion_open_min" + suffix)
         if not (seg[0][6] >= open_thr and seg[-1][6] >= open_thr):
             why.append("ends_closed")

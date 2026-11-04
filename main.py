@@ -432,7 +432,7 @@ def run_dashboard(args, perf, engine, camera, tracker, mouse, settings, keys, pe
     print(f"  Movement Mode : {engine.config.get('movement_mode')}")
     print("  Fine Control: move your hand with NO pinch (relative + acceleration, [M] = absolute).")
     print("  Make a FIST to move the same way at 20x DPI.")
-    print("  Tuck the THUMB, open the other four fingers and hold 0.4 s = show desktop (Win+D).")
+    print("  Tuck the THUMB, open the other four fingers, point the fingers sideways in the image and hold 0.4 s = show desktop (Win+D).")
     print("  THUMB+PINKY opens the task switcher: point at a window, THUMB+MIDDLE opens it, THUMB+RING cancels.")
     if engine.config.get("record_fling_enabled", False):
         print("  Record & Fling ON: pinch THUMB+INDEX, draw a motion, release to replay it.")
@@ -473,6 +473,7 @@ def run_dashboard(args, perf, engine, camera, tracker, mouse, settings, keys, pe
 
             fh, fw = frame.shape[:2]
             mouse.frame_aspect = fh / max(1, fw)
+            engine.frame_aspect = mouse.frame_aspect
             if detections:
                 hand = detections[0]
                 result = engine.process(hand.landmarks)
@@ -733,7 +734,7 @@ def main() -> int:
     print(f"  Movement Mode : {engine.config.get('movement_mode')}")
     print("  Fine Control: move your hand with NO pinch (relative + acceleration, [M] = absolute).")
     print("  Make a FIST to move the same way at 20x DPI.")
-    print("  Tuck the THUMB, open the other four fingers and hold 0.4 s = show desktop (Win+D).")
+    print("  Tuck the THUMB, open the other four fingers, point the fingers sideways in the image and hold 0.4 s = show desktop (Win+D).")
     print("  THUMB+PINKY opens the task switcher: point at a window, THUMB+MIDDLE opens it, THUMB+RING cancels.")
     if engine.config.get("record_fling_enabled", False):
         print("  Record & Fling ON: pinch THUMB+INDEX, draw a motion, release to replay it.")

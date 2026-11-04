@@ -305,6 +305,22 @@ ApplicationWindow {
                                 text: dashboard.profileLabel + (dashboard.profileCount > 0 ? "  (눌러서 바꾸기)" : "  (없음)")
                                 onClicked: dashboard.cycleProfile()
                             }
+                            RowLayout {
+                                visible: !dashboard.pointerOnly
+                                Layout.fillWidth: true
+                                spacing: 6
+                                ActionButton {
+                                    Layout.fillWidth: true
+                                    enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                                    text: dashboard.palmCalibrated ? "커서 방향 보정 다시" : "커서 방향 보정"
+                                    onClicked: dashboard.beginPalmCalibration()
+                                }
+                                ActionButton {
+                                    visible: dashboard.palmCalibrated && !dashboard.palmCalibrating
+                                    text: "초기화"
+                                    onClicked: dashboard.resetPalmCalibration()
+                                }
+                            }
                             ColumnLayout {
                                 visible: dashboard.pointerOnly
                                 Layout.fillWidth: true
@@ -519,7 +535,17 @@ ApplicationWindow {
                         ActionButton { text: "취소"; onClicked: dashboard.cancelPointerCalibration() }
                     }
                     RowLayout {
-                        visible: !dashboard.calibratingPointer
+                        visible: dashboard.palmCalibrating || (dashboard.palmAxesHint !== "" && !dashboard.calibratingPointer)
+                        Layout.fillWidth: true
+                        TextLabel {
+                            Layout.fillWidth: true
+                            text: dashboard.palmAxesHint
+                            wrapMode: Text.Wrap
+                        }
+                        ActionButton { visible: dashboard.palmCalibrating; text: "취소"; onClicked: dashboard.cancelPalmCalibration() }
+                    }
+                    RowLayout {
+                        visible: !dashboard.calibratingPointer && !dashboard.palmCalibrating
                         Layout.fillWidth: true
                         ColumnLayout {
                             Layout.fillWidth: true

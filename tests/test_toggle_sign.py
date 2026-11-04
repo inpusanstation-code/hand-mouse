@@ -21,9 +21,9 @@ def test_the_pose_is_only_index_and_middle_finger_up():
 
 def test_holding_the_sign_toggles_once_and_it_must_be_let_go_before_it_counts_again():
     ts = ToggleSign()
-    ev, t = run(ts, [vsign()] * 20)                                            # 0.67 s: not yet
+    ev, t = run(ts, [vsign()] * 12)                                            # 0.4 s: not yet (hold 0.6 s)
     assert not ev and 0.4 < ts.progress(t) < 1.0
-    ev, t = run(ts, [vsign()] * 15, t0=t)                                      # past 1 s
+    ev, t = run(ts, [vsign()] * 10, t0=t)                                      # past 0.6 s
     assert [e.kind for e in ev] == ["toggle"]
     ev, t = run(ts, [vsign()] * 60, t0=t)                                      # holding on: nothing more
     assert not ev
@@ -39,5 +39,5 @@ def test_a_moving_or_blocked_hand_and_a_disabled_sign_never_toggle():
     frames = [vsign()] * 12 + [hand(fingers="open")] + [vsign()] * 22           # a noisy frame in the middle of the hold
     assert [e.kind for e in run(ts, frames)[0]] == ["toggle"]
     ts = ToggleSign()
-    frames = [vsign()] * 12 + [hand(fingers="open")] * 12 + [vsign()] * 22     # a real dropout: starts over, 0.73 s left < hold
+    frames = [vsign()] * 12 + [hand(fingers="open")] * 12 + [vsign()] * 14     # a real dropout: starts over, 0.47 s left < hold
     assert not run(ts, frames)[0]

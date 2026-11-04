@@ -158,6 +158,7 @@ class InferencePipeline:
 
             fh, fw = frame.shape[:2]
             mouse.frame_aspect = fh / max(1, fw)
+            engine.frame_aspect = mouse.frame_aspect
 
             paused = self._paused
             if paused and not self._was_paused:

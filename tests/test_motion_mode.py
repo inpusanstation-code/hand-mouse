@@ -465,3 +465,17 @@ def test_only_a_thumb_pointing_up_enters_other_directions_stay_free():
     assert mm.entry_pose({**base, "thumb_up": -1.0}) is False                # thumbs-down
     f = hand_features(hand(fingers="folded", thumb="out"))
     assert f["thumb_up"] > 0.8 and mm.entry_pose(f)                          # the synthetic thumbs-up hand
+
+
+# Real frames (2026-11-04 logs): a thumbs-up (20:30) and a fist turned knuckles-up with the bent thumb's tip
+# toward the face (21:11), which used to toggle motion mode (palm width / length 0.58, thumb length 0.5).
+_THUMBS_UP = [[0.5787, 0.6358, -0.0], [0.5784, 0.5722, -0.0149], [0.5924, 0.5015, -0.0225], [0.6034, 0.4452, -0.0304], [0.6083, 0.403, -0.035], [0.639, 0.5178, -0.0044], [0.6609, 0.5033, -0.0212], [0.6339, 0.5271, -0.0289], [0.6221, 0.5382, -0.0319], [0.6503, 0.5554, -0.0041], [0.6679, 0.5415, -0.023], [0.6341, 0.5611, -0.0263], [0.6267, 0.5651, -0.0245], [0.6572, 0.5938, -0.007], [0.6756, 0.583, -0.0265], [0.6434, 0.5944, -0.0206], [0.6335, 0.5963, -0.0117], [0.661, 0.6322, -0.0112], [0.6809, 0.6205, -0.0207], [0.6571, 0.6214, -0.0137], [0.6448, 0.6205, -0.0059]]
+_KNUCKLES_UP_FIST = [[0.324, 0.3602, -0.0], [0.3089, 0.3119, -0.0041], [0.3033, 0.255, -0.0077], [0.3113, 0.2123, -0.0137], [0.332, 0.2016, -0.0175], [0.3399, 0.2316, 0.009], [0.3382, 0.1932, -0.0065], [0.3252, 0.2253, -0.0133], [0.3267, 0.2448, -0.0154], [0.3524, 0.245, 0.0046], [0.3495, 0.2018, -0.0115], [0.332, 0.2447, -0.0117], [0.3367, 0.2638, -0.0064], [0.3647, 0.2638, -0.0032], [0.3596, 0.2229, -0.02], [0.3415, 0.2658, -0.0131], [0.3459, 0.2858, -0.0026], [0.377, 0.2902, -0.0116], [0.3697, 0.2515, -0.0201], [0.3544, 0.2775, -0.0141], [0.3553, 0.2977, -0.0062]]
+
+
+def test_a_knuckles_up_fist_is_not_the_entry_pose_but_a_thumbs_up_is():
+    from src.motion_mode import MotionMode, hand_features
+    m = MotionMode()
+    assert m.entry_pose(hand_features(_THUMBS_UP))
+    assert not m.entry_pose(hand_features(_KNUCKLES_UP_FIST))
+

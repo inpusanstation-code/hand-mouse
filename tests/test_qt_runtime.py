@@ -197,3 +197,77 @@ def test_pressing_the_motion_button_while_paused_does_nothing(tmp_path):
     rt.ui = UiState(stage="main", control_hand="Right", click_style="off", motion_request=1)
     steps(rt, 5)                                               # still paused (starts paused)
     assert not rt.motion.active
+
+
+def test_cursor_direction_wizard_measures_saves_and_straightens_the_palm_cursor(tmp_path):
+    """The palm cursor wizard: up/down strokes, the cursor does not move meanwhile, and a tilted up/down stroke
+    afterwards moves the cursor straight down."""
+    import math
+    rt = runtime(tmp_path)
+    rt.engine.config.update({"palm_axes_prep": 0.05, "palm_axes_stroke": 0.6, "palm_axes_strength": 1.0})
+    base = [Point3D(p.x, p.y, p.z) for p in rt.tracker.hand]
+    tilt = math.radians(30)
+
+    def place(s, direction):
+        ux, uy = (math.sin(tilt), math.cos(tilt)) if direction == "v" else (1.0, 0.0)
+        rt.tracker.hand = [Point3D(p.x + ux * s, p.y + uy * s / rt.mouse.frame_aspect * 1.0, p.z) for p in base]
+
+    ui = dict(stage="main", control_hand="Right", click_style="off", use_index_pointer=False)
+    rt.ui = UiState(**ui)
+    rt.post("key", ord(" "))                                   # start controlling
+    steps(rt, 2)
+    rt.ui = UiState(**ui, palm_axes_request=1)
+    pos = rt.mouse.last_screen_pos
+    t_end = time.perf_counter() + 3.0
+    k = 0
+    while rt._snap.palm_axes[0] or k < 3:
+        place(0.05 * math.sin(k / 3.0), "v")
+        steps(rt, 1)
+        k += 1
+        assert time.perf_counter() < t_end, rt._snap.palm_axes
+    assert rt.mouse.last_screen_pos == pos                      # the cursor stayed put during the wizard
+    assert rt._snap.palm_axes[4], rt._snap.palm_axes            # correction saved
+    saved = json.loads((tmp_path / "no_user_config.json").read_text(encoding="utf-8"))
+    assert len(saved["palm_axes"]) == 4
+    # a tilted "down" stroke now moves the cursor (nearly) straight down
+    start = rt.mouse.last_screen_pos
+    for i in range(20):
+        place(0.008 * i, "v")
+        steps(rt, 1)
+    end = rt.mouse.last_screen_pos
+    assert end[1] - start[1] > 20 and abs(end[0] - start[0]) < 0.25 * (end[1] - start[1])
+
+
+def test_elbow_pivot_straightens_a_bend_toward_the_hidden_elbow(tmp_path):
+    """Palm cursor with `elbow_pivot` on: left/right swings about an elbow below the picture locate it; bending the
+    forearm afterwards (a tilted line toward the elbow in the image) moves the cursor straight down."""
+    import math
+    rt = runtime(tmp_path)
+    rt.engine.config["elbow_pivot"] = True
+    base = [Point3D(p.x, p.y, p.z) for p in rt.tracker.hand]
+    anchor = rt.engine.palm_anchor_point(base)
+    aspect = rt.mouse.frame_aspect if rt.mouse.frame_aspect else 9 / 16
+    elbow = (anchor[0] + 0.25, anchor[1] * (720 / 1280) + 0.3)       # square units, below and to the right
+    r0 = math.hypot(anchor[0] - elbow[0], anchor[1] * (720 / 1280) - elbow[1])
+    phi0 = math.atan2(anchor[0] - elbow[0], -(anchor[1] * (720 / 1280) - elbow[1]))
+
+    def place(phi, r):
+        x, y = elbow[0] + r * math.sin(phi), (elbow[1] - r * math.cos(phi)) / (720 / 1280)
+        rt.tracker.hand = [Point3D(p.x + x - anchor[0], p.y + y - anchor[1], p.z) for p in base]
+
+    ui = dict(stage="main", control_hand="Right", click_style="off", use_index_pointer=False)
+    rt.ui = UiState(**ui)
+    rt.post("key", ord(" "))
+    for k in range(90):                                              # swing left / right about the elbow
+        place(phi0 + math.radians(15) * math.sin(2 * math.pi * k / 30), r0)
+        steps(rt, 1)
+    assert rt.elbow.source == "arcs", rt.elbow.info()
+    place(phi0, r0)
+    steps(rt, 3)
+    start = rt.mouse.last_screen_pos
+    for i in range(20):                                              # bend: toward the elbow along the tilted line
+        place(phi0, r0 - 0.008 * i)
+        steps(rt, 1)
+    end = rt.mouse.last_screen_pos
+    assert end[1] - start[1] > 20 and abs(end[0] - start[0]) < 0.2 * (end[1] - start[1]), (start, end)
+

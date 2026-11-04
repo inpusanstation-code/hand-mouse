@@ -1079,6 +1079,7 @@ def test_pinky_pinch_threshold_requires_close_fingers_and_is_configurable():
     assert "task_switcher" not in [r.action for r in out]
     loose = GestureEngine()
     loose.config["pinky_click_threshold"] = 0.065
+    loose.config["pinky_click_size_ratio"] = 0.0           # the hand-size cap (on by default) would refuse this gap
     out, _ = _run(loose, [hand] * 4)
     assert "task_switcher" in [r.action for r in out]
 
@@ -1161,6 +1162,70 @@ def test_show_desktop_needs_all_four_fingers_open_and_palm_facing():
         sideways[i_] = Point3D(x, sideways[i_].y)
     out, _ = _run(GestureEngine(), [sideways] * 20)
     assert "show_desktop" not in [r.action for r in out]
+
+
+def test_show_desktop_sideways_is_relative_to_the_usual_hand_direction():
+    """Phone looking down at the desk: the open hand usually points sideways in the image. Turning it a
+    quarter turn from there (fingers up in the image) is "sideways"; the usual direction itself is not."""
+    engine = GestureEngine()
+    engine.config["desktop_usual_tau"] = 10.0  # optional learning (off by default)
+    engine.frame_aspect = 3.0 / 4.0  # phone stream 480x360
+    out, t = _run(engine, [make_desktop_hand(tucked=False, horizontal=True)] * 900)  # 30 s of normal use
+    out, t = _run(engine, [make_desktop_hand(tucked=True, horizontal=True)] * 30, t0=t)
+    assert "show_desktop" not in [r.action for r in out]  # tucked, but pointing the usual way
+    out, t = _run(engine, [make_desktop_hand(tucked=False, horizontal=True)] * 30, t0=t + 1.0)
+    out, _ = _run(engine, [make_desktop_hand(tucked=True, horizontal=False)] * 30, t0=t)
+    assert [r.action for r in out].count("show_desktop") == 1
+
+
+def test_show_desktop_direction_uses_square_pixels():
+    """With no usual direction yet, sideways is judged in square pixels: a hand pointing 45 degrees in a
+    16:9 frame reads about 0.71, not the 0.49 of the raw (separately normalised) x / y."""
+    hand = make_desktop_hand(tucked=False, horizontal=False)
+    w = hand[0]
+    d = 0.2
+    hand[12] = Point3D(w.x + d * 9 / 16, w.y - d, hand[12].z)  # 45 degrees on a 1280x720 frame
+    engine = GestureEngine()
+    engine.frame_aspect = 9 / 16
+    res = engine.process(hand, timestamp=1.0)
+    assert abs(res.distances["finger_horiz"] - 0.707) < 0.02
+
+
+# A real frame (2026-11-04 20:40 log): hand turned sideways, thumb tucked. In the image the tucked thumb tip
+# sits next to the pinky tip, which used to start the thumb+pinky task switcher instead of Win+D.
+_SIDEWAYS_TUCKED = [[0.4637, 0.6083], [0.4799, 0.6141], [0.5087, 0.6129], [0.5359, 0.6197], [0.5602, 0.634],
+                    [0.5358, 0.55], [0.5743, 0.5495], [0.5968, 0.5695], [0.611, 0.5934], [0.538, 0.5611],
+                    [0.5768, 0.5596], [0.5971, 0.5791], [0.6102, 0.6024], [0.5381, 0.5777], [0.5715, 0.5751],
+                    [0.59, 0.5897], [0.6033, 0.6099], [0.5369, 0.5969], [0.5629, 0.5954], [0.5771, 0.6044],
+                    [0.5881, 0.6172]]
+
+
+def test_sideways_tucked_hand_from_the_log_shows_desktop_not_the_switcher():
+    hand = [Point3D(x, y) for x, y in _SIDEWAYS_TUCKED]
+    engine = GestureEngine()
+    engine.frame_aspect = 720 / 1280
+    out, _ = _run(engine, [hand] * 30)
+    actions = [r.action for r in out]
+    assert actions.count("show_desktop") == 1
+    assert "task_switcher" not in actions
+
+
+# A real V sign (2026-11-04 20:50 log): index and middle up, the thumb holding the folded ring finger down.
+# It used to be read as a thumb+ring pinch (right click) and the held pinch kept the V sign from counting.
+_V_SIGN = [[0.3329, 0.4863, 0.0], [0.3213, 0.45, -0.019], [0.326, 0.4078, -0.028], [0.3507, 0.3866, -0.0355],
+           [0.371, 0.3701, -0.0418], [0.3353, 0.3437, -0.0159], [0.3367, 0.2844, -0.0277], [0.3382, 0.2463, -0.0341],
+           [0.3401, 0.2148, -0.0375], [0.354, 0.3531, -0.0146], [0.3699, 0.296, -0.0278], [0.3797, 0.2605, -0.0343],
+           [0.3889, 0.2322, -0.0361], [0.3673, 0.3765, -0.0156], [0.3757, 0.3663, -0.0348], [0.3615, 0.3968, -0.0374],
+           [0.3531, 0.4142, -0.0327], [0.3762, 0.4062, -0.0179], [0.3834, 0.3895, -0.0315], [0.371, 0.411, -0.03],
+           [0.3621, 0.4253, -0.0251]]
+
+
+def test_v_sign_from_the_log_is_no_click_and_holds_no_pinch():
+    hand = [Point3D(*p) for p in _V_SIGN]
+    engine = GestureEngine()
+    out, _ = _run(engine, [hand] * 30)
+    assert not {"left_click", "right_click", "task_switcher"} & {r.action for r in out}
+    assert not engine._secondary_since
 
 
 def test_pinch_gestures_are_never_the_desktop_posture():
@@ -1575,6 +1640,8 @@ def test_flick_up_then_spring_back_coasts_the_same_way():
     scroll the page back and set the inertia direction."""
     def run(use_releasing: bool):
         engine = GestureEngine()
+        if not use_releasing:
+            engine.config["scroll_return_open"] = 0.0   # the old code had no return-stroke release either
         ctrl = MouseController(dry_run=True, screen_size=(1920, 1080))
         ctrl.frame_aspect = 0.75
         cfg = dict(engine.config, scroll_inertia=True)
@@ -1648,6 +1715,41 @@ def test_ring_pinch_with_neighbours_gives_exactly_one_right_click():
     assert _fired(_thumb_on(16, 0.02, [(20, 0.022)])) == ["right_click"]               # used to give nothing
     assert _fired(_thumb_on(16, 0.02, [(20, 0.03), (12, 0.03)])) == ["right_click"]
     assert _fired(_thumb_on(16, 0.02, tip_y=0.62)) == ["right_click"]                  # deeply bent ring (0.9)
+
+
+def test_half_fist_from_the_log_gives_no_right_click():
+    """Real frames (tests/fixtures/half_fist_ring_contact.json): moving with a half fist, the thumb ends on the
+    curled ring finger. That was a right click; with side_pinch_after_curl it is not (and is again with the rule off)."""
+    import json as _json
+    from pathlib import Path as _Path
+    data = _json.loads((_Path(__file__).parent / "fixtures" / "half_fist_ring_contact.json").read_text(encoding="utf-8"))
+
+    def actions(cfg):
+        engine = GestureEngine()
+        engine.config.update(cfg)
+        engine.frame_aspect = data["frame_px"][1] / data["frame_px"][0]
+        hands = [[Point3D(*p) for p in lm] if lm else None for _, lm in data["frames"]]
+        return [engine.process(h, timestamp=100.0 + t).action for (t, _), h in zip(data["frames"], hands)]
+
+    assert "right_click" not in actions({})
+    assert "right_click" in actions({"side_pinch_after_curl": 0.0, "curled_moving_speed": 0.0, "side_rearm_ratio": 0.0})
+
+
+@pytest.mark.record_off
+def test_a_small_looking_hand_needs_a_real_touch():
+    """The thresholds are image units: for a hand that looks half as big (far away, phone camera) the same gap is
+    twice as wide relative to the fingers. The hand-size cap refuses it; the same gap on a full-size hand clicks."""
+    def scaled(hand, k):
+        w = hand[0]
+        return [Point3D(w.x + (p.x - w.x) * k, w.y + (p.y - w.y) * k, p.z) for p in hand]
+
+    full = _thumb_on(12, 0.035)                                   # 0.035 < click threshold 0.04
+    assert _fired(full) == ["left_click"]
+    small = scaled(full, 0.5)
+    small[4] = Point3D(small[12].x, small[12].y + 0.035)          # same image gap, hand half the size
+    assert _fired(small) == []
+    small[4] = Point3D(small[12].x, small[12].y + 0.012)          # a real touch on the small hand
+    assert _fired(small) == ["left_click"]
 
 
 @pytest.mark.record_off
@@ -2412,7 +2514,8 @@ def test_a_half_fist_with_the_thumb_near_the_middle_finger_is_not_a_click_but_a_
     assert "left_click" not in actions(0.036) and "drag_hold" not in actions(0.036)
     assert "left_click" in actions(0.02)
     e = GestureEngine()
-    e.config.update(click_curled_threshold=0.06, click_threshold=0.06)           # the stricter contact can be switched off
+    e.config.update(click_curled_threshold=0.06, click_threshold=0.06,            # the stricter contact can be switched off
+                    curled_click_size_ratio=0.0, click_size_ratio=0.0)
     assert "left_click" in {e.process(thumb_near_middle(0.036), timestamp=1.0 + i / 30).action for i in range(40)}
 
 
@@ -2543,3 +2646,59 @@ def test_moving_the_hand_while_the_middle_pinch_is_held_starts_the_drag_at_once(
     off.config["drag_on_move"] = False
     out = [off.process(h, timestamp=1.0 + i / 30).action for i, h in enumerate([pinch] * 5 + [_shifted(pinch, 0.012 * k) for k in range(1, 16)])]
     assert "drag_hold" not in out
+
+
+@pytest.mark.record_off
+def test_scroll_grab_from_the_log_is_no_drag_and_the_return_does_not_scroll_back():
+    """Real frames (tests/fixtures/scroll_grab_stroke_and_return.json): a thumb+index grab with the middle tip beside
+    the index, a stroke up, then the hand coming back down with the fingers opening. That was a three-finger drag and
+    the return scrolled back (0.024 of the frame); now it stays a grab and lets go on the way back."""
+    import json as _json
+    from pathlib import Path as _Path
+    data = _json.loads((_Path(__file__).parent / "fixtures" / "scroll_grab_stroke_and_return.json").read_text(encoding="utf-8"))
+
+    def run(cfg):
+        engine = GestureEngine()
+        engine.config.update(cfg)
+        engine.frame_aspect = data["frame_px"][1] / data["frame_px"][0]
+        actions, ys = [], []
+        for t, lm in data["frames"]:
+            r = engine.process([Point3D(*p) for p in lm] if lm else None, timestamp=100.0 + t)
+            actions.append(r.action)
+            if r.action in ("scroll_grab", "drag_hold") and r.cursor_point is not None:
+                ys.append(r.cursor_point[1])
+        return actions, ys[-1] - min(ys)
+
+    # (The grab itself comes straight out of a half fist moving the cursor; since 2026-11-05 that is not a grab at
+    # all - side_rearm_ratio - so the drag / return rules are checked with that rule off.)
+    actions, came_back = run({"side_rearm_ratio": 0.0})
+    assert "drag_hold" not in actions and "scroll_grab" in actions
+    assert came_back < 0.012
+    actions, came_back = run({"side_rearm_ratio": 0.0, "drag_hold_size_ratio": 0.0, "scroll_return_open": 0.0})
+    assert "drag_hold" in actions and came_back > 0.02
+    engine = GestureEngine()
+    engine.frame_aspect = data["frame_px"][1] / data["frame_px"][0]
+    acts = {engine.process([Point3D(*p) for p in lm] if lm else None, timestamp=100.0 + t).action for t, lm in data["frames"]}
+    assert "drag_hold" not in acts and "scroll_grab" not in acts
+
+
+@pytest.mark.record_off
+def test_moving_with_a_half_fist_from_the_log_keeps_the_cursor_moving():
+    """Real frames (tests/fixtures/half_fist_moving.json): 2 s of moving the cursor with a half fist, the thumb resting
+    near the curled fingers. The cursor used to stop the whole time ("about to pinch") and a left click fired; now it
+    moves in every frame. With the half-fist rules off it stops again."""
+    import json as _json
+    from pathlib import Path as _Path
+    data = _json.loads((_Path(__file__).parent / "fixtures" / "half_fist_moving.json").read_text(encoding="utf-8"))
+
+    def actions(cfg):
+        engine = GestureEngine()
+        engine.config.update(cfg)
+        engine.frame_aspect = data["frame_px"][1] / data["frame_px"][0]
+        return [engine.process([Point3D(*p) for p in lm], timestamp=100.0 + t).action for t, lm in data["frames"]]
+
+    assert set(actions({})) == {"move_cursor"}
+    old = actions({"curled_moving_speed": 0.0, "curled_pinch_size_ratio": 0.2, "shape_freeze_distance": 0.045,
+                   "curled_click_size_ratio": 0.22})
+    assert old.count("move_cursor") == 0 and "left_click" in old
+

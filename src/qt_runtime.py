@@ -28,6 +28,9 @@ from src.failure_log import FailureRecorder
 from src.close_sign import CloseSign
 from src.toggle_sign import ToggleSign
 from src.motion_mode import ACTION_LABELS, MotionMode
+from src.palm_axes import PalmAxesCalibration, valid_axes
+from src.elbow_pivot import ElbowPivot
+from src.pose_tracker import DEFAULT_POSE_MODEL, PoseTracker, pick_arm
 from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
 from src.hand_selection import selected_detection
@@ -54,6 +57,9 @@ class UiState:
     show_fingertips: bool = False
     profile: Optional[str] = None       # calibration profile the user picked (None = no profile)
     motion_request: int = 0             # +1 each time the user presses the motion-mode button
+    palm_axes_request: int = 0          # +1 per press of "cursor direction" (palm / fist cursor): start the wizard
+    palm_axes_cancel: int = 0           # +1 per press of its cancel button
+    palm_axes_reset: int = 0            # +1 per press of its reset button
 
 
 @dataclass
@@ -80,6 +86,7 @@ class Snapshot:
     toggle_progress: float = 0.0                          # progress 0..1 of the on/off sign hold
     close_sign: Optional[Tuple[float, float, str]] = None  # (progress 0..1 of the close-window hold, seconds left to confirm, notice)
     motion: Optional[Tuple[bool, float, str, float, float]] = None  # on, seconds left (0 = no timeout), last command, entering 0..1, leaving 0..1
+    palm_axes: Tuple[bool, str, float, str, bool] = (False, "", 0.0, "", False)  # wizard running, prompt, progress, note, correction saved
 
 
 def tracking_view(test: TrackingTest, cursor) -> Dict[str, Any]:
@@ -140,6 +147,23 @@ class QtRuntime:
         self._close_notice, self._close_notice_until = "", 0.0
         self._motion_seen = 0
         self._motion_last = ""
+        self._palm_seen = (0, 0, 0)               # palm_axes_request / cancel / reset already handled
+        self._palm_cal: Optional[PalmAxesCalibration] = None
+        self._palm_note, self._palm_note_until = "", 0.0
+        # Elbow pivot (src/elbow_pivot.py): estimated from the palm's arcs, used by the palm / fist cursor when
+        # `elbow_pivot` is on. The mouse controller reads it; this thread feeds it.
+        self.elbow = ElbowPivot(engine.config)
+        mouse.elbow_pivot = self.elbow
+        # Arm tracking (src/pose_tracker.py): shoulder / elbow / wrist of the cursor arm, every few frames (palm mode)
+        self.pose: Optional[PoseTracker] = None
+        if engine.config.get("pose_enabled", False) and DEFAULT_POSE_MODEL.exists():
+            try:
+                self.pose = PoseTracker()
+            except Exception as exc:                # a broken model must not stop the app
+                print(f"  [Warn] Pose model not loaded: {exc}")
+        self._arm = None
+        self._arm_t = -1e9
+        self._elbow_announced = False
         self._was_dragging = False
         self._seen_inertia = None
         self._last_scroll_total = [0, 0]
@@ -325,7 +349,16 @@ class QtRuntime:
             self.hand_crop.update(detections[0].landmarks, frame.shape[1], frame.shape[0])
         else:
             self.hand_crop.reset()
-        toggle_hold = self._toggle_sign(t0, ui, detections)
+        palm_calibrating = self._palm_axes(t0, ui, detections)
+        self._track_arm(t0, frame, ui, detections)
+        if engine.config.get("elbow_pivot", False) and detections and not ui.use_index_pointer:
+            self.elbow.observe(t0, engine.palm_anchor_point(detections[0].landmarks), mouse.frame_aspect)
+            if self.elbow.source == "arcs" and not self._elbow_announced:
+                self._elbow_announced = True
+                self._say("팔꿈치 위치를 찾았어요: 위아래·좌우를 팔꿈치 기준으로 펴서 움직여요", 3.0)
+        else:
+            self.elbow.observe(t0, None, mouse.frame_aspect)
+        toggle_hold = (not palm_calibrating) and self._toggle_sign(t0, ui, detections)
         motion_active = (not toggle_hold) and self._motion(t0, ui, detections)
         close_hold = (not motion_active) and (not toggle_hold) and self._close_sign(t0, ui, detections)
         if self._had_hand and not detections:
@@ -336,6 +369,7 @@ class QtRuntime:
 
         fh, fw = frame.shape[:2]
         mouse.frame_aspect = fh / max(1, fw)
+        engine.frame_aspect = mouse.frame_aspect
         if self.frames % 10 == 0:
             small = cv2.resize(frame, (64, 36), interpolation=cv2.INTER_AREA)
             level = int(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).mean())
@@ -401,7 +435,7 @@ class QtRuntime:
                 color = (189, 229, 70) if number == 1 or number in contacts else (245, 245, 245)
                 cv2.circle(frame, (px, py), 10, (49, 35, 17), -1, cv2.LINE_AA)
                 cv2.putText(frame, str(number), (px - 5, py + 5), cv2.FONT_HERSHEY_SIMPLEX, .46, color, 1, cv2.LINE_AA)
-        elif detections and not index_mode and not motion_active and not close_hold and not toggle_hold:
+        elif detections and not index_mode and not motion_active and not close_hold and not toggle_hold and not palm_calibrating:
             hand = detections[0]
             result = engine.process(hand.landmarks)
             if not self.paused:
@@ -414,6 +448,9 @@ class QtRuntime:
             if self._draw_cursor_anchor:
                 self._draw_cursor_anchor(frame, hand.landmarks, engine.palm_anchor_point(hand.landmarks),
                                          result.is_moving)
+            self._draw_arm(frame, t0)
+            if engine.config.get("elbow_pivot", False):
+                self._draw_elbow(frame, engine.palm_anchor_point(hand.landmarks), mouse.frame_aspect)
             if self._draw_recording:
                 self._draw_recording(frame, mouse.recorded_path)
             if mouse.fling_count != self._last_fling:
@@ -444,6 +481,7 @@ class QtRuntime:
             toggle_progress=self.toggle_sign.progress(t0),
             close_sign=(self.close_sign.progress(t0), self.close_sign.pending(t0),
                         self._close_notice if time.perf_counter() < self._close_notice_until else ""),
+            palm_axes=self._palm_view(t0),
         )
         self._pending_failures = self._pending_recent = None
         self._pending_message = ""
@@ -538,6 +576,122 @@ class QtRuntime:
             self.engine.reset()
             self.pointer.reset()
         return holding
+
+    def _track_arm(self, t0: float, frame, ui, detections) -> None:
+        """Pose every `pose_every` frames in palm mode; a visible elbow goes to the elbow pivot."""
+        if self.pose is None or ui.use_index_pointer or not detections:
+            return
+        every = max(1, int(self.engine.config.get("pose_every", 3)))
+        if self.frames % every:
+            return
+        lms = self.pose.detect(frame)
+        hand_wrist = detections[0].landmarks[0]
+        arm = pick_arm(lms, (hand_wrist.x, hand_wrist.y)) if lms else None
+        if arm is None:
+            return
+        # Pose joints jitter a lot from frame to frame (the shoulder and elbow sat still but jumped on the preview):
+        # average them, and keep the last good position of a joint the model is unsure of.
+        k = max(0.05, min(1.0, float(self.engine.config.get("pose_smooth", 0.25))))
+        min_vis = float(self.engine.config.get("pose_min_visibility", 0.5))
+        prev = self._arm if (self._arm is not None and t0 - self._arm_t < 1.0) else None
+        smooth = {"side": arm["side"]}
+        for name in ("shoulder", "elbow", "wrist"):
+            x, y, v = arm[name]
+            if prev is None:
+                smooth[name] = (x, y, v)
+            elif v < min_vis:
+                px, py, _ = prev[name]
+                smooth[name] = (px, py, v)
+            else:
+                px, py, pv = prev[name]
+                kk = k if pv >= min_vis else 1.0
+                smooth[name] = (px + kk * (x - px), py + kk * (y - py), v)
+        arm = smooth
+        self._arm, self._arm_t = arm, t0
+        ex, ey, ev = arm["elbow"]
+        if ev >= float(self.engine.config.get("pose_min_visibility", 0.5)) and self.engine.config.get("elbow_pivot", False):
+            self.elbow.set_pose((ex, ey), self.mouse.frame_aspect, t0)
+
+    def _draw_arm(self, frame, t0: float) -> None:
+        """Shoulder - elbow - wrist of the cursor arm (Pose). Joints the model is unsure of are drawn hollow."""
+        if self._arm is None or t0 - self._arm_t > 0.5:
+            return
+        fh, fw = frame.shape[:2]
+        min_vis = float(self.engine.config.get("pose_min_visibility", 0.5))
+        pts = [self._arm["shoulder"], self._arm["elbow"], self._arm["wrist"]]
+        xy = [(int(x * fw), int(y * fh)) for x, y, _ in pts]
+        teal = (200, 200, 60)
+        for (a, b), (_, _, va), (_, _, vb) in zip(zip(xy, xy[1:]), pts, pts[1:]):
+            if min(va, vb) >= min_vis:
+                cv2.line(frame, a, b, teal, 3, cv2.LINE_AA)
+        for (x, y), (_, _, v), name in zip(xy, pts, ("shoulder", "elbow", "wrist")):
+            if not (0 <= x < fw and 0 <= y < fh):
+                continue
+            cv2.circle(frame, (x, y), 9, teal, -1 if v >= min_vis else 2, cv2.LINE_AA)
+            if name != "wrist":
+                cv2.putText(frame, name, (x + 12, y - 8), cv2.FONT_HERSHEY_SIMPLEX, .55, teal, 2, cv2.LINE_AA)
+
+    def _draw_elbow(self, frame, palm, aspect: float) -> None:
+        """Estimated elbow (src/elbow_pivot.py) on the preview: a ring at it and the forearm line to the palm point.
+        Off-screen (the usual case, below the frame) it is drawn at the frame edge with the line pointing to it."""
+        fh, fw = frame.shape[:2]
+        orange = (40, 160, 255)
+        if self.elbow.source == "pose":
+            return                                  # the Pose arm (_draw_arm) already shows the real elbow
+        if self.elbow.elbow is None:
+            cv2.putText(frame, "elbow: move left/right to find it", (12, fh - 14), cv2.FONT_HERSHEY_SIMPLEX, .55,
+                        orange, 2, cv2.LINE_AA)
+            return
+        ex, ey = self.elbow.elbow[0] * fw, self.elbow.elbow[1] / max(1e-6, aspect) * fh
+        if palm is not None:
+            px, py = palm[0] * fw, palm[1] * fh
+            cv2.line(frame, (int(px), int(py)), (int(ex), int(ey)), orange, 2, cv2.LINE_AA)
+        inside = 0 <= ex < fw and 0 <= ey < fh
+        mx, my = int(min(max(ex, 8), fw - 8)), int(min(max(ey, 8), fh - 8))
+        cv2.circle(frame, (mx, my), 11, orange, 3 if inside else 2, cv2.LINE_AA)
+        label = "elbow (estimated)"
+        cv2.putText(frame, label if inside else label + " (off screen)", (mx + 14, max(18, my - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, .55, orange, 2, cv2.LINE_AA)
+
+    def _palm_axes(self, t0: float, ui, detections) -> bool:
+        """Cursor direction wizard for the palm / fist cursor (src/palm_axes.py). True while it records (no cursor moves)."""
+        start, cancel, reset = ui.palm_axes_request, ui.palm_axes_cancel, ui.palm_axes_reset
+        seen_start, seen_cancel, seen_reset = self._palm_seen
+        self._palm_seen = (start, cancel, reset)
+        ready = ui.stage == "main" and not ui.use_index_pointer and self.test is None
+        if reset != seen_reset:
+            self._palm_cal = None
+            self.engine.config.pop("palm_axes", None)
+            self.engine.save_config()
+            self._palm_note, self._palm_note_until = "커서 방향 보정을 지웠어요", t0 + 3.0
+        if cancel != seen_cancel or not ready:
+            self._palm_cal = None
+        if start != seen_start and ready:
+            self.mouse.release_all()
+            self.engine.reset()
+            self._palm_cal = PalmAxesCalibration(self.engine.config, start=t0)
+        cal = self._palm_cal
+        if cal is None:
+            return False
+        palm = self.engine.palm_anchor_point(detections[0].landmarks) if detections else None
+        if cal.update(t0, palm, self.mouse.frame_aspect):
+            self._palm_cal = None
+            if cal.axes is not None:
+                self.engine.config["palm_axes"] = [round(a, 4) for a in cal.axes]
+                self.engine.save_config()
+                self._palm_note = "커서 방향 보정 완료. " + cal.error
+            else:
+                self._palm_note = "커서 방향 보정 실패: " + cal.error
+            self._palm_note_until = t0 + 5.0
+            self.mouse.release_all()
+        return self._palm_cal is not None
+
+    def _palm_view(self, t0: float) -> Tuple[bool, str, float, str, bool]:
+        saved = valid_axes(self.engine.config.get("palm_axes"))
+        if self._palm_cal is not None:
+            prompt, progress, note = self._palm_cal.view(t0)
+            return True, prompt, progress, note, saved
+        return False, self._palm_note if t0 < self._palm_note_until else "", 0.0, "", saved
 
     def _motion(self, t0: float, ui, detections) -> bool:
         """Run motion mode for this frame. True while it is on (the pinch controls are then suspended)."""
