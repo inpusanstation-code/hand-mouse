@@ -8,10 +8,11 @@ import numpy as np
 
 from src.recorder import finished_recordings, read_session
 from src.recording_plan import label_condition_key
+from src.spatial_features import SPATIAL_FEATURES, SPATIAL_FEATURE_VERSION, extract_spatial_features
 from src.tcn_features import FEATURE_VERSION, FEATURES, frame_features, windows
 from src.gesture_catalog import CLASSES, BY_KEY
 
-_SESSION_CACHE_VERSION = f"v1-{FEATURE_VERSION}"
+_SESSION_CACHE_VERSION = f"v2-{FEATURE_VERSION}-{SPATIAL_FEATURE_VERSION}"
 _EXTRACT_MEM_CACHE: dict[tuple[str, int, int], dict] = {}
 
 
@@ -93,6 +94,7 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
         raise ValueError(f"Unfinished recording: {path.name}")
     n = len(frames)
     features = np.zeros((n, FEATURES), np.float32)
+    spatial_features = np.zeros((n, SPATIAL_FEATURES), np.float32)
     segments = np.full(n, -1, np.int64)
     cond_keys = [label_condition_key(f.get("label") or {}) for f in frames]
     valid_targets: list[str | None] = [None] * n
@@ -111,6 +113,10 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
         lab = f.get("label") or {}
         target = lab.get("target")
         valid = usable(f) and target not in ("idle", None)
+        if valid:
+            s_vec = extract_spatial_features(f.get("lm") or f.get("world"))
+            if s_vec is not None:
+                spatial_features[i] = s_vec
         boundary = (cond_keys[i], lab.get("set"))
         gap = i > 0 and not 0 < float(f.get("t", 0)) - float(frames[i - 1].get("t", 0)) <= 0.25
         if not valid or boundary != previous or gap:
@@ -147,6 +153,7 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
         "meta": meta,
         "frames": stored_frames,
         "features": features,
+        "spatial_features": spatial_features,
         "segments": segments,
         "seg_ranges": seg_ranges,
         "cond_keys": cond_keys,
@@ -231,6 +238,7 @@ def load_sessions(paths, window=15, *, include_windows=True, classes=None, use_c
             "meta": r["meta"],
             "frames": r["frames"],
             "features": features,
+            "spatial_features": r.get("spatial_features"),
             "x": x,
             "y": y,
             "cond": cond,

@@ -815,5 +815,8 @@
       "misfires_per_min": null,
       "rules_misfires_per_min": null
     }
-  }
+  },
+  "disabled_gestures": [
+    "thumb_middle"
+  ]
 }

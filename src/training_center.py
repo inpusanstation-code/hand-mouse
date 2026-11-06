@@ -818,6 +818,13 @@ def export_package(out_root: Path = EXPORT_DIR, with_dataset: bool = True) -> Pa
     shutil.copy2(MODEL.with_suffix(".json"), out / "gesture_tcn.json")
     shutil.copy2(ROOT / "src" / "tcn_features.py", out / "tcn_features.py")
     shutil.copy2(ROOT / "src" / "gesture_models.py", out / "gesture_models.py")
+    for extra_src in ("spatial_features.py", "spatial_mlp.py"):
+        extra_path = ROOT / "src" / extra_src
+        if extra_path.is_file():
+            shutil.copy2(extra_path, out / extra_src)
+    spatial_json = MODEL.parent / "spatial_mlp.json"
+    if spatial_json.is_file():
+        shutil.copy2(spatial_json, out / spatial_json.name)
     from src.gesture_models import SCHEMA, read_bank
     entries = read_bank(MODEL.parent / "gestures")
     if entries:
@@ -1023,6 +1030,9 @@ def backup_current_model(
     if has_main:
         shutil.copy2(model, folder / model.name)
         shutil.copy2(card, folder / card.name)
+    spatial_file = model.parent / "spatial_mlp.json"
+    if spatial_file.is_file():
+        shutil.copy2(spatial_file, folder / spatial_file.name)
     if has_bank:
         dst_bank = folder / "gestures"
         dst_bank.mkdir(parents=True, exist_ok=True)
@@ -1157,6 +1167,9 @@ def restore_model_backup(
     if src_model.is_file() and src_card.is_file():
         shutil.copy2(src_model, model)
         shutil.copy2(src_card, card)
+    src_spatial = src_folder / "spatial_mlp.json"
+    if src_spatial.is_file():
+        shutil.copy2(src_spatial, model.parent / "spatial_mlp.json")
 
     bank_dir = model.parent / "gestures"
     if bank_dir.is_dir():
@@ -1998,6 +2011,22 @@ def simulate_model_on_recording(
         if lbl in CLASSES and lbl not in specialists:
             probs[:, CLASSES.index(lbl)] = 0.0
 
+    # Blend 0-lag 96-dim Spatial MLP if models/spatial_mlp.json is available
+    sp_file = model.parent / "spatial_mlp.json"
+    if sp_file.is_file():
+        try:
+            from src.spatial_mlp import SpatialMlpModel, blend_tcn_and_spatial_probs, ensure_session_spatial_features
+            sp_model = SpatialMlpModel.load(sp_file)
+            s_feats = ensure_session_spatial_features(session)
+            if len(s_feats) == n_frames:
+                sp_probs = sp_model.predict_proba(s_feats)
+                probs = blend_tcn_and_spatial_probs(probs, CLASSES, sp_probs, sp_model.classes)
+                for lbl in disabled:
+                    if lbl in CLASSES and lbl not in specialists:
+                        probs[:, CLASSES.index(lbl)] = 0.0
+        except Exception:
+            pass
+
     y = session["y"]
     frames = session["frames"]
     t0 = float(frames[0].get("t", 0.0)) if n_frames else 0.0
@@ -2284,6 +2313,42 @@ def run_app_diagnostics(
             "name": "TCN 동작 모델 (ONNX 추론 검증)",
             "status": "warn",
             "detail": "아직 학습된 gesture_tcn.onnx 모델이 없습니다.",
+        })
+
+    # 3b. Spatial MLP (96-dim 0-lag posture model) live inference check
+    sp_path = model.parent / "spatial_mlp.json"
+    if sp_path.is_file():
+        try:
+            import numpy as np
+            from src.spatial_features import SPATIAL_FEATURES
+            from src.spatial_mlp import SpatialMlpModel
+            sp_model = SpatialMlpModel.load(sp_path)
+            sp_out = sp_model.predict_proba(np.zeros((1, SPATIAL_FEATURES), dtype=np.float32))
+            test_acc = sp_model.metadata.get("test_accuracy")
+            acc_str = f", 테스트 정확도 {test_acc:.1f}%" if isinstance(test_acc, (int, float)) else ""
+            if sp_out.shape == (1, len(sp_model.classes)) and np.isfinite(sp_out).all():
+                checks.append({
+                    "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
+                    "status": "ok",
+                    "detail": f"정상 추론 확인 (클래스 {len(sp_model.classes)}개, 은닉층 {sp_model.hidden_units}{acc_str})",
+                })
+            else:
+                checks.append({
+                    "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
+                    "status": "fail",
+                    "detail": f"비정상 출력 형태 감지: shape={sp_out.shape}",
+                })
+        except Exception as exc:
+            checks.append({
+                "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
+                "status": "fail",
+                "detail": f"Spatial MLP 로드/추론 오류: {exc}",
+            })
+    else:
+        checks.append({
+            "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
+            "status": "warn",
+            "detail": "아직 학습된 models/spatial_mlp.json 모델이 없습니다.",
         })
 
     # 4. Recordings & quality integrity check

@@ -420,6 +420,12 @@ def main() -> int:
 
     held = conds if a.folds else ([] if a.test_condition < 0 else [a.test_condition])
     summary = []
+    from src.spatial_mlp import (
+        blend_tcn_and_spatial_probs,
+        ensure_session_spatial_features,
+        pick_spatial_from_sessions,
+        train_spatial_mlp,
+    )
     for test in held:
         train_conds = [c for c in conds if c != test]
         x, y = pick(sessions, train_conds)
@@ -431,10 +437,22 @@ def main() -> int:
         emit("fold_start", posture=test, fold=held.index(test) + 1, folds=len(held))
         t1 = time.perf_counter()
         model = train(x, y, a.epochs, stage=f"fold{test}", classes=classes)
+        xs_fold, ys_fold = pick_spatial_from_sessions(sessions, train_conds)
+        sp_fold_model = None
+        if len(ys_fold) >= 2:
+            try:
+                sp_fold_model, _ = train_spatial_mlp(xs_fold, ys_fold, classes=classes)
+            except Exception:
+                sp_fold_model = None
         if not PROGRESS:
             print(f"    trained in {time.perf_counter() - t1:.0f} s")
         for s in eval_sessions:
             prob = predict(model, s["x"])
+            if sp_fold_model is not None:
+                s_feats = ensure_session_spatial_features(s)
+                if len(s_feats) == len(prob):
+                    sp_prob = sp_fold_model.predict_proba(s_feats)
+                    prob = blend_tcn_and_spatial_probs(prob, classes, sp_prob, sp_fold_model.classes)
             rule = evaluate(s, [test])
             tcn = evaluate(s, [test], prob, a.thr, a.k)
             if not PROGRESS:
@@ -462,6 +480,33 @@ def main() -> int:
     torch.onnx.export(model, torch.zeros(1, WINDOW, FEATURES), str(out), input_names=["x"], output_names=["logits"],
                       dynamic_axes={"x": {0: "batch"}, "logits": {0: "batch"}}, opset_version=18,
                       external_data=False, dynamo=False)
+
+    # Co-train and save 0-lag 96-dim Spatial MLP (models/spatial_mlp.json)
+    spatial_meta = None
+    xs_all, ys_all = pick_spatial_from_sessions(sessions, conds)
+    if len(ys_all) >= 2:
+        try:
+            sp_model, sp_metrics = train_spatial_mlp(xs_all, ys_all, classes=classes)
+            sp_path = a.output_dir / "spatial_mlp.json"
+            sp_model.save(sp_path)
+            spatial_meta = {
+                "file": sp_path.name,
+                "feature_version": sp_model.feature_version,
+                "feat_dim": sp_model.feat_dim,
+                "hidden_units": sp_model.hidden_units,
+                "train_accuracy": sp_metrics.train_accuracy,
+                "test_accuracy": sp_metrics.test_accuracy,
+                "total_samples": sp_metrics.total_samples,
+                "elapsed_ms": sp_metrics.elapsed_ms,
+                "per_class": sp_metrics.per_class,
+                "trained_at": sp_metrics.trained_at,
+            }
+            if not PROGRESS:
+                print(f"saved {sp_path.name} (96-dim Spatial MLP, test_acc={sp_metrics.test_accuracy:.1f}%, {sp_metrics.elapsed_ms:.0f} ms)")
+        except Exception as exc:
+            if not PROGRESS:
+                print(f"spatial MLP skip: {exc}")
+
     results = [{"posture": t, "rules": r, "tcn": m, "free_minutes": round(fm, 2)} for t, r, m, fm in summary]
     info = {
         "classes": classes, "window": WINDOW, "features": FEATURES, "feature_version": FEATURE_VERSION,
@@ -475,6 +520,7 @@ def main() -> int:
         "loss_curve": losses, "train_accuracy": train_acc,
         "per_gesture": per_gesture(results, per_class, train_acc, classes),
         "per_task": per_gesture(results, per_class, train_acc, classes, by_task=True),
+        "spatial_mlp": spatial_meta,
     }
     out.with_suffix(".json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     if not PROGRESS:

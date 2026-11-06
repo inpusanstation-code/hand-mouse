@@ -158,6 +158,24 @@ def run(args, training):
                 except Exception:
                     pass
                 publish_bank(folder, staged)
+                # Also refresh 0-lag 96-dim Spatial MLP (spatial_mlp.json) across all available classes
+                try:
+                    from src.spatial_mlp import pick_spatial_from_sessions, train_spatial_mlp
+                    present_idx = sorted({int(y) for y in all_y if y >= 0})
+                    sp_classes = [CLASSES[i] for i in present_idx]
+                    if "none" in sp_classes and len(sp_classes) >= 2:
+                        remapped = []
+                        for s in sessions:
+                            y_remap = np.full_like(s["y"], -1)
+                            for ci, cname in enumerate(sp_classes):
+                                y_remap[s["y"] == CLASSES.index(cname)] = ci
+                            remapped.append({**s, "y": y_remap})
+                        xs_sp, ys_sp = pick_spatial_from_sessions(remapped)
+                        if len(ys_sp) >= 2:
+                            sp_model, _ = train_spatial_mlp(xs_sp, ys_sp, classes=sp_classes)
+                            sp_model.save(args.output_dir / "spatial_mlp.json")
+                except Exception:
+                    pass
                 main_card = args.output_dir / "gesture_tcn.json"
                 if main_card.is_file():
                     try:
