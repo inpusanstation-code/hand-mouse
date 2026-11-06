@@ -28,12 +28,39 @@ MENU = [
     ("3", "학습 센터 리포트", "동작별 데이터 양·인식률·오작동과 '어떤 동작을 더 녹화할지' 추천"),
     ("4", "TCN 학습하기", "recordings/ 의 녹화로 학습 (자세별 평가 포함, CPU로 몇 분)"),
     ("5", "모델 내보내기", "다른 앱에 넣을 수 있는 묶음 만들기 (exports/)"),
-    ("6", "허브 상태 확인", "로컬 녹화 검증 및 Hugging Face 데이터 허브 현황 확인"),
-    ("7", "허브에 업로드 (push)", "검증된 새 녹화(.jsonl.gz)와 TCN 모델을 Hugging Face 허브에 업로드"),
-    ("8", "허브에서 받기 (pull)", "팀원들이 올린 새 녹화와 모델을 Hugging Face 허브에서 내려받기"),
+    ("6", "허브 설정 및 상태 확인", "저장소 주소(Hugging Face / GitHub)·보안 토큰(DPAPI 암호화) 설정 및 현황 확인"),
+    ("7", "허브에 업로드 (push)", "검증된 새 녹화(.jsonl.gz)와 TCN 모델을 설정된 원격 허브에 업로드"),
+    ("8", "허브에서 받기 (pull)", "팀원들이 올린 새 녹화와 모델을 설정된 원격 허브에서 내려받기"),
     ("9", "시험 돌리기", "pytest: 앱이 망가지지 않았는지 확인"),
     ("0", "끝내기", ""),
 ]
+
+
+def _prompt_hub_setup_if_needed(require_token: bool = False) -> None:
+    from tools import hub as hf_hub
+    import getpass
+
+    cfg = hf_hub.load_hub_config()
+    tok = hf_hub.load_hub_token(cfg["provider"])
+    prov_label = "GitHub" if cfg["provider"] == "github" else "Hugging Face"
+    tok_status = f"암호화 저장됨 ({hf_hub.mask_token(tok)})" if tok else "미설정"
+    print(f"\n  [현재 원격 허브 설정] 플랫폼: {prov_label} | 저장소: {cfg['repo']} ({cfg['branch']}) | 토큰: {tok_status}")
+
+    change = input("  허브 주소나 토큰을 변경/입력하시겠습니까? (y/엔터=그대로 진행): ").strip().lower()
+    if change == "y" or (require_token and not tok):
+        if require_token and not tok and change != "y":
+            print("  ※ 업로드를 위해 액세스 토큰 입력이 필요합니다.")
+        p_in = input(f"  플랫폼 선택 (1=Hugging Face, 2=GitHub, 엔터={prov_label}): ").strip()
+        provider = "github" if p_in == "2" else ("huggingface" if p_in == "1" else cfg["provider"])
+        r_in = input(f"  저장소 주소 (owner/repo 또는 전체 URL, 엔터={cfg['repo']}): ").strip() or cfg["repo"]
+        b_in = input(f"  브랜치 이름 (엔터={cfg['branch']}): ").strip() or cfg["branch"]
+        try:
+            t_in = getpass.getpass("  액세스 토큰 입력 (화면에 표시되지 않음, 엔터=기존 유지): ").strip()
+        except Exception:
+            t_in = input("  액세스 토큰 입력 (엔터=기존 유지): ").strip()
+        saved = hf_hub.save_hub_config(provider=provider, repo=r_in, branch=b_in, token=t_in if t_in else None)
+        new_tok = hf_hub.load_hub_token(saved["provider"])
+        print(f"  ✓ 저장 완료: {saved['provider']} · {saved['repo']} ({saved['branch']}) · 토큰 {hf_hub.mask_token(new_tok) or '없음'}")
 
 
 def run(args, explain: str) -> None:
@@ -73,12 +100,15 @@ def main() -> int:
         elif choice == "5":
             run(["scripts/export_model.py"], "exports/ 에 모델·특징 코드·사용 예시·설명서를 묶어 zip으로")
         elif choice == "6":
-            run(["tools/hub.py", "status"], "로컬 녹화 무결성 검사와 Hugging Face 허브 요약")
+            _prompt_hub_setup_if_needed(require_token=False)
+            run(["tools/hub.py", "status"], "로컬 녹화 무결성 검사와 원격 데이터 허브 요약")
         elif choice == "7":
+            _prompt_hub_setup_if_needed(require_token=True)
             model_args = ["--model", "models/gesture_tcn.onnx"] if (ROOT / "models" / "gesture_tcn.onnx").is_file() else []
-            run(["tools/hub.py", "push"] + model_args, "새 녹화와 모델을 검증 후 Hugging Face 허브에 업로드")
+            run(["tools/hub.py", "push"] + model_args, "새 녹화와 모델을 검증 후 설정된 원격 허브에 업로드")
         elif choice == "8":
-            run(["tools/hub.py", "pull", "--models"], "Hugging Face 허브에서 없는 녹화와 공유 모델 내려받기")
+            _prompt_hub_setup_if_needed(require_token=False)
+            run(["tools/hub.py", "pull", "--models"], "원격 허브에서 없는 녹화와 공유 모델 내려받기")
         elif choice == "9":
             run(["-m", "pytest", "-q"], "전체 시험")
         else:

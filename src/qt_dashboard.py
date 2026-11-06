@@ -120,6 +120,9 @@ class QtDashboard(QObject):
         self.sim_eval = {}                                      # latest simulator data quality & calibration evaluation
         self.aug_settings = get_augmentation_settings()         # augmentation enabled / strength / factor settings
         self.diag_result = {}                                   # latest app self-diagnostics result
+        from tools import hub as hf_hub
+        self.hub_config = hf_hub.load_hub_config()
+        self.hub_status_note = ""
         self.training_info = ("", "")                           # (data line, model line)
         self.training_storage = ("", False)                     # (recordings size in git, past the split limit)
         self.training_busy = ""                                 # "읽는 중…" / "내보내는 중…"
@@ -1136,29 +1139,111 @@ class QtDashboard(QObject):
         EXPORT_DIR.mkdir(exist_ok=True)
         os.startfile(str(EXPORT_DIR))  # noqa: S606 - Windows explorer on our own folder
 
-    @Slot()
-    def pushToHub(self):
+    @Property(str, notify=trainingChanged)
+    def hubProvider(self):
+        return str(self.hub_config.get("provider", "huggingface"))
+
+    @Property(str, notify=trainingChanged)
+    def hubRepo(self):
+        return str(self.hub_config.get("repo", ""))
+
+    @Property(str, notify=trainingChanged)
+    def hubBranch(self):
+        return str(self.hub_config.get("branch", "main"))
+
+    @Property(bool, notify=trainingChanged)
+    def hubIncludeModels(self):
+        return bool(self.hub_config.get("include_models", True))
+
+    @Property(bool, notify=trainingChanged)
+    def hubHasToken(self):
+        from tools import hub as hf_hub
+        return bool(hf_hub.load_hub_token(self.hubProvider))
+
+    @Property(str, notify=trainingChanged)
+    def hubTokenMasked(self):
+        from tools import hub as hf_hub
+        tok = hf_hub.load_hub_token(self.hubProvider)
+        return hf_hub.mask_token(tok) if tok else "저장된 토큰 없음"
+
+    @Property(str, notify=trainingChanged)
+    def hubStatusNote(self):
+        return str(getattr(self, "hub_status_note", ""))
+
+    @Property(str, notify=trainingChanged)
+    def hubSummaryLabel(self):
+        prov = "GitHub" if self.hubProvider == "github" else "Hugging Face"
+        repo = self.hubRepo or "미설정"
+        tok_label = f"토큰 {self.hubTokenMasked}" if self.hubHasToken else "토큰 미설정"
+        return f"{prov} · {repo} ({self.hubBranch}) · {tok_label}"
+
+    @Slot(str, str, str, str, bool, result=bool)
+    def saveHubSettings(self, provider, repo, branch, token, include_models=True):
+        from tools import hub as hf_hub
+        try:
+            saved = hf_hub.save_hub_config(
+                provider=str(provider or "huggingface"),
+                repo=str(repo or ""),
+                branch=str(branch or "main"),
+                include_models=bool(include_models),
+                token=str(token) if token and str(token).strip() else None,
+            )
+            self.hub_config = saved
+            prov_ko = "GitHub" if saved["provider"] == "github" else "Hugging Face"
+            tok_saved = " + 토큰 암호화 저장됨(DPAPI)" if (token and str(token).strip()) else ""
+            self.hub_status_note = f"허브 설정 저장 완료: {prov_ko} · {saved['repo']} ({saved['branch']}){tok_saved}"
+            self.training_note = self.hub_status_note
+            self.trainingChanged.emit()
+            return True
+        except Exception as exc:
+            self.hub_status_note = f"허브 설정 오류: {hf_hub.redact_secrets(str(exc), [str(token or '')])}"
+            self.training_note = self.hub_status_note
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str)
+    def clearHubToken(self, provider=""):
+        from tools import hub as hf_hub
+        target = str(provider or self.hubProvider)
+        hf_hub.delete_hub_token(target)
+        self.hub_status_note = "저장된 액세스 토큰을 암호화 금고에서 삭제했습니다."
+        self.training_note = self.hub_status_note
+        self.trainingChanged.emit()
+
+    @Slot(str, str, str, str)
+    def testHubConnectionSlot(self, provider="", repo="", branch="", token=""):
         if self.training_busy:
             return
-        self.training_busy = "Hugging Face 허브로 녹화·모델 업로드 중…"
+        from tools import hub as hf_hub
+        if repo.strip():
+            if not self.saveHubSettings(
+                provider or self.hubProvider,
+                repo,
+                branch or self.hubBranch,
+                token,
+                self.hubIncludeModels,
+            ):
+                return
+        self.training_busy = "원격 허브 저장소 연결 및 권한 확인 중…"
+        self.hub_status_note = self.training_busy
         self.trainingChanged.emit()
 
         def work():
-            from tools import hub as hf_hub
-            from src.training_center import MODEL, REC_DIR
             try:
-                hf_hub.load_dotenv()
-                repo = os.environ.get(hf_hub.ENV_REPO, hf_hub.DEFAULT_REPO)
-                token = os.environ.get(hf_hub.ENV_TOKEN, "")
-                client = hf_hub.HfDatasetHub(repo, token)
-                models = [MODEL] if MODEL.is_file() and MODEL.with_suffix(".json").is_file() else []
-                res = hf_hub.push_to_hub(client, REC_DIR, models=models)
-                self.training_note = (
-                    f"허브 업로드 완료 ({repo}): 새 녹화 {res['new_recordings']}개, "
-                    f"모델 {res['models']}개 (기존 {res['already_on_hub']}개)"
+                res = hf_hub.test_hub_connection()
+                rem = res.get("remote", {})
+                prov_ko = "GitHub" if res.get("provider") == "github" else "Hugging Face"
+                msg = (
+                    f"연결 성공 ({prov_ko} · {res.get('repo')}@{res.get('branch')}): "
+                    f"원격 녹화 {rem.get('files', 0)}개 ({rem.get('frames', 0)}프레임, {rem.get('size_mb', 0)}MB), "
+                    f"공유 모델 {rem.get('models', 0)}개"
                 )
+                self.hub_status_note = msg
+                self.training_note = msg
             except Exception as exc:
-                self.training_note = f"허브 업로드 실패: {exc}"
+                err = f"허브 연결 확인 실패: {hf_hub.redact_secrets(str(exc), [str(token or '')])}"
+                self.hub_status_note = err
+                self.training_note = err
             self.training_busy = ""
 
         import threading
@@ -1166,21 +1251,76 @@ class QtDashboard(QObject):
         self.training_timer.start()
 
     @Slot()
-    def pullFromHub(self):
+    @Slot(str, str, str, str, bool)
+    def pushToHub(self, provider="", repo="", branch="", token="", include_models=True):
         if self.training_busy:
             return
-        self.training_busy = "Hugging Face 허브에서 팀 데이터 내려받는 중…"
+        from tools import hub as hf_hub
+        if provider or repo or branch or token:
+            if not self.saveHubSettings(
+                provider or self.hubProvider,
+                repo or self.hubRepo,
+                branch or self.hubBranch,
+                token,
+                include_models,
+            ):
+                return
+        self.hub_config = hf_hub.load_hub_config()
+        prov_ko = "GitHub" if self.hubProvider == "github" else "Hugging Face"
+        self.training_busy = f"{prov_ko} 허브({self.hubRepo})로 녹화·모델 업로드 중…"
+        self.hub_status_note = self.training_busy
         self.trainingChanged.emit()
 
         def work():
-            from tools import hub as hf_hub
+            from src.training_center import MODEL, REC_DIR
+            try:
+                client, info = hf_hub.create_hub_client()
+                use_models = bool(self.hub_config.get("include_models", True))
+                models = [MODEL] if (use_models and MODEL.is_file() and MODEL.with_suffix(".json").is_file()) else []
+                res = hf_hub.push_to_hub(client, REC_DIR, models=models)
+                msg = (
+                    f"허브 업로드 완료 ({info['provider']} · {info['repo']}): "
+                    f"새 녹화 {res['new_recordings']}개, 모델 {res['models']}개 (기존 {res['already_on_hub']}개)"
+                )
+                self.hub_status_note = msg
+                self.training_note = msg
+            except Exception as exc:
+                err = f"허브 업로드 실패: {hf_hub.redact_secrets(str(exc), [str(token or '')])}"
+                self.hub_status_note = err
+                self.training_note = err
+            self.training_busy = ""
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot()
+    @Slot(str, str, str, str, bool)
+    def pullFromHub(self, provider="", repo="", branch="", token="", include_models=True):
+        if self.training_busy:
+            return
+        from tools import hub as hf_hub
+        if provider or repo or branch or token:
+            if not self.saveHubSettings(
+                provider or self.hubProvider,
+                repo or self.hubRepo,
+                branch or self.hubBranch,
+                token,
+                include_models,
+            ):
+                return
+        self.hub_config = hf_hub.load_hub_config()
+        prov_ko = "GitHub" if self.hubProvider == "github" else "Hugging Face"
+        self.training_busy = f"{prov_ko} 허브({self.hubRepo})에서 팀 데이터 내려받는 중…"
+        self.hub_status_note = self.training_busy
+        self.trainingChanged.emit()
+
+        def work():
             from src.training_center import REC_DIR
             try:
-                hf_hub.load_dotenv()
-                repo = os.environ.get(hf_hub.ENV_REPO, hf_hub.DEFAULT_REPO)
-                token = os.environ.get(hf_hub.ENV_TOKEN, "")
-                client = hf_hub.HfDatasetHub(repo, token)
-                res = hf_hub.pull_from_hub(client, REC_DIR, include_models=True)
+                client, info = hf_hub.create_hub_client()
+                use_models = bool(self.hub_config.get("include_models", True))
+                res = hf_hub.pull_from_hub(client, REC_DIR, include_models=use_models)
                 from src.training_center import run_post_recording_pipeline
                 for rec_file in sorted(REC_DIR.rglob("*.jsonl.gz")):
                     if "cleaned" in rec_file.parts or "augmented" in rec_file.parts:
@@ -1194,13 +1334,17 @@ class QtDashboard(QObject):
                             rec_file,
                             {"auto_quality_check": True, "auto_clean": True, "auto_offline_augment": True},
                         )
-                self.training_note = (
-                    f"허브 동기화·정제·증강 완료 ({repo}): 새 녹화 {res['downloaded']}개, "
-                    f"모델 {res['models_downloaded']}개 내려받음"
+                msg = (
+                    f"허브 동기화·정제·증강 완료 ({info['provider']} · {info['repo']}): "
+                    f"새 녹화 {res['downloaded']}개, 모델 {res['models_downloaded']}개 내려받음"
                 )
+                self.hub_status_note = msg
+                self.training_note = msg
                 self.refreshTraining()
             except Exception as exc:
-                self.training_note = f"허브 동기화 실패: {exc}"
+                err = f"허브 동기화 실패: {hf_hub.redact_secrets(str(exc), [str(token or '')])}"
+                self.hub_status_note = err
+                self.training_note = err
             self.training_busy = ""
 
         import threading

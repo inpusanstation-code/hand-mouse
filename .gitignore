@@ -43,3 +43,7 @@ recordings/*.part
 config/tcn-ui.ini
 config/recording-plans.json
 config/recording-plans.tmp
+config/hub.json
+config/hub.json.tmp
+config/hub_secrets.bin
+config/hub_secrets.bin.tmp

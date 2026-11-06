@@ -265,10 +265,25 @@ ApplicationWindow {
         property bool warn: false
         implicitWidth: chipLabel.implicitWidth + 20
         implicitHeight: 28
+        Layout.minimumWidth: Math.min(implicitWidth, 68)
+        Layout.preferredWidth: implicitWidth
+        Layout.maximumWidth: implicitWidth
         radius: 14
         color: warn ? "#FFF1D6" : "#E8F7F2"
         border.color: warn ? "#F2B544" : "transparent"
-        TextLabel { id: chipLabel; anchors.centerIn: parent; font.pixelSize: 12; color: chip.warn ? "#8A5A00" : window.navy }
+        clip: true
+        TextLabel {
+            id: chipLabel
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+            anchors.verticalCenter: parent.verticalCenter
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            font.pixelSize: 12
+            color: chip.warn ? "#8A5A00" : window.navy
+        }
     }
 
     ColumnLayout {
@@ -779,32 +794,65 @@ ApplicationWindow {
         padding: 20
         background: Rectangle { radius: 16; color: "white"; border.color: window.line }
         contentItem: ColumnLayout {
-            spacing: 10
+            width: trainingCenter.availableWidth
+            spacing: 8
             RowLayout {
                 Layout.fillWidth: true
+                spacing: 8
                 ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     spacing: 2
-                    TextLabel { text: "학습 센터 · 데이터 품질 · 시뮬레이터"; font.pixelSize: 22; font.bold: true }
                     TextLabel {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
+                        text: "학습 센터 · 데이터 품질 · 시뮬레이터"
+                        font.pixelSize: 21
+                        font.bold: true
+                    }
+                    TextLabel {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                         text: "녹화 품질 평가 및 선별 → 동작별 선택/통합 학습 → 시뮬레이터 검증 → 동작별 초기화 및 모델 버전 복원"
-                        font.pixelSize: 12; color: window.muted
+                        font.pixelSize: 12
+                        color: window.muted
                     }
                 }
-                Item { Layout.fillWidth: true }
                 ActionButton { text: "새로고침"; enabled: dashboard.trainingBusy === ""; onClicked: dashboard.refreshTraining() }
                 ActionButton { text: "닫기"; onClicked: trainingCenter.close() }
             }
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
-                Chip { text: dashboard.trainingData !== "" ? dashboard.trainingData : "녹화 읽는 중…" }
-                Chip { text: dashboard.trainingModel !== "" ? dashboard.trainingModel : "모델 확인 중…" }
+                spacing: 6
+                Chip {
+                    Layout.fillWidth: true
+                    text: dashboard.trainingData !== "" ? dashboard.trainingData : "녹화 읽는 중…"
+                }
+                Chip {
+                    Layout.fillWidth: true
+                    text: dashboard.trainingModel !== "" ? dashboard.trainingModel : "모델 확인 중…"
+                }
                 Chip {
                     visible: dashboard.trainingStorage !== "" && !dashboard.trainingStorageWarn
+                    Layout.fillWidth: true
                     text: dashboard.trainingStorage
                 }
-                Item { Layout.fillWidth: true }
-                TextLabel { visible: dashboard.trainingBusy !== ""; text: dashboard.trainingBusy; font.pixelSize: 12; color: window.muted }
+                Chip {
+                    warn: !dashboard.hubHasToken
+                    Layout.fillWidth: true
+                    text: "원격 허브 · " + dashboard.hubSummaryLabel
+                }
+                Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                TextLabel {
+                    visible: dashboard.trainingBusy !== ""
+                    text: dashboard.trainingBusy
+                    font.pixelSize: 12
+                    color: window.muted
+                    Layout.maximumWidth: 240
+                    elide: Text.ElideRight
+                }
             }
             Rectangle {
                 visible: dashboard.trainingStorageWarn
@@ -870,6 +918,7 @@ ApplicationWindow {
                 spacing: 8
                 TextLabel {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: "인식 = 학습에 쓰지 않은 자세에서 맞힌 비율 (실전 실력) · 특정 동작 학습이 잘못된 경우 [학습 초기화]로 해당 동작만 즉시 규칙 모드로 되돌릴 수 있습니다."
                     font.pixelSize: 11; color: window.muted; wrapMode: Text.Wrap
                 }
@@ -915,11 +964,12 @@ ApplicationWindow {
                                     spacing: 14
                                     ColumnLayout {
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         spacing: 5
                                         RowLayout {
                                             Layout.fillWidth: true
                                             spacing: 8
-                                            TextLabel { text: row.modelData.name; font.pixelSize: 16; font.bold: true; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                                            TextLabel { text: row.modelData.name; font.pixelSize: 16; font.bold: true; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.Wrap }
                                             Chip {
                                                 visible: Boolean(row.modelData.is_disabled)
                                                 warn: true
@@ -930,7 +980,7 @@ ApplicationWindow {
                                                 text: row.modelData.level === "ok" ? "좋아요" : row.modelData.level === "need" ? "더 녹화" : "다시 학습"
                                             }
                                         }
-                                        TextLabel { text: row.modelData.instruction; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 12; color: window.muted }
+                                        TextLabel { text: row.modelData.instruction; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.Wrap; font.pixelSize: 12; color: window.muted }
                                         RowLayout {
                                             Layout.fillWidth: true
                                             spacing: 8
@@ -961,6 +1011,7 @@ ApplicationWindow {
                                         }
                                         TextLabel {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: "→ " + row.modelData.advice
                                             font.pixelSize: 12
                                             color: row.modelData.level === "need" ? "#8A5A00" : window.muted
@@ -1019,6 +1070,7 @@ ApplicationWindow {
                     spacing: 8
                     TextLabel {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         text: "녹화별 품질 점수(손 유실률·프레임 떨림·동작 구간 유효성)를 평가하고, 학습에 사용할 녹화만 체크하여 선별할 수 있습니다."
                         font.pixelSize: 12; color: window.muted; wrapMode: Text.Wrap
                     }
@@ -1061,6 +1113,7 @@ ApplicationWindow {
                                     spacing: 12
                                     ColumnLayout {
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         spacing: 4
                                         RowLayout {
                                             Layout.fillWidth: true
@@ -1081,11 +1134,13 @@ ApplicationWindow {
                                                 font.bold: true
                                                 font.pixelSize: 14
                                                 Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
                                                 elide: Text.ElideMiddle
                                             }
                                         }
                                         TextLabel {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: "녹화 목표 동작: " + (fileRow.modelData.target_gestures_text || "지정된 동작 없음")
                                                 + (fileRow.modelData.target_conditions_text ? ("  |  촬영 자세: " + fileRow.modelData.target_conditions_text) : "")
                                             font.bold: true
@@ -1095,6 +1150,7 @@ ApplicationWindow {
                                         }
                                         TextLabel {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: fileRow.modelData.detail_text
                                             font.pixelSize: 12
                                             color: window.muted
@@ -1102,6 +1158,7 @@ ApplicationWindow {
                                         }
                                         TextLabel {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: fileRow.modelData.quality_text
                                             font.pixelSize: 12
                                             color: fileRow.modelData.quality_status === "fail" ? "#C62828" : window.muted
@@ -1234,7 +1291,7 @@ ApplicationWindow {
                         ComboBox {
                             id: simFileCombo
                             Layout.fillWidth: true
-                            Layout.minimumWidth: 320
+                            Layout.minimumWidth: 160
                             implicitHeight: 32
                             model: dashboard.trainingFiles
                             textRole: "combo_label"
@@ -1280,239 +1337,10 @@ ApplicationWindow {
                     }
                 }
 
-                // Explicit Recording Target Intent & Screen Region Coverage Banner
-                Rectangle {
-                    Layout.fillWidth: true
-                    implicitHeight: recIntentCol.implicitHeight + 14
-                    radius: 10
-                    color: "#EEF8F6"
-                    border.color: "#8CE0CA"
-                    ColumnLayout {
-                        id: recIntentCol
-                        anchors.fill: parent
-                        anchors.margins: 7
-                        spacing: 3
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Chip {
-                                text: dashboard.simRecordedModeLabel
-                            }
-                            TextLabel {
-                                Layout.fillWidth: true
-                                text: "녹화 목표 동작: " + dashboard.simTargetGesturesText
-                                font.bold: true
-                                font.pixelSize: 13
-                                color: "#0B4F40"
-                                wrapMode: Text.Wrap
-                            }
-                            Chip {
-                                warn: dashboard.simPoseCoveragePct === 0
-                                text: dashboard.simPoseCoveragePct > 0
-                                    ? ("팔·어깨 스켈레톤(Pose) " + dashboard.simPoseCoveragePct + "% 수록")
-                                    : "팔·어깨 스켈레톤 추정 모드"
-                            }
-                        }
-                        TextLabel {
-                            Layout.fillWidth: true
-                            text: "촬영 자세 조건: " + dashboard.simTargetConditionsText
-                                + "   |   화면 영역 기록 분포: " + dashboard.simScreenZonesText
-                                + (dashboard.simTargetInstructionText !== "" ? ("   |   수행 방법: " + dashboard.simTargetInstructionText) : "")
-                            font.pixelSize: 11
-                            color: "#235347"
-                            wrapMode: Text.Wrap
-                        }
-                    }
-                }
-
-                // 2-Column Enlarged Cards: Left = 데이터 평가·보정, Right = 데이터 증강 설정 (hidden when skeleton visualizer is expanded)
-                RowLayout {
-                    visible: !simTabRoot.expandSkeleton
-                    Layout.fillWidth: true
-                    spacing: 10
-
-                    // 1) 데이터 평가 및 보정 카드 (충분한 높이 및 줄 분리로 버튼 이탈 방지)
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredWidth: 1
-                        implicitHeight: Math.max(evalCalibCol.implicitHeight, augCol.implicitHeight) + 20
-                        radius: 10
-                        color: dashboard.simQualityStatus === "fail" ? "#FFF1F0" : (dashboard.simQualityStatus === "warning" ? "#FFF8EA" : "#F7FAFB")
-                        border.color: dashboard.simQualityStatus === "fail" ? "#E5484D" : (dashboard.simQualityStatus === "warning" ? "#F2B544" : window.line)
-                        ColumnLayout {
-                            id: evalCalibCol
-                            anchors.fill: parent
-                            anchors.margins: 10
-                            spacing: 6
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                TextLabel { text: "데이터 품질 평가 · 보정"; font.bold: true; font.pixelSize: 13 }
-                                Chip {
-                                    warn: dashboard.simQualityStatus !== "pass"
-                                    text: dashboard.simCleanedExists ? "보정본 적용 중" : "원본 상태"
-                                }
-                                Item { Layout.fillWidth: true }
-                                ActionButton {
-                                    text: "데이터 보정 실행"
-                                    enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.trainingFiles.length > 0
-                                    onClicked: dashboard.calibrateSimRecording(
-                                        simTabRoot.currentSimFilename(),
-                                        simTabRoot.calibInterpGap,
-                                        simTabRoot.calibJointJump,
-                                        4
-                                    )
-                                }
-                                ActionButton {
-                                    text: "원본 복구"
-                                    enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.simCleanedExists
-                                    onClicked: dashboard.resetCalibratedSimRecording(simTabRoot.currentSimFilename())
-                                }
-                            }
-                            TextLabel {
-                                Layout.fillWidth: true
-                                text: dashboard.simQualityHeadline
-                                font.pixelSize: 11
-                                color: window.navy
-                                wrapMode: Text.Wrap
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                TextLabel { text: "손끊김 결측 보간:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
-                                Repeater {
-                                    model: [
-                                        { label: "1프레임", val: 1 },
-                                        { label: "3프레임 (권장)", val: 3 },
-                                        { label: "5프레임", val: 5 }
-                                    ]
-                                    delegate: CompactButton {
-                                        required property var modelData
-                                        text: modelData.label
-                                        accent: simTabRoot.calibInterpGap === modelData.val
-                                        onClicked: simTabRoot.calibInterpGap = modelData.val
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                TextLabel { text: "관절 점프 억제:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
-                                Repeater {
-                                    model: [
-                                        { label: "엄격 (0.25)", val: 0.25 },
-                                        { label: "표준 (0.38)", val: 0.38 },
-                                        { label: "완화 (0.50)", val: 0.50 }
-                                    ]
-                                    delegate: CompactButton {
-                                        required property var modelData
-                                        text: modelData.label
-                                        accent: Math.abs(simTabRoot.calibJointJump - modelData.val) < 0.01
-                                        onClicked: simTabRoot.calibJointJump = modelData.val
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                        }
-                    }
-
-                    // 2) 데이터 증강 설정 카드 (충분한 높이 및 강도/수량 줄 분리로 박스 이탈 완전 차단)
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredWidth: 1
-                        implicitHeight: Math.max(evalCalibCol.implicitHeight, augCol.implicitHeight) + 20
-                        radius: 10
-                        color: "#F7FAFB"
-                        border.color: window.line
-                        ColumnLayout {
-                            id: augCol
-                            anchors.fill: parent
-                            anchors.margins: 10
-                            spacing: 6
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                TextLabel { text: "데이터 증강 설정"; font.bold: true; font.pixelSize: 13 }
-                                CompactButton {
-                                    text: dashboard.augEnabled ? "증강 사용 중 (ON)" : "증강 꺼짐 (OFF)"
-                                    accent: dashboard.augEnabled
-                                    enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning
-                                    onClicked: dashboard.setAugmentationConfig(!dashboard.augEnabled, dashboard.augStrength, dashboard.augFactor)
-                                }
-                                Item { Layout.fillWidth: true }
-                                ActionButton {
-                                    text: dashboard.augEnabled ? "이 녹화 증강 생성" : "이 녹화 증강 삭제"
-                                    enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.trainingFiles.length > 0
-                                    onClicked: dashboard.applySimAugmentation(
-                                        simTabRoot.currentSimFilename(),
-                                        dashboard.augEnabled,
-                                        dashboard.augStrength,
-                                        dashboard.augFactor
-                                    )
-                                }
-                                ActionButton {
-                                    text: dashboard.augEnabled ? "전체 선택 녹화 증강" : "전체 증강본 정리"
-                                    enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.trainingFiles.length > 0
-                                    onClicked: dashboard.applySimAugmentation(
-                                        "__all__",
-                                        dashboard.augEnabled,
-                                        dashboard.augStrength,
-                                        dashboard.augFactor
-                                    )
-                                }
-                            }
-                            TextLabel {
-                                Layout.fillWidth: true
-                                text: dashboard.augSummary
-                                font.pixelSize: 11
-                                color: window.navy
-                                wrapMode: Text.Wrap
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                TextLabel { text: "회전·노이즈 강도:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
-                                Repeater {
-                                    model: [
-                                        { key: "light", label: "약 (±20°)" },
-                                        { key: "normal", label: "보통 (±35°)" },
-                                        { key: "strong", label: "강 (±50°)" }
-                                    ]
-                                    delegate: CompactButton {
-                                        required property var modelData
-                                        text: modelData.label
-                                        accent: dashboard.augStrength === modelData.key
-                                        enabled: dashboard.augEnabled && dashboard.trainingBusy === "" && !dashboard.trainingRunning
-                                        onClicked: dashboard.setAugmentationConfig(dashboard.augEnabled, modelData.key, dashboard.augFactor)
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                TextLabel { text: "녹화당 증강 배수:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
-                                Repeater {
-                                    model: [1, 2, 4, 6]
-                                    delegate: CompactButton {
-                                        required property int modelData
-                                        text: modelData + "배 생성"
-                                        accent: dashboard.augFactor === modelData
-                                        enabled: dashboard.augEnabled && dashboard.trainingBusy === "" && !dashboard.trainingRunning
-                                        onClicked: dashboard.setAugmentationConfig(dashboard.augEnabled, dashboard.augStrength, modelData)
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
-                            }
-                        }
-                    }
-                }
-
                 // 3) 팔·어깨(Pose) + 21관절 손 스켈레톤 & 카메라 화면 영역(3x3) 시각화 재생기 (화면 확대 지원)
                 Rectangle {
                     Layout.fillWidth: true
-                    implicitHeight: simTabRoot.expandSkeleton ? 460 : 268
+                    implicitHeight: simTabRoot.expandSkeleton ? 440 : 252
                     radius: 10
                     color: "#F7FAFB"
                     border.color: window.line
@@ -1581,16 +1409,15 @@ ApplicationWindow {
                                     var hasHand = Boolean(f && f.hand_present && f.lm && f.lm.length >= 21)
                                     var arm = (f && f.active_arm) ? f.active_arm : null
                                     if (!hasHand && !arm) {
-                                        ctx.fillStyle = "rgba(255, 255, 255, 0.65)"
-                                        ctx.font = "bold 13px 'Malgun Gothic'"
+                                        ctx.fillStyle = "rgba(255, 255, 255, 0.72)"
+                                        ctx.font = "bold 12px 'Malgun Gothic'"
                                         ctx.textAlign = "center"
-                                        ctx.fillText(
-                                            simTabRoot.totalFrames > 0
-                                                ? "이 프레임에 감지된 손/팔 스켈레톤 없음"
-                                                : "[시뮬레이션 실행]을 누르면 팔·어깨 + 손 스켈레톤 및 화면 위치가 표시됩니다",
-                                            w / 2,
-                                            h / 2
-                                        )
+                                        if (simTabRoot.totalFrames > 0) {
+                                            ctx.fillText("이 프레임에 감지된 손/팔 스켈레톤 없음", w / 2, h / 2)
+                                        } else {
+                                            ctx.fillText("[시뮬레이션 실행]을 누르면 팔·어깨 + 손 스켈레톤과", w / 2, h / 2 - 9)
+                                            ctx.fillText("카메라 화면 위치(3x3)가 이곳에 재생됩니다", w / 2, h / 2 + 11)
+                                        }
                                         return
                                     }
 
@@ -1909,6 +1736,7 @@ ApplicationWindow {
                         ColumnLayout {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
+                            Layout.minimumWidth: 0
                             spacing: 6
 
                             // Summary Banner + Skeleton View Mode Controls
@@ -1917,6 +1745,7 @@ ApplicationWindow {
                                 spacing: 6
                                 Rectangle {
                                     Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
                                     implicitHeight: 30
                                     radius: 7
                                     color: "#EEFCF8"
@@ -1933,17 +1762,17 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
-                                    text: simTabRoot.showArmPose ? "팔·어깨 표시 켜짐" : "팔·어깨 표시 꺼짐"
+                                    text: simTabRoot.showArmPose ? "팔·어깨 켜짐" : "팔·어깨 꺼짐"
                                     accent: simTabRoot.showArmPose
                                     onClicked: simTabRoot.showArmPose = !simTabRoot.showArmPose
                                 }
                                 CompactButton {
-                                    text: simTabRoot.fullScreenCoordMode ? "화면 전체위치(3x3)" : "손 확대 보기"
+                                    text: simTabRoot.fullScreenCoordMode ? "화면위치(3x3)" : "손 확대"
                                     accent: simTabRoot.fullScreenCoordMode
                                     onClicked: simTabRoot.fullScreenCoordMode = !simTabRoot.fullScreenCoordMode
                                 }
                                 CompactButton {
-                                    text: simTabRoot.expandSkeleton ? "시각화 화면 축소 ⤡" : "시각화 화면 크게 ⤢"
+                                    text: simTabRoot.expandSkeleton ? "화면 축소 ⤡" : "화면 크게 ⤢"
                                     accent: simTabRoot.expandSkeleton
                                     onClicked: simTabRoot.expandSkeleton = !simTabRoot.expandSkeleton
                                 }
@@ -1956,6 +1785,7 @@ ApplicationWindow {
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.preferredWidth: 1
+                                    Layout.minimumWidth: 0
                                     implicitHeight: 42
                                     radius: 7
                                     color: (simTabRoot.curFrame && simTabRoot.curFrame.phase === "do") ? "#E6F8F3" : "white"
@@ -1965,7 +1795,7 @@ ApplicationWindow {
                                         anchors.leftMargin: 8
                                         anchors.rightMargin: 8
                                         spacing: 0
-                                        TextLabel { text: "목표 라벨 · 화면 위치"; font.pixelSize: 10; color: window.muted }
+                                        TextLabel { text: "목표 라벨 · 화면 위치"; font.pixelSize: 10; color: window.muted; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                         TextLabel {
                                             text: simTabRoot.curFrame
                                                 ? (simTabRoot.curFrame.target_name
@@ -1976,12 +1806,14 @@ ApplicationWindow {
                                             font.pixelSize: 12
                                             elide: Text.ElideRight
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                         }
                                     }
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.preferredWidth: 1
+                                    Layout.minimumWidth: 0
                                     implicitHeight: 42
                                     radius: 7
                                     color: (simTabRoot.curFrame && simTabRoot.curFrame.model_hit) ? "#E6F8F3" : "white"
@@ -1991,7 +1823,7 @@ ApplicationWindow {
                                         anchors.leftMargin: 8
                                         anchors.rightMargin: 8
                                         spacing: 0
-                                        TextLabel { text: "TCN 모델 실시간 예측"; font.pixelSize: 10; color: window.muted }
+                                        TextLabel { text: "TCN 모델 실시간 예측"; font.pixelSize: 10; color: window.muted; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                         TextLabel {
                                             text: simTabRoot.curFrame
                                                 ? (simTabRoot.curFrame.model_name + " · 확신도 " + Math.round(simTabRoot.curFrame.model_prob * 100) + "%" + (simTabRoot.curFrame.model_hit ? " (발동)" : ""))
@@ -2001,12 +1833,14 @@ ApplicationWindow {
                                             color: (simTabRoot.curFrame && simTabRoot.curFrame.model_hit) ? "#0F6E5B" : window.navy
                                             elide: Text.ElideRight
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                         }
                                     }
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.preferredWidth: 1
+                                    Layout.minimumWidth: 0
                                     implicitHeight: 42
                                     radius: 7
                                     color: (simTabRoot.curFrame && simTabRoot.curFrame.issue_text !== "") ? "#FFF1F0" : "white"
@@ -2016,7 +1850,7 @@ ApplicationWindow {
                                         anchors.leftMargin: 8
                                         anchors.rightMargin: 8
                                         spacing: 0
-                                        TextLabel { text: "팔·어깨 각도 / 프레임 품질"; font.pixelSize: 10; color: window.muted }
+                                        TextLabel { text: "팔·어깨 각도 / 프레임 품질"; font.pixelSize: 10; color: window.muted; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                         TextLabel {
                                             text: !simTabRoot.curFrame ? "-"
                                                 : (simTabRoot.curFrame.issue_text !== ""
@@ -2029,6 +1863,7 @@ ApplicationWindow {
                                             color: (simTabRoot.curFrame && simTabRoot.curFrame.issue_text !== "") ? "#C62828" : window.navy
                                             elide: Text.ElideRight
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                         }
                                     }
                                 }
@@ -2190,14 +2025,14 @@ ApplicationWindow {
                                         simTabRoot.jumpToNextEvent()
                                     }
                                 }
-                                Item { Layout.fillWidth: true }
+                                Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                 TextLabel { text: "배속:"; font.pixelSize: 11; color: window.muted }
                                 Repeater {
                                     model: [0.25, 0.5, 1.0, 2.0, 4.0]
                                     delegate: CompactButton {
                                         required property real modelData
-                                        text: modelData + "x"
                                         leftPadding: 7; rightPadding: 7
+                                        text: modelData + "x"
                                         accent: Math.abs(simTabRoot.playSpeed - modelData) < 0.01
                                         onClicked: simTabRoot.playSpeed = modelData
                                     }
@@ -2217,7 +2052,243 @@ ApplicationWindow {
                     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     ColumnLayout {
                         width: simScroll.availableWidth
-                        spacing: 6
+                        spacing: 8
+
+                        // Explicit Recording Target Intent & Screen Region Coverage Banner
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: recIntentCol.implicitHeight + 14
+                            radius: 10
+                            color: "#EEF8F6"
+                            border.color: "#8CE0CA"
+                            ColumnLayout {
+                                id: recIntentCol
+                                anchors.fill: parent
+                                anchors.margins: 7
+                                spacing: 3
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Chip {
+                                        text: dashboard.simRecordedModeLabel
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        text: "녹화 목표 동작: " + dashboard.simTargetGesturesText
+                                        font.bold: true
+                                        font.pixelSize: 13
+                                        color: "#0B4F40"
+                                        wrapMode: Text.Wrap
+                                    }
+                                    Chip {
+                                        warn: dashboard.simPoseCoveragePct === 0
+                                        text: dashboard.simPoseCoveragePct > 0
+                                            ? ("팔·어깨 스켈레톤(Pose) " + dashboard.simPoseCoveragePct + "% 수록")
+                                            : "팔·어깨 스켈레톤 추정 모드"
+                                    }
+                                }
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    text: "촬영 자세 조건: " + dashboard.simTargetConditionsText
+                                        + "   |   화면 영역 기록 분포: " + dashboard.simScreenZonesText
+                                        + (dashboard.simTargetInstructionText !== "" ? ("   |   수행 방법: " + dashboard.simTargetInstructionText) : "")
+                                    font.pixelSize: 11
+                                    color: "#235347"
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+                        }
+                        // 2-Column Enlarged Cards: Left = 데이터 평가·보정, Right = 데이터 증강 설정
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            // 1) 데이터 평가 및 보정 카드
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                Layout.minimumWidth: 0
+                                implicitHeight: Math.max(evalCalibCol.implicitHeight, augCol.implicitHeight) + 20
+                                radius: 10
+                                color: dashboard.simQualityStatus === "fail" ? "#FFF1F0" : (dashboard.simQualityStatus === "warning" ? "#FFF8EA" : "#F7FAFB")
+                                border.color: dashboard.simQualityStatus === "fail" ? "#E5484D" : (dashboard.simQualityStatus === "warning" ? "#F2B544" : window.line)
+                                ColumnLayout {
+                                    id: evalCalibCol
+                                    anchors.fill: parent
+                                    anchors.margins: 10
+                                    spacing: 6
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "데이터 품질 평가 · 보정"; font.bold: true; font.pixelSize: 13 }
+                                        Chip {
+                                            warn: dashboard.simQualityStatus !== "pass"
+                                            text: dashboard.simCleanedExists ? "보정본 적용 중" : "원본 상태"
+                                        }
+                                        Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                        CompactButton {
+                                            text: "데이터 보정 실행"
+                                            primary: true
+                                            enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.trainingFiles.length > 0
+                                            onClicked: dashboard.calibrateSimRecording(
+                                                simTabRoot.currentSimFilename(),
+                                                simTabRoot.calibInterpGap,
+                                                simTabRoot.calibJointJump,
+                                                4
+                                            )
+                                        }
+                                        CompactButton {
+                                            text: "원본 복구"
+                                            enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.simCleanedExists
+                                            onClicked: dashboard.resetCalibratedSimRecording(simTabRoot.currentSimFilename())
+                                        }
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        text: dashboard.simQualityHeadline
+                                        font.pixelSize: 11
+                                        color: window.ink
+                                        wrapMode: Text.Wrap
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "손끊김 결측 보간:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
+                                        Repeater {
+                                            model: [
+                                                { label: "1프레임", val: 1 },
+                                                { label: "3프레임 (권장)", val: 3 },
+                                                { label: "5프레임", val: 5 }
+                                            ]
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                text: modelData.label
+                                                accent: simTabRoot.calibInterpGap === modelData.val
+                                                onClicked: simTabRoot.calibInterpGap = modelData.val
+                                            }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "관절 점프 억제:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
+                                        Repeater {
+                                            model: [
+                                                { label: "엄격 (0.25)", val: 0.25 },
+                                                { label: "표준 (0.38)", val: 0.38 },
+                                                { label: "완화 (0.50)", val: 0.50 }
+                                            ]
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                text: modelData.label
+                                                accent: Math.abs(simTabRoot.calibJointJump - modelData.val) < 0.01
+                                                onClicked: simTabRoot.calibJointJump = modelData.val
+                                            }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                    }
+                                }
+                            }
+
+                            // 2) 데이터 증강 설정 카드
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                Layout.minimumWidth: 0
+                                implicitHeight: Math.max(evalCalibCol.implicitHeight, augCol.implicitHeight) + 20
+                                radius: 10
+                                color: "#F7FAFB"
+                                border.color: window.line
+                                ColumnLayout {
+                                    id: augCol
+                                    anchors.fill: parent
+                                    anchors.margins: 10
+                                    spacing: 6
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "데이터 증강 설정"; font.bold: true; font.pixelSize: 13 }
+                                        CompactButton {
+                                            text: dashboard.augEnabled ? "증강 사용 중 (ON)" : "증강 꺼짐 (OFF)"
+                                            accent: dashboard.augEnabled
+                                            enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning
+                                            onClicked: dashboard.setAugmentationConfig(!dashboard.augEnabled, dashboard.augStrength, dashboard.augFactor)
+                                        }
+                                        Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                        CompactButton {
+                                            text: dashboard.augEnabled ? "이 녹화 증강" : "이 녹화 삭제"
+                                            primary: dashboard.augEnabled
+                                            enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.trainingFiles.length > 0
+                                            onClicked: dashboard.applySimAugmentation(
+                                                simTabRoot.currentSimFilename(),
+                                                dashboard.augEnabled,
+                                                dashboard.augStrength,
+                                                dashboard.augFactor
+                                            )
+                                        }
+                                        CompactButton {
+                                            text: dashboard.augEnabled ? "전체 녹화 증강" : "전체 증강 정리"
+                                            enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.trainingFiles.length > 0
+                                            onClicked: dashboard.applySimAugmentation(
+                                                "__all__",
+                                                dashboard.augEnabled,
+                                                dashboard.augStrength,
+                                                dashboard.augFactor
+                                            )
+                                        }
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        text: dashboard.augSummary
+                                        font.pixelSize: 11
+                                        color: window.ink
+                                        wrapMode: Text.Wrap
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "회전·노이즈 강도:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
+                                        Repeater {
+                                            model: [
+                                                { key: "light", label: "약 (±20°)" },
+                                                { key: "normal", label: "보통 (±35°)" },
+                                                { key: "strong", label: "강 (±50°)" }
+                                            ]
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                text: modelData.label
+                                                accent: dashboard.augStrength === modelData.key
+                                                enabled: dashboard.augEnabled && dashboard.trainingBusy === "" && !dashboard.trainingRunning
+                                                onClicked: dashboard.setAugmentationConfig(dashboard.augEnabled, modelData.key, dashboard.augFactor)
+                                            }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "녹화당 증강 배수:"; font.pixelSize: 11; color: window.muted; Layout.preferredWidth: 96 }
+                                        Repeater {
+                                            model: [1, 2, 4, 6]
+                                            delegate: CompactButton {
+                                                required property int modelData
+                                                text: modelData + "배 생성"
+                                                accent: dashboard.augFactor === modelData
+                                                enabled: dashboard.augEnabled && dashboard.trainingBusy === "" && !dashboard.trainingRunning
+                                                onClicked: dashboard.setAugmentationConfig(dashboard.augEnabled, dashboard.augStrength, modelData)
+                                            }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                    }
+                                }
+                            }
+                        }
+
                         TextLabel {
                             visible: dashboard.simQualityIssues.length > 0
                             text: "감지된 데이터 이상 구간 (" + dashboard.simQualityIssues.length + "건 · 항목 클릭 시 해당 프레임으로 이동)"
@@ -2253,6 +2324,7 @@ ApplicationWindow {
                                         text: issRow.modelData.message
                                         font.pixelSize: 11
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         elide: Text.ElideRight
                                     }
                                     CompactButton {
@@ -2291,6 +2363,7 @@ ApplicationWindow {
                                         font.bold: true
                                         font.pixelSize: 12
                                         Layout.preferredWidth: 150
+                                        elide: Text.ElideRight
                                     }
                                     Chip {
                                         warn: !simRow.modelData.trained
@@ -2302,6 +2375,8 @@ ApplicationWindow {
                                             : "이 녹화에 목표 반복 없음"
                                         font.pixelSize: 11
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        elide: Text.ElideRight
                                     }
                                     TextLabel {
                                         text: "최고 확신도 " + Math.round(simRow.modelData.max_prob * 100) + "% · 중립 오작동 " + simRow.modelData.false_fires + "회"
@@ -2333,8 +2408,8 @@ ApplicationWindow {
                                     anchors.rightMargin: 10
                                     spacing: 8
                                     TextLabel { text: "#" + repRow.modelData.rep + " (" + repRow.modelData.time_s + "초)"; font.bold: true; font.pixelSize: 11; Layout.preferredWidth: 85 }
-                                    TextLabel { text: repRow.modelData.name; font.pixelSize: 11; Layout.preferredWidth: 150 }
-                                    TextLabel { text: "최고 확률 " + Math.round(repRow.modelData.peak_prob * 100) + "% (평균 " + Math.round(repRow.modelData.mean_prob * 100) + "%)"; font.pixelSize: 11; Layout.fillWidth: true }
+                                    TextLabel { text: repRow.modelData.name; font.pixelSize: 11; Layout.preferredWidth: 150; elide: Text.ElideRight }
+                                    TextLabel { text: "최고 확률 " + Math.round(repRow.modelData.peak_prob * 100) + "% (평균 " + Math.round(repRow.modelData.mean_prob * 100) + "%)"; font.pixelSize: 11; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight }
                                     Chip { warn: !repRow.modelData.model_ok; text: repRow.modelData.model_ok ? "모델 통과" : "모델 미달" }
                                     Chip { warn: !repRow.modelData.rule_ok; text: repRow.modelData.rule_ok ? "규칙 통과" : "규칙 미달" }
                                     CompactButton {
@@ -2369,6 +2444,8 @@ ApplicationWindow {
                     }
                     TextLabel {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                         text: dashboard.diagnosticsSummary
                         font.pixelSize: 12
                         color: window.muted
@@ -2413,13 +2490,15 @@ ApplicationWindow {
                                         text: chkRow.modelData.name
                                         font.bold: true
                                         font.pixelSize: 13
-                                        Layout.preferredWidth: 230
+                                        Layout.preferredWidth: 210
+                                        elide: Text.ElideRight
                                     }
                                     TextLabel {
                                         text: chkRow.modelData.detail
                                         font.pixelSize: 12
                                         color: window.muted
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         wrapMode: Text.Wrap
                                     }
                                 }
@@ -2433,6 +2512,7 @@ ApplicationWindow {
                         }
                         TextLabel {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "새로 학습한 모델이 마음에 들지 않을 때, 학습 직전 자동 백업본이나 이전에 내보낸 모델 버전으로 즉시 복원합니다."
                             font.pixelSize: 12
                             color: window.muted
@@ -2440,6 +2520,9 @@ ApplicationWindow {
                         }
                         TextLabel {
                             visible: dashboard.modelBackups.length === 0
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            wrapMode: Text.Wrap
                             text: "아직 저장된 이전 모델 백업이 없습니다. (다음 학습이나 동작 초기화 시 자동으로 백업됩니다)"
                             font.pixelSize: 12
                             color: window.muted
@@ -2461,13 +2544,18 @@ ApplicationWindow {
                                     spacing: 12
                                     ColumnLayout {
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         spacing: 3
                                         RowLayout {
+                                            Layout.fillWidth: true
                                             spacing: 8
                                             Chip {
                                                 text: bakRow.modelData.source === "export" ? "내보내기 본" : "자동 백업"
                                             }
                                             TextLabel {
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                elide: Text.ElideRight
                                                 text: bakRow.modelData.name
                                                 font.bold: true
                                                 font.pixelSize: 13
@@ -2475,6 +2563,7 @@ ApplicationWindow {
                                         }
                                         TextLabel {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: bakRow.modelData.summary
                                             font.pixelSize: 12
                                             color: window.muted
@@ -2495,15 +2584,17 @@ ApplicationWindow {
             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 10
+                spacing: 8
                 ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 4
+                    Layout.minimumWidth: 0
+                    spacing: 3
                     TextLabel {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         text: dashboard.trainingStage !== "" ? dashboard.trainingStage
                               : "학습: 자세 하나씩 빼고 평가한 뒤 전체로 최종 모델을 만들어요 (CPU로 몇 분)"
-                        font.pixelSize: 13; wrapMode: Text.Wrap
+                        font.pixelSize: 12; wrapMode: Text.Wrap
                     }
                     Rectangle {
                         visible: dashboard.trainingRunning || dashboard.trainingProgress > 0
@@ -2541,13 +2632,15 @@ ApplicationWindow {
                     }
                     TextLabel {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         visible: dashboard.trainingNote !== ""
                         text: dashboard.trainingNote
-                        font.pixelSize: 12; color: window.muted; wrapMode: Text.Wrap
+                        font.pixelSize: 11; color: window.muted; wrapMode: Text.Wrap
                     }
                 }
                 ActionButton {
                     text: dashboard.trainingRunning ? "학습 멈춤" : "전체 통합 학습"
+                    leftPadding: 13; rightPadding: 13
                     primary: !dashboard.trainingRunning
                     danger: dashboard.trainingRunning
                     enabled: dashboard.trainingBusy === "" && !dashboard.recActive
@@ -2555,20 +2648,395 @@ ApplicationWindow {
                 }
                 ActionButton {
                     text: "내보내기"
+                    leftPadding: 13; rightPadding: 13
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
                     onClicked: dashboard.exportModel()
                 }
                 ActionButton {
-                    text: "허브 업로드"
+                    text: "허브 설정 · 동기화"
+                    leftPadding: 13; rightPadding: 13
+                    accent: hubSyncDialog.visible
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
-                    onClicked: dashboard.pushToHub()
+                    onClicked: hubSyncDialog.openWithMode("sync")
+                }
+                ActionButton {
+                    text: "허브 업로드"
+                    leftPadding: 13; rightPadding: 13
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
+                    onClicked: {
+                        if (!dashboard.hubHasToken || dashboard.hubRepo === "") {
+                            hubSyncDialog.openWithMode("push")
+                        } else {
+                            dashboard.pushToHub()
+                        }
+                    }
                 }
                 ActionButton {
                     text: "허브 받기"
+                    leftPadding: 13; rightPadding: 13
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
-                    onClicked: dashboard.pullFromHub()
+                    onClicked: {
+                        if (dashboard.hubRepo === "") {
+                            hubSyncDialog.openWithMode("pull")
+                        } else {
+                            dashboard.pullFromHub()
+                        }
+                    }
                 }
-                ActionButton { text: "폴더 열기"; onClicked: dashboard.openExports() }
+                ActionButton { text: "폴더 열기"; leftPadding: 13; rightPadding: 13; onClicked: dashboard.openExports() }
+            }
+        }
+    }
+
+    Popup {
+        id: hubSyncDialog
+        property string selectedProvider: dashboard.hubProvider
+        property bool showTokenPlain: false
+        property bool includeModels: dashboard.hubIncludeModels
+        property string modeHint: "sync"
+
+        function openWithMode(mode) {
+            selectedProvider = dashboard.hubProvider
+            repoField.text = dashboard.hubRepo
+            branchField.text = dashboard.hubBranch
+            tokenField.text = ""
+            showTokenPlain = false
+            includeModels = dashboard.hubIncludeModels
+            modeHint = mode || "sync"
+            hubSyncDialog.open()
+        }
+
+        anchors.centerIn: parent
+        width: Math.min(760, window.width - 40)
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        padding: 20
+        background: Rectangle {
+            radius: 16
+            color: "white"
+            border.color: window.line
+            border.width: 1
+        }
+        contentItem: ColumnLayout {
+            width: hubSyncDialog.availableWidth
+            spacing: 10
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    spacing: 2
+                    TextLabel {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
+                        text: "원격 데이터·모델 허브 설정 및 동기화"
+                        font.pixelSize: 19
+                        font.bold: true
+                    }
+                    TextLabel {
+                        text: "팀 학습 데이터(.jsonl.gz)와 TCN 모델(.onnx/.json)을 업로드하거나 내려받을 원격 저장소와 보안 토큰을 설정합니다."
+                        font.pixelSize: 12
+                        color: window.muted
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                    }
+                }
+                ActionButton {
+                    text: "닫기"
+                    onClicked: hubSyncDialog.close()
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: securityBannerCol.implicitHeight + 16
+                radius: 10
+                color: "#EEF8F6"
+                border.color: "#8CE0CA"
+                ColumnLayout {
+                    id: securityBannerCol
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 3
+                    TextLabel {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        text: "보안 안내 · 토큰 키 암호화 보호"
+                        font.bold: true
+                        font.pixelSize: 12
+                        color: "#0F6E5B"
+                    }
+                    TextLabel {
+                        text: "입력하신 액세스 토큰은 Windows DPAPI(현재 Windows 계정 전용 암호화) 및 로컬 암호화 금고(config/hub_secrets.bin)에 암호화되어 저장됩니다. Git 추적 대상에서 제외되며 화면·로그·오류 메시지에서 자동 마스킹됩니다."
+                        font.pixelSize: 11
+                        color: "#114B3E"
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                    }
+                }
+            }
+
+            // 1. Provider Selection
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                TextLabel { text: "1. 원격 허브 플랫폼 선택"; font.bold: true; font.pixelSize: 13 }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    ActionButton {
+                        text: "Hugging Face Dataset"
+                        leftPadding: 14; rightPadding: 14
+                        accent: hubSyncDialog.selectedProvider === "huggingface"
+                        onClicked: {
+                            hubSyncDialog.selectedProvider = "huggingface"
+                            if (repoField.text.trim() === "") {
+                                repoField.text = "se4nchoi/manux-datasets"
+                            }
+                        }
+                    }
+                    ActionButton {
+                        text: "GitHub Repository"
+                        leftPadding: 14; rightPadding: 14
+                        accent: hubSyncDialog.selectedProvider === "github"
+                        onClicked: {
+                            hubSyncDialog.selectedProvider = "github"
+                        }
+                    }
+                    Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                    Chip {
+                        Layout.fillWidth: true
+                        text: "현재 설정: " + dashboard.hubSummaryLabel
+                    }
+                }
+            }
+
+            // 2. Repository Address & Branch
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    spacing: 4
+                    TextLabel {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
+                        text: hubSyncDialog.selectedProvider === "github"
+                            ? "2. GitHub 저장소 주소 (owner/repo 또는 전체 URL)"
+                            : "2. Hugging Face 데이터셋 저장소 주소 (org/repo 또는 전체 URL)"
+                        font.bold: true
+                        font.pixelSize: 13
+                    }
+                    TextField {
+                        id: repoField
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        implicitHeight: 38
+                        text: dashboard.hubRepo
+                        placeholderText: hubSyncDialog.selectedProvider === "github"
+                            ? "예: my-org/manux-datasets 또는 https://github.com/my-org/manux-datasets"
+                            : "예: se4nchoi/manux-datasets 또는 https://huggingface.co/datasets/se4nchoi/manux-datasets"
+                        font.pixelSize: 13
+                        selectByMouse: true
+                        background: Rectangle {
+                            radius: 8
+                            color: "#F8FAFC"
+                            border.color: repoField.activeFocus ? "#16846E" : window.line
+                            border.width: repoField.activeFocus ? 2 : 1
+                        }
+                    }
+                }
+                ColumnLayout {
+                    Layout.preferredWidth: 130
+                    Layout.maximumWidth: 140
+                    spacing: 4
+                    TextLabel { text: "브랜치 (Branch)"; font.bold: true; font.pixelSize: 13 }
+                    TextField {
+                        id: branchField
+                        Layout.fillWidth: true
+                        implicitHeight: 38
+                        text: dashboard.hubBranch
+                        placeholderText: "main"
+                        font.pixelSize: 13
+                        selectByMouse: true
+                        background: Rectangle {
+                            radius: 8
+                            color: "#F8FAFC"
+                            border.color: branchField.activeFocus ? "#16846E" : window.line
+                            border.width: branchField.activeFocus ? 2 : 1
+                        }
+                    }
+                }
+            }
+
+            // 3. Access Token (Password masked)
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    TextLabel {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
+                        text: hubSyncDialog.selectedProvider === "github"
+                            ? "3. GitHub 개인 액세스 토큰 (ghp_... / github_pat_... · 읽기/쓰기 권한)"
+                            : "3. Hugging Face 액세스 토큰 (hf_... · Write 권한)"
+                        font.bold: true
+                        font.pixelSize: 13
+                    }
+                    Chip {
+                        warn: !dashboard.hubHasToken
+                        text: dashboard.hubHasToken ? ("암호화 보관 중: " + dashboard.hubTokenMasked) : "저장된 토큰 없음"
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    TextField {
+                        id: tokenField
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        implicitHeight: 38
+                        echoMode: hubSyncDialog.showTokenPlain ? TextInput.Normal : TextInput.Password
+                        placeholderText: dashboard.hubHasToken
+                            ? "변경하려면 새 토큰을 입력하세요 (비워 두면 기존 암호화 토큰 유지)"
+                            : (hubSyncDialog.selectedProvider === "github" ? "ghp_... 또는 github_pat_... 토큰 붙여넣기" : "hf_... 토큰 붙여넣기")
+                        font.pixelSize: 13
+                        selectByMouse: true
+                        background: Rectangle {
+                            radius: 8
+                            color: "#F8FAFC"
+                            border.color: tokenField.activeFocus ? "#16846E" : window.line
+                            border.width: tokenField.activeFocus ? 2 : 1
+                        }
+                    }
+                    CompactButton {
+                        text: hubSyncDialog.showTokenPlain ? "숨기기" : "보기"
+                        onClicked: hubSyncDialog.showTokenPlain = !hubSyncDialog.showTokenPlain
+                    }
+                    CompactButton {
+                        text: "저장된 토큰 삭제"
+                        danger: true
+                        enabled: dashboard.hubHasToken
+                        onClicked: {
+                            tokenField.text = ""
+                            dashboard.clearHubToken(hubSyncDialog.selectedProvider)
+                        }
+                    }
+                }
+            }
+
+            // Options & Status Banner
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                CheckBox {
+                    id: includeModelsCheck
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    checked: hubSyncDialog.includeModels
+                    onToggled: hubSyncDialog.includeModels = checked
+                    text: "TCN 모델(.onnx + .json 카드)도 함께 동기화"
+                }
+                CompactButton {
+                    text: "설정만 암호화 저장"
+                    onClicked: {
+                        dashboard.saveHubSettings(
+                            hubSyncDialog.selectedProvider,
+                            repoField.text,
+                            branchField.text,
+                            tokenField.text,
+                            hubSyncDialog.includeModels
+                        )
+                        tokenField.text = ""
+                    }
+                }
+                CompactButton {
+                    text: "연결 및 저장소 확인"
+                    enabled: dashboard.trainingBusy === ""
+                    onClicked: {
+                        dashboard.testHubConnectionSlot(
+                            hubSyncDialog.selectedProvider,
+                            repoField.text,
+                            branchField.text,
+                            tokenField.text
+                        )
+                        tokenField.text = ""
+                    }
+                }
+            }
+
+            Rectangle {
+                visible: dashboard.hubStatusNote !== "" || dashboard.trainingBusy !== ""
+                Layout.fillWidth: true
+                implicitHeight: statusNoteText.implicitHeight + 16
+                radius: 8
+                color: dashboard.hubStatusNote.indexOf("실패") >= 0 || dashboard.hubStatusNote.indexOf("오류") >= 0 ? "#FFF1F0" : "#F7FAFB"
+                border.color: dashboard.hubStatusNote.indexOf("실패") >= 0 || dashboard.hubStatusNote.indexOf("오류") >= 0 ? "#E5484D" : window.line
+                TextLabel {
+                    id: statusNoteText
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    text: dashboard.trainingBusy !== "" ? dashboard.trainingBusy : dashboard.hubStatusNote
+                    font.pixelSize: 12
+                    color: dashboard.hubStatusNote.indexOf("실패") >= 0 || dashboard.hubStatusNote.indexOf("오류") >= 0 ? "#C62828" : window.navy
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                TextLabel {
+                    text: "저장소 주소와 토큰을 저장한 뒤 바로 업로드하거나 내려받습니다."
+                    font.pixelSize: 12
+                    color: window.muted
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    wrapMode: Text.Wrap
+                }
+                ActionButton {
+                    text: "허브로 업로드 (Push)"
+                    primary: hubSyncDialog.modeHint !== "pull"
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
+                    onClicked: {
+                        dashboard.pushToHub(
+                            hubSyncDialog.selectedProvider,
+                            repoField.text,
+                            branchField.text,
+                            tokenField.text,
+                            hubSyncDialog.includeModels
+                        )
+                        tokenField.text = ""
+                    }
+                }
+                ActionButton {
+                    text: "허브에서 받기 (Pull)"
+                    primary: hubSyncDialog.modeHint === "pull"
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
+                    onClicked: {
+                        dashboard.pullFromHub(
+                            hubSyncDialog.selectedProvider,
+                            repoField.text,
+                            branchField.text,
+                            tokenField.text,
+                            hubSyncDialog.includeModels
+                        )
+                        tokenField.text = ""
+                    }
+                }
             }
         }
     }
