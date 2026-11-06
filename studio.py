@@ -28,7 +28,10 @@ MENU = [
     ("3", "학습 센터 리포트", "동작별 데이터 양·인식률·오작동과 '어떤 동작을 더 녹화할지' 추천"),
     ("4", "TCN 학습하기", "recordings/ 의 녹화로 학습 (자세별 평가 포함, CPU로 몇 분)"),
     ("5", "모델 내보내기", "다른 앱에 넣을 수 있는 묶음 만들기 (exports/)"),
-    ("6", "시험 돌리기", "pytest: 앱이 망가지지 않았는지 확인"),
+    ("6", "허브 상태 확인", "로컬 녹화 검증 및 Hugging Face 데이터 허브 현황 확인"),
+    ("7", "허브에 업로드 (push)", "검증된 새 녹화(.jsonl.gz)와 TCN 모델을 Hugging Face 허브에 업로드"),
+    ("8", "허브에서 받기 (pull)", "팀원들이 올린 새 녹화와 모델을 Hugging Face 허브에서 내려받기"),
+    ("9", "시험 돌리기", "pytest: 앱이 망가지지 않았는지 확인"),
     ("0", "끝내기", ""),
 ]
 
@@ -70,9 +73,16 @@ def main() -> int:
         elif choice == "5":
             run(["scripts/export_model.py"], "exports/ 에 모델·특징 코드·사용 예시·설명서를 묶어 zip으로")
         elif choice == "6":
+            run(["tools/hub.py", "status"], "로컬 녹화 무결성 검사와 Hugging Face 허브 요약")
+        elif choice == "7":
+            model_args = ["--model", "models/gesture_tcn.onnx"] if (ROOT / "models" / "gesture_tcn.onnx").is_file() else []
+            run(["tools/hub.py", "push"] + model_args, "새 녹화와 모델을 검증 후 Hugging Face 허브에 업로드")
+        elif choice == "8":
+            run(["tools/hub.py", "pull", "--models"], "Hugging Face 허브에서 없는 녹화와 공유 모델 내려받기")
+        elif choice == "9":
             run(["-m", "pytest", "-q"], "전체 시험")
         else:
-            print("  0~6 중에서 골라 주세요.")
+            print("  0~9 중에서 골라 주세요.")
 
 
 if __name__ == "__main__":

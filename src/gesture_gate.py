@@ -22,26 +22,19 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.tcn_features import FEATURE_VERSION, frame_features, windows
+from src.gesture_catalog import NAMES
 
 DEFAULT_MODEL = Path(__file__).resolve().parents[1] / "models" / "gesture_tcn.onnx"
-GATED = {"right_click": "thumb_ring", "scroll_grab": "thumb_index"}
+DEFAULT_THRESHOLD = 0.7
+GATED = {"right_click": "thumb_ring", "left_click": "thumb_middle", "scroll_grab": "thumb_index",
+         "task_switcher": "thumb_pinky", "show_desktop": "palm_side"}
 
 
 def load_predictor(model_path: Path = DEFAULT_MODEL) -> Tuple[Callable[[np.ndarray], np.ndarray], Dict[str, Any]]:
     """(window -> class probabilities, model info). Raises if the model or onnxruntime is missing."""
-    import onnxruntime as ort
-
-    info = json.loads(Path(model_path).with_suffix(".json").read_text(encoding="utf-8"))
-    if info.get("feature_version") != FEATURE_VERSION:
-        raise ValueError(f"model features {info.get('feature_version')} != app features {FEATURE_VERSION}")
-    sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-
-    def predict(x: np.ndarray) -> np.ndarray:
-        logits = sess.run(None, {"x": x.astype(np.float32)})[0][0]
-        e = np.exp(logits - logits.max())
-        return e / e.sum()
-
-    return predict, info
+    from src.gesture_models import load_single, compose_predictor
+    predict, info = load_single(model_path, FEATURE_VERSION)
+    return compose_predictor(model_path, predict, info)
 
 
 class GestureGate:
@@ -50,16 +43,21 @@ class GestureGate:
         cfg = config or {}
         self.predict = predict
         self.classes: List[str] = list(info["classes"])
+        independent = set(info.get("independent_gestures") or [])
+        self.disabled_gestures: set[str] = set(info.get("disabled_gestures") or []) - independent
         self.window = int(info["window"])
         self.threshold = float(cfg.get("gate_threshold", info.get("threshold", 0.7)))
         self.k = int(cfg.get("gate_frames", info.get("frames_in_a_row", 3)))
+        self.thresholds = {} if "gate_threshold" in cfg else info.get("gesture_thresholds", {})
+        self.frame_counts = {} if "gate_frames" in cfg else info.get("gesture_frames", {})
         self.lookback = float(cfg.get("gate_lookback", 0.5))
         self.wait = float(cfg.get("gate_wait", 0.3))
         self._frames: Deque[Dict[str, Any]] = deque(maxlen=self.window + 1)
         self._probs: Deque[Tuple[float, np.ndarray]] = deque(maxlen=60)
         self.last: Optional[np.ndarray] = None
-        self._pending: Optional[Tuple[str, float]] = None     # a held rule click (action, since)
+        self._pending = None     # a held rule click (action, label, since)
         self._grab_ok = False
+        self._continuous = None
         self.blocked = 0                                      # rule actions the model did not confirm
         self.passed = 0
         self.last_note = ""
@@ -69,6 +67,7 @@ class GestureGate:
         self._probs.clear()
         self._pending = None
         self._grab_ok = False
+        self._continuous = None
 
     # ---------------------------------------------------------------- model
     def step(self, now: float, hand: Any, aspect: float) -> Optional[np.ndarray]:
@@ -84,52 +83,59 @@ class GestureGate:
 
     def confirmed(self, name: str, now: float) -> bool:
         """The model saw `name` for k frames in a row within the last `lookback` s."""
+        if name not in self.classes or name in self.disabled_gestures:
+            return False
         c = self.classes.index(name)
+        threshold = self.thresholds.get(name, self.threshold)
+        required = self.frame_counts.get(name, self.k)
         run = 0
         for t, p in self._probs:
             if now - t > self.lookback:
                 continue
-            run = run + 1 if p[c] >= self.threshold else 0
-            if run >= self.k:
+            run = run + 1 if p[c] >= threshold else 0
+            if run >= required:
                 return True
         return False
 
+    def allows(self, name: str, now: float) -> bool:
+        """Untrained gestures retain their existing rule behavior, including legacy 3-class models."""
+        return name not in self.classes or name in self.disabled_gestures or self.confirmed(name, now)
+
     # ---------------------------------------------------------------- the check
     def filter(self, now: float, result: Any) -> Any:
-        """The rule result, with an unconfirmed right click held / dropped and an unconfirmed grab not started."""
+        """Confirm only learned actions; continuous grabs need confirmation once at their start."""
         action = getattr(result, "action", None)
-        if action != "scroll_grab":
-            self._grab_ok = False
-        if action == "right_click":
-            if self.confirmed("thumb_ring", now):
+        label = GATED.get(action)
+        if action == "drag_hold":
+            label = "thumb_index_middle" if getattr(result, "active_gesture", "") == "thumb_index_middle_pinch" else "thumb_middle"
+        continuous = action in ("scroll_grab", "drag_hold")
+        if self._continuous != (action, label):
+            self._continuous = None
+        if action not in (None, "none", "move_cursor"):
+            self._pending = None  # a new action supersedes a delayed click
+        if label in self.classes and label not in self.disabled_gestures:
+            if self._continuous == (action, label) or self.confirmed(label, now):
+                if continuous:
+                    self._continuous = (action, label)
                 self.passed += 1
-                self.last_note = "TCN 확인: 우클릭"
+                self.last_note = "TCN 확인: " + NAMES.get(label, label)
                 return result
-            self._pending = ("right_click", now)
+            if not continuous:
+                self._pending = (action, label, now)
             result.action = "none"
+            result.is_moving = False
+            self.last_note = "TCN 확인 대기: " + NAMES.get(label, label)
             return result
         if self._pending is not None:
-            kind, since = self._pending
-            if self.confirmed(GATED[kind], now):
-                self._pending = None
-                self.passed += 1
-                self.last_note = "TCN 확인: 우클릭 (조금 늦게)"
-                if action in ("none", "move_cursor", None):
-                    result.action = kind
-                return result
+            kind, pending_label, since = self._pending
             if now - since > self.wait:
                 self._pending = None
                 self.blocked += 1
-                self.last_note = "TCN: 우클릭 막음 (의도한 동작 아님)"
-        if action == "scroll_grab":
-            if self._grab_ok:
-                return result
-            if self.confirmed("thumb_index", now):
-                self._grab_ok = True
+                self.last_note = "TCN: 의도 확인 안 됨"
+            elif self.confirmed(pending_label, now):
+                self._pending = None
                 self.passed += 1
-                self.last_note = "TCN 확인: 스크롤"
-                return result
-            result.action = "none"
-            result.is_moving = False
-            self.last_note = "TCN: 스크롤 보류 (확인 중)"
+                self.last_note = "TCN 확인: " + NAMES.get(pending_label, pending_label)
+                if action in ("none", "move_cursor", None):
+                    result.action = kind
         return result

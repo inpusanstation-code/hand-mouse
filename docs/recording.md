@@ -42,3 +42,20 @@
   - 좌클릭·커서·다른 손짓은 그대로(모델이 아직 이 둘만 배웠다).
 - 녹화를 앱과 같은 방식으로 재생(최종 모델은 이 녹화로 학습했으므로 학습 데이터 안의 수치): 반주먹 이동 중 우클릭 12 → 0, 스크롤 8 → 0, 엄지+약지를 하는데 스크롤 10 → 0. 동작을 알아본 횟수는 규칙과 거의 같다(우클릭 27 → 27 /45, 스크롤 24 → 22 /45): 확인기는 규칙이 놓친 것을 살리지는 못하고 잘못 나간 것만 막는다. 인식률까지 올리려면 다음 단계로 모델이 직접 판정해야 한다.
 - 시험: `tests/test_gesture_gate.py`. 실제 손으로는 아직 확인하지 않았다.
+
+## 녹화 직후 자동 품질 검사·정제·오프라인 증강·재학습 파이프라인
+- 녹화 중에는 원본 데이터를 그대로 저장하며, 녹화 종료 시점(`QtRuntime._stop_recording` → `training_center.run_post_recording_pipeline`)에 순서대로 후처리를 수행한다.
+  1. **품질 검사 (`src/data_quality.py` - `check_recording`)**: 손 미검출 비율, 비어 있거나 너무 짧은 `do` 구간, 급격한 관절 점프/이상치, 비정상 손 크기, 클래스/자세별 데이터 부족, `transition`/`idle` 과다 비율을 평가해 `QualityReport`(`score` 0~1, `status`: `"pass"` / `"warning"` / `"fail"`, 문제 구간 목록, 요약 메시지)를 생성한다.
+  2. **기준 미달 시 중단**: `status == "fail"`이면 학습 센터에 경고 로그를 남기고 정제·증강·재학습을 중단한다.
+  3. **자동 정제 (`src/data_quality.py` - `clean_recording`)**: 원본 파일(`recordings/*.jsonl.gz`)은 절대 덮어쓰지 않고 `recordings/cleaned/` 아래에 별도 저장한다. 짧은 손 미검출 구간(1~2프레임) 선형 보간, 단일 프레임 관절 점프 스무딩/제외, 기준 미달의 짧은 `do` 구간 마스킹(`transition`/`idle`), 미검출 프레임 제거를 수행한다.
+  4. **오프라인 시퀀스 증강 (`src/offline_augment.py` - `augment_recording_file`)**: 활성화 시 정제된(또는 원본) 시퀀스에 3D 회전(±30°~45°), 스케일(±10%~15%), 소량 가우시안 관절 노이즈, 시간축 늘리기/줄이기, 랜덤 프레임 드롭을 적용해 `recordings/augmented/`에 N배(기본 4배) 생성하거나 학습 시 메모리 내(`--offline-augment`)로 공급한다. `scripts/train_tcn.py`의 기존 배치 단위 온라인 `augment()`는 학습 중 그대로 유지된다.
+  5. **선택적 자동 재학습**: `auto_retrain_after_recording: true`이고 품질 점수가 `min_quality_score` 이상이면 `scripts/train_tcn.py` 학습을 자동으로 시작한다.
+- 설정 키 (`config/gestures.json` 및 `src/gesture_engine.py` `DEFAULT_CONFIG`):
+  - `auto_quality_check`: `true`
+  - `auto_clean`: `true`
+  - `auto_offline_augment`: `false`
+  - `auto_retrain_after_recording`: `false`
+  - `min_quality_score`: `0.7`
+  - `offline_augment_factor`: `4`
+  - `offline_augment_rotation_deg`: `40`
+  - `offline_augment_scale`: `0.15`

@@ -24,11 +24,14 @@ import os
 import re
 import socket
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 SCHEMA = "hand-mouse-recording/1"
+FORBIDDEN_META = frozenset({"pc_host", "hostname", "computername", "user", "username", "ip", "mac", "cwd", "home"})
+LEGACY_RAW_PC_RE = re.compile(r"^pc-[0-9a-f]{4}$")
 
 
 def _r(v: float, n: int = 4) -> float:
@@ -68,9 +71,9 @@ class SessionRecorder:
     def __init__(self, folder: Path, mode: str, meta: Dict[str, Any], now: Optional[float] = None) -> None:
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         # The PC name keeps files from several PCs apart in one shared folder (same second on two PCs).
-        meta = dict(meta)
+        meta = {k: v for k, v in dict(meta).items() if k.lower() not in FORBIDDEN_META}
         who = machine_info(meta.pop("pc_alias", ""))
         pc = who["pc"]
         self.path = folder / f"{stamp}-{pc}-{mode}.jsonl.gz"
@@ -122,6 +125,24 @@ class SessionRecorder:
             os.replace(self._part, self.path)
         return self.path
 
+    @property
+    def part_path(self) -> Path:
+        return self._part
+
+    def discard(self) -> None:
+        if self._f is not None:
+            try:
+                self._f.close()
+            except Exception:
+                pass
+            self._f = None
+        for p in (self._part, self.path):
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+
 
 def read_session(path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """(meta, frames, events) of a recording. meta["complete"] is True when the file has its closing "end" line."""
@@ -129,20 +150,25 @@ def read_session(path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List
     frames: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
     complete = False
-    with gzip.open(path, "rt", encoding="utf-8") as f:
-        for line in f:
-            obj = json.loads(line)
-            kind = obj.get("type")
-            if kind == "end":
-                complete = True
-            elif kind == "meta":
-                meta = obj
-            elif kind == "frame":
-                frames.append(obj)
-            elif kind == "event":
-                events.append(obj)
+    raw_bytes = gzip.decompress(Path(path).read_bytes())
+    for line in raw_bytes.decode("utf-8").splitlines():
+        if not line:
+            continue
+        obj = json.loads(line)
+        kind = obj.get("type")
+        if kind == "end":
+            complete = True
+        elif kind == "meta":
+            meta = obj
+        elif kind == "frame":
+            frames.append(obj)
+        elif kind == "event":
+            events.append(obj)
     meta["complete"] = complete
     return meta, frames, events
+
+
+_FINISHED_CACHE: Dict[Tuple[str, int, int], Optional[str]] = {}
 
 
 def finished_recordings(folder: Path) -> Tuple[List[Path], List[Tuple[Path, str]]]:
@@ -152,15 +178,31 @@ def finished_recordings(folder: Path) -> Tuple[List[Path], List[Tuple[Path, str]
     skipped: List[Tuple[Path, str]] = []
     for p in sorted(Path(folder).glob("*.jsonl.gz")):
         try:
-            with gzip.open(p, "rt", encoding="utf-8") as f:
-                last = ""
-                for line in f:
-                    last = line
-            if json.loads(last).get("type") != "end":
-                skipped.append((p, "끝나지 않은 녹화"))
-                continue
-        except Exception as exc:  # truncated gzip, broken JSON, file in use
+            st = p.stat()
+            cache_key = (str(p.resolve()), st.st_mtime_ns, st.st_size)
+        except OSError as exc:
             skipped.append((p, f"읽지 못함 ({type(exc).__name__})"))
             continue
+        if cache_key in _FINISHED_CACHE:
+            reason = _FINISHED_CACHE[cache_key]
+            if reason is None:
+                usable.append(p)
+            else:
+                skipped.append((p, reason))
+            continue
+        try:
+            raw = gzip.decompress(p.read_bytes()).rstrip()
+            last = raw.rsplit(b"\n", 1)[-1].decode("utf-8") if raw else ""
+            if json.loads(last).get("type") != "end":
+                reason = "끝나지 않은 녹화"
+                _FINISHED_CACHE[cache_key] = reason
+                skipped.append((p, reason))
+                continue
+        except Exception as exc:  # truncated gzip, broken JSON, file in use
+            reason = f"읽지 못함 ({type(exc).__name__})"
+            _FINISHED_CACHE[cache_key] = reason
+            skipped.append((p, reason))
+            continue
+        _FINISHED_CACHE[cache_key] = None
         usable.append(p)
     return usable, skipped

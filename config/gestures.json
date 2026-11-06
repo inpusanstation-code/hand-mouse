@@ -220,5 +220,13 @@
     -1.1845,
     -0.0,
     1.5502
-  ]
+  ],
+  "auto_quality_check": true,
+  "auto_clean": true,
+  "auto_offline_augment": false,
+  "auto_retrain_after_recording": false,
+  "min_quality_score": 0.7,
+  "offline_augment_factor": 4,
+  "offline_augment_rotation_deg": 40,
+  "offline_augment_scale": 0.15
 }

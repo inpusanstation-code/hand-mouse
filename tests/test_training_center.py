@@ -26,7 +26,8 @@ def rows_by_key(s, r):
 
 def test_enough_data_and_good_scores_say_ok():
     rows = rows_by_key(summary(), report())
-    assert all(r["level"] == "ok" for r in rows.values())
+    assert all(rows[k]["level"] == "ok" for k in ("none", "thumb_index", "thumb_ring"))
+    assert rows["thumb_middle"]["level"] == "need"  # old model has no left-click examples
     assert rows["thumb_ring"]["score_text"].startswith("인식 90%")
 
 
@@ -51,7 +52,7 @@ def test_many_misfires_ask_for_more_half_fist_moving():
 
 def test_recordings_newer_than_the_model_ask_to_retrain():
     rows = rows_by_key(summary(newest=200.0), report(mtime=100.0))
-    assert all(r["level"] == "retrain" for r in rows.values())
+    assert all(rows[k]["level"] == "retrain" for k in ("none", "thumb_index", "thumb_ring"))
 
 
 def test_training_progress_lines_move_the_bar():
@@ -152,3 +153,290 @@ def test_recordings_never_store_the_real_pc_or_user_name(tmp_path):
     old = {"pc": "DESKTOP-ABC123", "user": "someone", "camera": {"note": "webcam, DESKTOP-ABC123"}}
     pc, note = public_source(old)
     assert pc.startswith("pc-") and "DESKTOP" not in note and pc in note
+
+
+def _record_full(folder, close=True):
+    from types import SimpleNamespace
+    from src.recorder import SessionRecorder
+    rec = SessionRecorder(folder, "guided", {}, now=0.0)
+    pts = [SimpleNamespace(x=0.3 + 0.02 * (i % 5), y=0.4 + 0.03 * (i // 5), z=0.001 * i) for i in range(21)]
+    world = [(0.02 * (i % 5), 0.03 * (i // 5) + 0.01 * i, 0.002 * i) for i in range(21)]
+    hand = SimpleNamespace(landmarks=pts, world=world, handedness="Right", score=0.98)
+    for i in range(20):
+        in_rep = 5 <= i < 12
+        lbl = (
+            {"target": "thumb_index", "task": "thumb_index", "phase": "do", "posture": 0, "rep": 0}
+            if in_rep
+            else {"target": "none", "task": "none", "phase": "rest", "posture": 0, "rep": -1}
+        )
+        rec.frame(i * (1.0 / 30.0), hand=hand, label=lbl, rule={"targets": {"thumb_index": in_rep}})
+    if close:
+        rec.close()
+    return rec
+
+
+def test_discard_recording_removes_part_file_without_saving(tmp_path):
+    rec = _record_full(tmp_path, close=False)
+    assert rec.part_path.exists()
+    rec.discard()
+    assert not rec.part_path.exists()
+    assert not rec.path.exists()
+    assert list(tmp_path.glob("*.jsonl.gz")) == []
+
+
+def test_recording_selection_and_deletion_filter_dataset_summary(tmp_path):
+    r1 = _record_full(tmp_path).path
+    import time as _t
+    _t.sleep(0.01)
+    r2 = _record_full(tmp_path).path
+    assert r1 != r2
+
+    # Initially both are selected
+    s_all = tc.dataset_summary(tmp_path)
+    assert s_all["per_gesture"]["thumb_index"]["reps"] == 2
+    assert s_all["excluded_count"] == 0
+
+    # Exclude r1 from training
+    tc.set_recording_selected(r1.name, False, tmp_path)
+    assert not tc.is_recording_selected(r1.name, tmp_path)
+    assert tc.is_recording_selected(r2.name, tmp_path)
+    filtered = tc.filter_selected_recording_paths([r1, r2], rec_dir=tmp_path)
+    assert filtered == [str(r2)]
+
+    s_sel = tc.dataset_summary(tmp_path)
+    assert s_sel["per_gesture"]["thumb_index"]["reps"] == 1
+    assert s_sel["excluded_count"] == 1
+
+    # Delete r1 completely
+    assert tc.delete_recording_file(r1.name, tmp_path)
+    assert not r1.exists()
+    s_after = tc.dataset_summary(tmp_path)
+    assert len(s_after["files"]) == 1
+
+
+def test_reset_gesture_training_disables_main_and_removes_specialist(tmp_path):
+    import hashlib
+    from src import gesture_models as bank
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    model = model_dir / "gesture_tcn.onnx"
+    model.write_bytes(b"dummy-onnx")
+    card = {
+        "classes": ["none", "thumb_index", "thumb_ring"],
+        "window": 15,
+        "features": 133,
+        "feature_version": "local3d-v1",
+        "trained": "2026-11-06 01:00:00",
+        "per_gesture": {
+            "thumb_index": {"rate": 0.9, "rules_rate": 0.5, "train_accuracy": 0.95},
+            "thumb_ring": {"rate": 0.85, "rules_rate": 0.6, "train_accuracy": 0.92},
+        },
+    }
+    model.with_suffix(".json").write_text(json.dumps(card), encoding="utf-8")
+
+    # Also add a specialist for thumb_index
+    spec_dir = model_dir / "gestures"
+    spec_dir.mkdir()
+    spec_onnx = spec_dir / "thumb_index-123.onnx"
+    spec_onnx.write_bytes(b"spec-onnx")
+    spec_onnx.with_suffix(".json").write_text(json.dumps({"classes": ["none", "thumb_index"]}), encoding="utf-8")
+    spec_sha = hashlib.sha256(spec_onnx.read_bytes()).hexdigest()
+    bank.publish_bank(spec_dir, {"thumb_index": {"model": spec_onnx.name, "card": spec_onnx.with_suffix(".json").name, "sha256": spec_sha}})
+
+    backup_dir = model_dir / "backups"
+    info = tc.reset_gesture_training("thumb_index", model=model, backup_dir=backup_dir)
+    assert info["removed_specialist"] is True
+    assert info["disabled_in_main"] is True
+
+    # A backup was automatically created before reset
+    backups = tc.list_model_backups(backup_dir=backup_dir, export_dir=tmp_path / "exports")
+    assert len(backups) == 1
+
+    # Report and gesture_rows reflect that thumb_index is reset while thumb_ring remains trained
+    rep = tc.model_report(model)
+    rows = {r["key"]: r for r in tc.gesture_rows(summary(), rep)}
+    assert rows["thumb_index"]["is_disabled"] is True
+    assert rows["thumb_index"]["is_trained"] is False
+    assert "초기화" in rows["thumb_index"]["model_text"]
+    assert rows["thumb_ring"]["is_trained"] is True
+
+    # Restoring the backup brings back both the specialist and the enabled main model
+    tc.restore_model_backup(backups[0]["id"], model=model, backup_dir=backup_dir, export_dir=tmp_path / "exports")
+    rep_restored = tc.model_report(model)
+    assert not rep_restored.get("disabled_gestures")
+    assert (spec_dir / "manifest.json").is_file()
+
+
+def test_simulator_and_diagnostics_run_cleanly(tmp_path):
+    rec = _record_full(tmp_path).path
+    sim = tc.simulate_model_on_recording(rec.name, rec_dir=tmp_path)
+    assert sim["file"] == rec.name
+    assert sim["frames"] > 0
+    if sim["has_model"]:
+        assert len(sim["timeline"]) > 0
+        assert len(sim["reps"]) == 1
+
+    diag = tc.run_app_diagnostics(rec_dir=tmp_path)
+    assert diag["overall"] in ("ok", "warn", "fail")
+    assert len(diag["checks"]) >= 5
+
+
+def test_simulator_evaluation_calibration_and_augmentation_controls(tmp_path):
+    rec = _record_full(tmp_path).path
+
+    # 1. Evaluate raw recording quality in simulator
+    ev = tc.evaluate_recording_in_simulator(rec.name, rec_dir=tmp_path, force_recheck=True)
+    assert ev["file"] == rec.name
+    assert ev["cleaned_exists"] is False
+    assert ev["total_frames"] == 20
+    assert "품질" in ev["headline"]
+
+    # 2. Calibrate recording data (interpolation & outlier smoothing) and verify cleaned file
+    cal = tc.calibrate_recording_data(
+        rec.name,
+        max_interp_gap=3,
+        max_joint_jump=0.38,
+        min_do_frames=4,
+        rec_dir=tmp_path,
+    )
+    assert (tmp_path / "cleaned" / rec.name).is_file()
+    assert cal["after_valid"] >= cal["before_valid"]
+
+    ev_after = tc.evaluate_recording_in_simulator(rec.name, rec_dir=tmp_path)
+    assert ev_after["cleaned_exists"] is True
+    assert "보정본 적용 중" in ev_after["headline"]
+
+    # 3. Reset calibrated recording back to raw
+    rst = tc.reset_calibrated_recording(rec.name, rec_dir=tmp_path)
+    assert rst["removed"] is True
+    assert not (tmp_path / "cleaned" / rec.name).exists()
+
+    # 4. Configure and generate offline augmentation (enabled, strength, factor)
+    aug_res = tc.apply_recording_augmentation(
+        rec.name,
+        enabled=True,
+        strength="strong",
+        factor=3,
+        rec_dir=tmp_path,
+    )
+    assert aug_res["settings"]["enabled"] is True
+    assert aug_res["settings"]["strength"] == "strong"
+    assert aug_res["settings"]["factor"] == 3
+    assert len(aug_res["generated_files"]) == 3
+    for gf in aug_res["generated_files"]:
+        assert (tmp_path / "augmented" / gf).is_file()
+
+    # 5. Disable augmentation and verify generated copies are cleaned up
+    aug_off = tc.apply_recording_augmentation(
+        rec.name,
+        enabled=False,
+        strength="light",
+        factor=1,
+        rec_dir=tmp_path,
+    )
+    assert aug_off["settings"]["enabled"] is False
+    assert aug_off["generated_files"] == []
+    assert list((tmp_path / "augmented").glob("*.jsonl.gz")) == []
+
+
+def test_simulator_handles_list_rule_targets_and_builds_playback_frames(tmp_path):
+    """Real recordings from CaptureRules.observe() store `rule['targets']` as a list of gesture keys."""
+    from types import SimpleNamespace
+    from src.recorder import SessionRecorder
+
+    rec = SessionRecorder(tmp_path, "guided", {}, now=0.0)
+    pts = [SimpleNamespace(x=0.3 + 0.02 * (i % 5), y=0.4 + 0.03 * (i // 5), z=0.001 * i) for i in range(21)]
+    world = [(0.02 * (i % 5), 0.03 * (i // 5) + 0.01 * i, 0.002 * i) for i in range(21)]
+    hand = SimpleNamespace(landmarks=pts, world=world, handedness="Right", score=0.98)
+    for i in range(20):
+        in_do = 5 <= i < 12
+        label = {"target": "thumb_index" if in_do else "none", "phase": "do" if in_do else "rest", "rep": 1}
+        rule = {
+            "evaluated": True,
+            "action": "left_click" if i == 8 else "idle",
+            "gesture": "index_pinch" if i == 8 else None,
+            "targets": ["thumb_index"] if i == 8 else [],
+        }
+        rec.frame(1000.0 + i * 0.033, hand=hand, label=label, rule=rule)
+    rec.close()
+
+    sim = tc.simulate_model_on_recording(rec.path.name, rec_dir=tmp_path)
+    assert sim["file"] == rec.path.name
+    assert len(sim["playback_frames"]) == 20
+    f8 = sim["playback_frames"][8]
+    assert f8["hand_present"] is True
+    assert len(f8["lm"]) == 21
+    assert f8["palm"] is not None
+    assert "thumb_index" in f8["rule_targets"]
+    assert f8["event_kind"] == "pinch"
+    assert f8["pinch_joints"] == [4, 8]
+    if sim["has_model"] and sim["reps"]:
+        assert sim["reps"][0]["rule_ok"] is True
+        assert sim["reps"][0]["start_frame"] == 5
+        assert sim["reps"][0]["end_frame"] == 11
+
+
+def test_simulator_extracts_arm_shoulder_pose_target_intent_and_screen_zones(tmp_path):
+    """Verify pose (shoulder/elbow/wrist) skeleton extraction, target gesture summary, and 3x3 screen region tracking."""
+    from types import SimpleNamespace
+    from src.recorder import SessionRecorder
+
+    rec = SessionRecorder(tmp_path, "guided", {"focus": "thumb_index"}, now=0.0)
+    # Place hand in the top-left camera zone (x ~ 0.2, y ~ 0.2)
+    pts = [SimpleNamespace(x=0.18 + 0.01 * (i % 5), y=0.20 + 0.01 * (i // 5), z=0.001 * i) for i in range(21)]
+    world = [(0.02 * (i % 5), 0.03 * (i // 5) + 0.01 * i, 0.002 * i) for i in range(21)]
+    hand = SimpleNamespace(landmarks=pts, world=world, handedness="Right", score=0.98)
+
+    # MediaPipe Pose joints 11..16 (L/R shoulder, L/R elbow, L/R wrist) stored as 6 rows [x, y, z, visibility]
+    pose_pts = [
+        [0.62, 0.68, 0.0, 0.99],  # 11: Left shoulder
+        [0.34, 0.66, 0.0, 0.99],  # 12: Right shoulder
+        [0.68, 0.52, 0.0, 0.98],  # 13: Left elbow
+        [0.25, 0.45, 0.0, 0.98],  # 14: Right elbow
+        [0.70, 0.38, 0.0, 0.97],  # 15: Left wrist
+        [0.19, 0.21, 0.0, 0.99],  # 16: Right wrist (close to hand wrist)
+    ]
+
+    for i in range(16):
+        in_do = 4 <= i < 12
+        lbl = {
+            "target": "thumb_index" if in_do else "none",
+            "task": "thumb_index",
+            "phase": "do" if in_do else "rest",
+            "posture": 0,
+            "condition": "왼쪽 위 · 자연스러운 손 · 보통 거리",
+            "condition_key": "왼쪽 위|자연스러운 손|보통 거리",
+            "position": "왼쪽 위",
+            "set": 0,
+            "rep": 0,
+        }
+        rec.frame(
+            100.0 + i * 0.04,
+            hand=hand,
+            pose=pose_pts,
+            label=lbl,
+            rule={"targets": ["thumb_index"] if in_do else []},
+            cursor=(320, 180),
+        )
+    rec.close()
+
+    ev = tc.evaluate_recording_in_simulator(rec.path.name, rec_dir=tmp_path, force_recheck=True)
+    assert tc.NAMES["thumb_index"] in ev["target_gestures_text"]
+    assert ev["pose_coverage_pct"] == 100
+    assert "왼쪽 위" in ev["screen_zones_text"]
+
+    sim = tc.simulate_model_on_recording(rec.path.name, rec_dir=tmp_path)
+    assert tc.NAMES["thumb_index"] in sim["target_gestures_text"]
+    assert sim["pose_coverage_pct"] == 100
+    f6 = sim["playback_frames"][6]
+    assert f6["pose_present"] is True
+    assert f6["active_arm"] is not None
+    assert f6["active_arm"]["source"] == "pose"
+    assert f6["active_arm"]["elbow_deg"] is not None
+    assert f6["screen_zone"] == "왼쪽 위"
+    assert f6["target_position"] == "왼쪽 위"
+    assert f6["cursor"] == [320, 180]
+
+
+
+

@@ -243,6 +243,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "double_click_move_tolerance": 0.03,
     "fling_gain_x": 1.0,
     "fling_gain_y": 1.0,
+    "auto_quality_check": True,
+    "auto_clean": True,
+    "auto_offline_augment": False,
+    "auto_retrain_after_recording": False,
+    "min_quality_score": 0.7,
+    "offline_augment_factor": 4,
+    "offline_augment_rotation_deg": 40,
+    "offline_augment_scale": 0.15,
     "gestures": {
         "fist": {
             "action": "move_cursor",

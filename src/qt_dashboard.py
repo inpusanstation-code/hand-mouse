@@ -1,6 +1,7 @@
 """Qt Quick desktop shell. Shares the existing engine loop with the Tk shell."""
 from collections import deque
 from pathlib import Path
+import copy
 import time
 import math
 
@@ -55,8 +56,9 @@ class QtDashboard(QObject):
     trainingChanged = Signal()        # training center: data, scores, training job, export
 
     def __init__(self, dry_run=False, *, hide_to_tray=False, start_hidden=False,
-                 overlay=False, overlay_corner="top-right"):
+                 overlay=False, overlay_corner="top-right", tcn_app=False):
         super().__init__()
+        self.tcn_app = bool(tcn_app)
         self.commands = deque()
         self.closed = False
         # Tray mode (--headless / tray available): closing the window hides it instead of quitting
@@ -82,10 +84,12 @@ class QtDashboard(QObject):
         # QApplication (not QGuiApplication): the tray menu is a Qt Widgets QMenu
         self.application = QApplication.instance() or QApplication([])
         self.application.setQuitOnLastWindowClosed(False)
-        self.preferences = QSettings("MANUX", "Hand-Mouse")
+        self.preferences = (QSettings(str(DEFAULT_CONFIG_PATH.parent / "tcn-ui.ini"), QSettings.IniFormat)
+                            if self.tcn_app else QSettings("MANUX", "Hand-Mouse"))
         saved = self.preferences.value("controlHand", "", type=str)
         self.control_hand = saved if saved in ("Left", "Right") else ""
-        self.use_index_pointer = self.preferences.value("indexPointer", True, type=bool)
+        self.use_index_pointer = (False if self.tcn_app
+                                  else self.preferences.value("indexPointer", True, type=bool))
         saved_click = self.preferences.value("pointerClick", "pinch", type=str)
         # "pinch": thumb + middle/ring (existing). "trigger": option A, thumb on the index side.
         # "off": cursor tracking only, no click detection at all.
@@ -97,10 +101,25 @@ class QtDashboard(QObject):
         self.rec_advance = 0                                    # +1 per press of "start" in guided recording
         self.rec_view = None                                    # latest recording view from the runtime
         self.rec_focus = ""                                     # guided recording of one gesture only
+        self.rec_plan = None
+        self.rec_paused = False
+        self.rec_discard = 0                                    # +1 per press of "녹화 취소(버리기)"
+        self.last_rec_review = None                             # post-recording confirmation banner state
+        self._training_summary = {}
+        from src.recording_plan_editor import RecordingPlanEditor
+        self.recording_editor = RecordingPlanEditor()
+        self.recording_editor.startRequested.connect(self._start_focused_plan)
         self.model_version = 0                                  # +1 per newly trained model (runtime reloads the gate)
-        from src.training_center import TrainingJob
+        from src.training_center import TrainingJob, get_augmentation_settings
         self.training_job = TrainingJob()
         self.training_rows = []                                 # one row per gesture (src/training_center.gesture_rows)
+        self.training_files = []                                # per-file quality & selection rows
+        self.model_backups = []                                 # restorable model snapshots & exports
+        self.sim_result = {}                                    # latest simulator run result (lightweight header)
+        self._sim_playback_frames = []                          # per-frame skeleton & event data kept in Python
+        self.sim_eval = {}                                      # latest simulator data quality & calibration evaluation
+        self.aug_settings = get_augmentation_settings()         # augmentation enabled / strength / factor settings
+        self.diag_result = {}                                   # latest app self-diagnostics result
         self.training_info = ("", "")                           # (data line, model line)
         self.training_storage = ("", False)                     # (recordings size in git, past the split limit)
         self.training_busy = ""                                 # "읽는 중…" / "내보내는 중…"
@@ -156,6 +175,14 @@ class QtDashboard(QObject):
     @Property(str, notify=stateChanged)
     def stage(self):
         return self.stage_name
+
+    @Property(str, constant=True)
+    def appTitle(self):
+        return "Hand-Mouse · MANUX TCN" if self.tcn_app else "Hand-Mouse · MANUX Qt"
+
+    @Property(str, constant=True)
+    def appName(self):
+        return "MANUX TCN" if self.tcn_app else "MANUX"
 
     @Property(bool, notify=stateChanged)
     def pointerOnly(self):
@@ -406,6 +433,28 @@ class QtDashboard(QObject):
     def recSub(self):
         return str(self._rec("sub", ""))
 
+    @Property(str, notify=stateChanged)
+    def recCondition(self):
+        return str(self._rec("condition_detail", ""))
+
+    @Property(str, notify=stateChanged)
+    def recPosition(self):
+        return str(self._rec("position", "자유 이동"))
+
+    @Property(bool, notify=stateChanged)
+    def recPaused(self):
+        return self.rec_paused
+
+    @Slot()
+    def toggleRecordingPause(self):
+        if self.rec_mode == "guided":
+            self.rec_paused = not self.rec_paused
+            self.stateChanged.emit()
+
+    @Property(QObject, constant=True)
+    def recordingPlan(self):
+        return self.recording_editor
+
     @Property(float, notify=stateChanged)
     def recProgress(self):
         return float(self._rec("progress", 0.0))
@@ -418,9 +467,83 @@ class QtDashboard(QObject):
     def setRecMode(self, mode):
         if mode not in ("off", "guided", "free") or (mode != "off" and (self.stage_name != "main" or self.use_index_pointer)):
             return
+        if mode != "off":
+            self.last_rec_review = None
         self.rec_mode = mode
         self.rec_focus = ""
+        self.rec_plan = None
+        self.rec_paused = False
         self.stateChanged.emit()
+
+    @Slot()
+    def discardRecording(self):
+        """Cancel and discard the active recording without saving it to disk."""
+        if self.rec_mode == "off":
+            return
+        self.rec_discard += 1
+        self.rec_mode = "off"
+        self.rec_focus = ""
+        self.rec_plan = None
+        self.rec_paused = False
+        self.last_rec_review = None
+        self.stateChanged.emit()
+
+    @Property(bool, notify=stateChanged)
+    def hasRecReview(self):
+        return bool(self.last_rec_review and self.last_rec_review.get("file"))
+
+    @Property(str, notify=stateChanged)
+    def recReviewFile(self):
+        return str((self.last_rec_review or {}).get("file", ""))
+
+    @Property(str, notify=stateChanged)
+    def recReviewMessage(self):
+        return str((self.last_rec_review or {}).get("message", ""))
+
+    @Property(str, notify=stateChanged)
+    def recReviewStatus(self):
+        return str((self.last_rec_review or {}).get("status", "pass"))
+
+    @Slot(bool)
+    def keepLastRecording(self, train_now=False):
+        if not self.last_rec_review:
+            return
+        fname = self.last_rec_review.get("file", "")
+        self.last_rec_review = None
+        if fname:
+            from src import training_center as tc
+            tc.set_recording_selected(fname, True)
+            self.training_note = f"'{fname}' 녹화를 학습 데이터에 포함했습니다."
+        self.stateChanged.emit()
+        self.refreshTraining()
+        if train_now and not self.training_job.running:
+            self.startTraining()
+
+    @Slot()
+    def excludeLastRecording(self):
+        if not self.last_rec_review:
+            return
+        fname = self.last_rec_review.get("file", "")
+        self.last_rec_review = None
+        if fname:
+            from src import training_center as tc
+            tc.set_recording_selected(fname, False)
+            self.training_note = f"'{fname}' 녹화를 학습에서 제외했습니다 (녹화 선별 탭에서 언제든 변경 가능)."
+        self.stateChanged.emit()
+        self.refreshTraining()
+
+    @Slot()
+    def deleteLastRecording(self):
+        if not self.last_rec_review:
+            return
+        fname = self.last_rec_review.get("file", "")
+        self.last_rec_review = None
+        if fname:
+            from src import training_center as tc
+            tc.delete_recording_file(fname)
+            self.training_note = f"'{fname}' 녹화 파일을 삭제했습니다."
+        self.stateChanged.emit()
+        self.refreshTraining()
 
     @Property(str, notify=stateChanged)
     def recFocus(self):
@@ -452,17 +575,506 @@ class QtDashboard(QObject):
                 report = tc.model_report()
                 rows = tc.gesture_rows(summary, report)
                 files = [f for f in summary["files"] if "error" not in f]
-                frames = sum(f.get("frames", 0) for f in files)
-                data = f"녹화 {len(files)}개 · {frames / 30 / 60:.0f}분 ({frames:,}프레임)"
+                selected_files = [f for f in files if f.get("selected", True)]
+                frames = sum(f.get("frames", 0) for f in selected_files)
+                minutes = sum(f.get("seconds", 0) for f in selected_files) / 60
+                valid = sum(f.get("valid_frames", 0) for f in selected_files)
+                excluded_cnt = len(files) - len(selected_files)
+                excl_txt = f" (제외 {excluded_cnt}개)" if excluded_cnt else ""
+                data = f"학습 녹화 {len(selected_files)}/{len(files)}개{excl_txt} · {minutes:.0f}분 · 3D 관절 {100 * valid / max(1, frames):.0f}%"
                 waiting = len(summary["files"]) - len(files)
                 if waiting:
-                    data += f" · 다음 학습에 포함 {waiting}개 (끝나지 않았거나 받는 중)"
+                    data += f" · 오류/미완료 {waiting}개"
                 model = (f"모델: {report.get('trained')} 학습 · 녹화 {len(report.get('data', []))}개로" if report
                          else "모델: 아직 없음 (학습하세요)")
+
+                file_rows = []
+                for f in reversed(summary["files"]):
+                    fname = f.get("file", "")
+                    if "error" in f:
+                        file_rows.append({
+                            "file": fname, "selected": False, "frames": 0, "seconds": 0.0,
+                            "valid_pct": 0, "pose_pct": 0,
+                            "quality_status": "fail", "quality_score": 0.0,
+                            "quality_text": "손상/미완료: " + str(f["error"]),
+                            "detail_text": "로드 불가",
+                            "recorded_mode_label": "손상된 파일",
+                            "target_gestures_text": "손상/미완료 녹화",
+                            "target_short_text": "손상됨",
+                            "target_conditions_text": "",
+                            "combo_label": f"{fname}  [손상/미완료]",
+                        })
+                    else:
+                        fr = int(f.get("frames", 0))
+                        sec = float(f.get("seconds", 0.0))
+                        vf = int(f.get("valid_frames", 0))
+                        pf = int(f.get("pose_frames", 0))
+                        vp = int(round(100.0 * vf / max(1, fr)))
+                        pp = int(round(100.0 * pf / max(1, fr)))
+                        q_score = f.get("quality_score")
+                        q_stat = f.get("quality_status", "unknown")
+                        q_sum = f.get("quality_summary", "")
+                        score_str = f"{q_score * 100:.0f}점" if isinstance(q_score, (int, float)) else "미검사"
+                        reps_map = f.get("reps") or {}
+                        total_reps = sum(sum(p.values()) for p in reps_map.values())
+                        mode_lbl = str(f.get("recorded_mode_label") or ("자유 이동 녹화" if f.get("mode") == "free" else "가이드 녹화"))
+                        tgt_txt = str(f.get("target_gestures_text") or "목표 동작 미기재")
+                        tgt_short = str(f.get("target_short_text") or tgt_txt)
+                        cond_txt = str(f.get("target_conditions_text") or "")
+                        zones_txt = str(f.get("screen_zones_text") or "")
+                        pose_tag = f" · 팔·어깨 {pp}%" if pp > 0 else " · 팔·어깨 추정"
+                        zone_tag = f" · {zones_txt}" if zones_txt else ""
+                        file_rows.append({
+                            "file": fname,
+                            "selected": bool(f.get("selected", True)),
+                            "frames": fr,
+                            "seconds": round(sec, 1),
+                            "valid_pct": vp,
+                            "pose_pct": pp,
+                            "quality_status": q_stat,
+                            "quality_score": float(q_score) if isinstance(q_score, (int, float)) else 0.0,
+                            "quality_text": f"품질 {score_str} · {q_sum}" if q_sum else f"품질 {score_str}",
+                            "detail_text": f"{sec:.0f}초 ({fr}프레임) · 3D 손검출 {vp}%{pose_tag} · 반복 {total_reps}회{zone_tag}",
+                            "recorded_mode_label": mode_lbl,
+                            "target_gestures_text": tgt_txt,
+                            "target_short_text": tgt_short,
+                            "target_conditions_text": cond_txt,
+                            "screen_zones_text": zones_txt,
+                            "combo_label": f"[{tgt_short}] {fname} ({sec:.0f}초 · 품질 {score_str})",
+                        })
+
                 self.training_rows, self.training_info = rows, (data, model)
+                self.training_files = file_rows
+                self.model_backups = tc.list_model_backups()
+                self.aug_settings = tc.get_augmentation_settings()
+                if file_rows and not self.sim_eval.get("file"):
+                    try:
+                        self.sim_eval = tc.evaluate_recording_in_simulator(file_rows[0]["file"])
+                    except Exception:
+                        pass
+                self._training_summary = summary
                 self.training_storage = tc.storage_text(summary)
             except Exception as exc:
                 self.training_note = f"읽지 못했어요: {exc}"
+            self.training_busy = ""
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Property("QVariantList", notify=trainingChanged)
+    def trainingFiles(self):
+        return self.training_files
+
+    @Slot(str, bool)
+    def setRecordingSelected(self, filename, selected):
+        from src import training_center as tc
+        tc.set_recording_selected(filename, bool(selected))
+        self.training_note = f"'{filename}' 녹화를 학습 {'포함' if selected else '제외'}로 설정했습니다."
+        self.refreshTraining()
+
+    @Slot(str)
+    def deleteRecording(self, filename):
+        if self.training_busy or self.training_job.running:
+            return
+        from src import training_center as tc
+        if tc.delete_recording_file(filename):
+            self.training_note = f"'{filename}' 녹화 파일을 삭제했습니다."
+            if self.last_rec_review and self.last_rec_review.get("file") == filename:
+                self.last_rec_review = None
+                self.stateChanged.emit()
+            self.refreshTraining()
+
+    @Slot(bool)
+    def evaluateAllRecordings(self, auto_exclude_failed=False):
+        if self.training_busy:
+            return
+        self.training_busy = "전체 녹화 품질 검사 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from src import training_center as tc
+            try:
+                res = tc.evaluate_all_recordings_quality(force=True, auto_exclude_failed=bool(auto_exclude_failed))
+                fails = sum(1 for r in res if r.get("status") == "fail")
+                warns = sum(1 for r in res if r.get("status") == "warning")
+                oks = sum(1 for r in res if r.get("status") == "pass")
+                excl_msg = " (불량 자동 제외됨)" if auto_exclude_failed and fails else ""
+                self.training_note = f"품질 전수검사 완료: 양호 {oks}개 · 주의 {warns}개 · 불량 {fails}개{excl_msg}"
+            except Exception as exc:
+                self.training_note = f"품질 검사 실패: {exc}"
+            self.training_busy = ""
+            self.refreshTraining()
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot(str)
+    def resetGestureTraining(self, key):
+        if self.rec_mode != "off" or self.training_job.running or self.training_busy:
+            return
+        from src import training_center as tc
+        try:
+            info = tc.reset_gesture_training(key)
+            self.model_version += 1
+            self.training_note = f"'{info['name']}' 동작의 학습을 초기화했습니다 (이전 모델은 자동 백업되었으며, 해당 동작은 기본 규칙으로 작동합니다)."
+            self.stateChanged.emit()
+            self.refreshTraining()
+        except Exception as exc:
+            self.training_note = f"초기화 실패: {exc}"
+            self.trainingChanged.emit()
+
+    @Property("QVariantList", notify=trainingChanged)
+    def modelBackups(self):
+        return self.model_backups
+
+    @Slot(str)
+    def restoreModelBackup(self, backup_id):
+        if self.rec_mode != "off" or self.training_job.running or self.training_busy:
+            return
+        from src import training_center as tc
+        try:
+            res = tc.restore_model_backup(backup_id)
+            self.model_version += 1
+            self.training_note = f"모델 복원 완료: {res['restored']} 버전으로 되돌렸습니다."
+            self.stateChanged.emit()
+            self.refreshTraining()
+        except Exception as exc:
+            self.training_note = f"모델 복원 실패: {exc}"
+            self.trainingChanged.emit()
+
+    def _store_sim_result(self, res: dict) -> None:
+        pb = list(res.get("playback_frames") or [])
+        self._sim_playback_frames = pb
+        slim = {k: v for k, v in res.items() if k != "playback_frames"}
+        self.sim_result = slim
+
+    @Property("QVariantMap", notify=trainingChanged)
+    def simulationResult(self):
+        return self.sim_result
+
+    @Property("QVariantList", notify=trainingChanged)
+    def simulationGestures(self):
+        return list(self.sim_result.get("gestures", []))
+
+    @Property("QVariantList", notify=trainingChanged)
+    def simulationTimeline(self):
+        return list(self.sim_result.get("timeline", []))
+
+    @Property("QVariantList", notify=trainingChanged)
+    def simulationReps(self):
+        return list(self.sim_result.get("reps", []))
+
+    @Property(int, notify=trainingChanged)
+    def simPlaybackCount(self):
+        return len(self._sim_playback_frames)
+
+    @Slot(int, result="QVariantMap")
+    def getSimPlaybackFrame(self, idx):
+        n = len(self._sim_playback_frames)
+        if n == 0:
+            return {}
+        clamped = max(0, min(n - 1, int(idx)))
+        frame = dict(self._sim_playback_frames[clamped])
+        start_t = max(0, clamped - 14)
+        trail = [
+            self._sim_playback_frames[k]["palm"]
+            for k in range(start_t, clamped + 1)
+            if self._sim_playback_frames[k].get("palm")
+        ]
+        frame["trail"] = trail
+        return frame
+
+    @Slot(int, result=int)
+    def findNextSimEventFrame(self, after_idx):
+        n = len(self._sim_playback_frames)
+        if n == 0:
+            return 0
+        start = (max(0, int(after_idx)) + 1) % n
+        prev_active = False
+        for offset in range(n):
+            fi = (start + offset) % n
+            f = self._sim_playback_frames[fi]
+            is_active = bool(f.get("event_kind", "none") != "none" or f.get("model_hit") or f.get("phase") == "do")
+            if is_active and not prev_active:
+                return fi
+            prev_active = is_active
+        return start
+
+    @Property(str, notify=trainingChanged)
+    def simulationSummary(self):
+        return str(self.sim_result.get("summary", "녹화 파일을 선택하고 [모델 시뮬레이션 실행] 또는 [데이터 평가]를 누르세요."))
+
+    @Property(str, notify=trainingChanged)
+    def simQualityHeadline(self):
+        return str(self.sim_eval.get("headline", "녹화 파일을 선택하면 데이터 품질·손 유실·관절 이상치 평가 결과가 표시됩니다."))
+
+    @Property(str, notify=trainingChanged)
+    def simQualityStatus(self):
+        return str(self.sim_eval.get("active_status", "unknown"))
+
+    @Property(bool, notify=trainingChanged)
+    def simCleanedExists(self):
+        return bool(self.sim_eval.get("cleaned_exists", False))
+
+    @Property("QVariantList", notify=trainingChanged)
+    def simQualityIssues(self):
+        return list(self.sim_eval.get("issues", []))
+
+    @Property(str, notify=trainingChanged)
+    def simRecordedModeLabel(self):
+        return str(self.sim_eval.get("recorded_mode_label") or self.sim_result.get("recorded_mode_label") or "가이드 녹화")
+
+    @Property(str, notify=trainingChanged)
+    def simTargetGesturesText(self):
+        return str(
+            self.sim_eval.get("target_gestures_text")
+            or self.sim_result.get("target_gestures_text")
+            or "녹화 파일을 선택하면 녹화하려던 목표 동작이 여기에 표시됩니다."
+        )
+
+    @Property(str, notify=trainingChanged)
+    def simTargetConditionsText(self):
+        return str(
+            self.sim_eval.get("target_conditions_text")
+            or self.sim_result.get("target_conditions_text")
+            or "기본 촬영 자세"
+        )
+
+    @Property(str, notify=trainingChanged)
+    def simTargetInstructionText(self):
+        return str(
+            self.sim_eval.get("target_instruction_text")
+            or self.sim_result.get("target_instruction_text")
+            or ""
+        )
+
+    @Property(str, notify=trainingChanged)
+    def simScreenZonesText(self):
+        return str(
+            self.sim_eval.get("screen_zones_text")
+            or self.sim_result.get("screen_zones_text")
+            or "화면 영역 분석 중"
+        )
+
+    @Property(int, notify=trainingChanged)
+    def simPoseCoveragePct(self):
+        val = self.sim_eval.get("pose_coverage_pct")
+        if val is None:
+            val = self.sim_result.get("pose_coverage_pct", 0)
+        return int(val or 0)
+
+    @Property(bool, notify=trainingChanged)
+    def augEnabled(self):
+        return bool(self.aug_settings.get("enabled", True))
+
+    @Property(str, notify=trainingChanged)
+    def augStrength(self):
+        return str(self.aug_settings.get("strength", "normal"))
+
+    @Property(str, notify=trainingChanged)
+    def augStrengthLabel(self):
+        return str(self.aug_settings.get("strength_label", "보통 (회전 ±35° · 크기 ±15% · 시간 ±15%)"))
+
+    @Property(int, notify=trainingChanged)
+    def augFactor(self):
+        return int(self.aug_settings.get("factor", 2))
+
+    @Property(str, notify=trainingChanged)
+    def augSummary(self):
+        aug_info = self.sim_eval.get("augmentation") or {}
+        if aug_info.get("summary"):
+            return str(aug_info["summary"])
+        en = "사용 중" if self.augEnabled else "꺼짐"
+        return f"증강 {en} · 강도: {self.augStrengthLabel} · 수량: {self.augFactor}배"
+
+    @Slot(str)
+    def evaluateSimRecording(self, filename=""):
+        target = filename
+        if not target and self.training_files:
+            target = self.training_files[0].get("file", "")
+        if not target:
+            return
+        from src import training_center as tc
+        try:
+            self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=True)
+            self.aug_settings = tc.get_augmentation_settings()
+            self.training_note = self.sim_eval.get("headline", "데이터 평가 완료")
+        except Exception as exc:
+            self.training_note = f"데이터 평가 실패: {exc}"
+        self.trainingChanged.emit()
+
+    @Slot(str, int, float, int)
+    def calibrateSimRecording(self, filename="", max_interp_gap=3, max_joint_jump=0.38, min_do_frames=4):
+        if self.training_busy:
+            return
+        target = filename
+        if not target and self.training_files:
+            target = self.training_files[0].get("file", "")
+        if not target:
+            self.training_note = "보정할 녹화 파일이 없습니다."
+            self.trainingChanged.emit()
+            return
+        self.training_busy = f"'{target}' 데이터 보정(결측 보간·관절 이상치 스무딩) 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from src import training_center as tc
+            try:
+                res = tc.calibrate_recording_data(
+                    target,
+                    max_interp_gap=int(max_interp_gap),
+                    max_joint_jump=float(max_joint_jump),
+                    min_do_frames=int(min_do_frames),
+                )
+                self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=False)
+                self._store_sim_result(tc.simulate_model_on_recording(target, use_cleaned=True))
+                self.training_note = res.get("message", "데이터 보정 완료")
+            except Exception as exc:
+                self.training_note = f"데이터 보정 실패: {exc}"
+            self.training_busy = ""
+            self.refreshTraining()
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot(str)
+    def resetCalibratedSimRecording(self, filename=""):
+        if self.training_busy:
+            return
+        target = filename
+        if not target and self.training_files:
+            target = self.training_files[0].get("file", "")
+        if not target:
+            return
+        from src import training_center as tc
+        try:
+            res = tc.reset_calibrated_recording(target)
+            self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=False)
+            self._store_sim_result(tc.simulate_model_on_recording(target, use_cleaned=False))
+            self.training_note = res.get("message", "보정 초기화 완료")
+            self.refreshTraining()
+        except Exception as exc:
+            self.training_note = f"보정 초기화 실패: {exc}"
+            self.trainingChanged.emit()
+
+    @Slot(bool, str, int)
+    def setAugmentationConfig(self, enabled, strength, factor):
+        from src import training_center as tc
+        self.aug_settings = tc.set_augmentation_settings(
+            enabled=bool(enabled),
+            strength=str(strength),
+            factor=int(factor),
+        )
+        cur_file = self.sim_eval.get("file", "")
+        if cur_file:
+            try:
+                self.sim_eval = tc.evaluate_recording_in_simulator(cur_file, force_recheck=False)
+            except Exception:
+                pass
+        self.training_note = (
+            f"증강 설정 변경됨: {'사용' if self.augEnabled else '사용 안 함'} · "
+            f"{self.augStrengthLabel} · {self.augFactor}배"
+        )
+        self.trainingChanged.emit()
+
+    @Slot(str, bool, str, int)
+    def applySimAugmentation(self, filename="", enabled=True, strength="normal", factor=2):
+        if self.training_busy:
+            return
+        target = filename
+        if not target and self.training_files:
+            target = self.training_files[0].get("file", "")
+        label_str = "선택된 전체 녹화" if target == "__all__" else f"'{target}'"
+        self.training_busy = f"{label_str} 데이터 증강 적용 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from src import training_center as tc
+            try:
+                res = tc.apply_recording_augmentation(
+                    target,
+                    enabled=bool(enabled),
+                    strength=str(strength),
+                    factor=int(factor),
+                )
+                self.aug_settings = res.get("settings", tc.get_augmentation_settings())
+                eval_target = self.sim_eval.get("file") or (
+                    self.training_files[0].get("file", "") if self.training_files else ""
+                )
+                if target and target != "__all__":
+                    eval_target = target
+                if eval_target:
+                    self.sim_eval = tc.evaluate_recording_in_simulator(eval_target, force_recheck=False)
+                self.training_note = res.get("message", "데이터 증강 적용 완료")
+            except Exception as exc:
+                self.training_note = f"데이터 증강 실패: {exc}"
+            self.training_busy = ""
+            self.trainingChanged.emit()
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot(str)
+    @Slot(str, bool)
+    def runSimulation(self, filename="", use_cleaned=True):
+        if self.training_busy:
+            return
+        target = filename
+        if not target and self.training_files:
+            target = self.training_files[0].get("file", "")
+        if not target:
+            self.training_note = "시뮬레이션할 녹화 파일이 없습니다."
+            self.trainingChanged.emit()
+            return
+        self.training_busy = f"'{target}' 시뮬레이션 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from src import training_center as tc
+            try:
+                res = tc.simulate_model_on_recording(target, use_cleaned=bool(use_cleaned))
+                self._store_sim_result(res)
+                self.sim_eval = res.get("quality") or tc.evaluate_recording_in_simulator(target)
+                self.aug_settings = tc.get_augmentation_settings()
+                self.training_note = res.get("summary", "시뮬레이션 완료")
+            except Exception as exc:
+                self.training_note = f"시뮬레이션 실패: {exc}"
+            self.training_busy = ""
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Property("QVariantList", notify=trainingChanged)
+    def diagnosticsChecks(self):
+        return list(self.diag_result.get("checks", []))
+
+    @Property(str, notify=trainingChanged)
+    def diagnosticsSummary(self):
+        return str(self.diag_result.get("summary", "[자가 진단 실행]을 눌러 모델·설정·데이터 무결성을 점검하세요."))
+
+    @Property(str, notify=trainingChanged)
+    def diagnosticsOverall(self):
+        return str(self.diag_result.get("overall", "unknown"))
+
+    @Slot()
+    def runDiagnostics(self):
+        if self.training_busy:
+            return
+        self.training_busy = "앱 및 데이터셋 자가 진단 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from src import training_center as tc
+            try:
+                self.diag_result = tc.run_app_diagnostics()
+                self.training_note = self.diag_result.get("summary", "자가 진단 완료")
+            except Exception as exc:
+                self.training_note = f"자가 진단 오류: {exc}"
             self.training_busy = ""
 
         import threading
@@ -473,6 +1085,21 @@ class QtDashboard(QObject):
     def startTraining(self):
         if self.training_job.start():
             self.training_note = ""
+            self._training_was_running = True
+            self.training_timer.start()
+            self.trainingChanged.emit()
+
+    @Slot(str)
+    def trainSelectedGesture(self, key):
+        if self.rec_mode != "off" or self.training_job.running:
+            return
+        from src.gesture_catalog import BY_KEY
+        task = BY_KEY.get(key)
+        if task is None or task.label == "none":
+            return
+        self._pause_for_change()
+        if self.training_job.start(gestures=[key]):
+            self.training_note = task.name + " 선택 학습을 시작합니다."
             self._training_was_running = True
             self.training_timer.start()
             self.trainingChanged.emit()
@@ -509,14 +1136,97 @@ class QtDashboard(QObject):
         EXPORT_DIR.mkdir(exist_ok=True)
         os.startfile(str(EXPORT_DIR))  # noqa: S606 - Windows explorer on our own folder
 
-    @Slot(str)
-    def focusRecord(self, key):
-        """Guided recording of one gesture only (from a training center row)."""
-        if self.stage_name != "main" or self.use_index_pointer:
-            self.training_note = "집중 녹화는 손바닥(Dan) 포인터에서 돼요. 왼쪽에서 '손바닥 (Dan)'을 고르세요."
-            self.trainingChanged.emit()
+    @Slot()
+    def pushToHub(self):
+        if self.training_busy:
             return
-        self.rec_mode, self.rec_focus = "guided", key
+        self.training_busy = "Hugging Face 허브로 녹화·모델 업로드 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from tools import hub as hf_hub
+            from src.training_center import MODEL, REC_DIR
+            try:
+                hf_hub.load_dotenv()
+                repo = os.environ.get(hf_hub.ENV_REPO, hf_hub.DEFAULT_REPO)
+                token = os.environ.get(hf_hub.ENV_TOKEN, "")
+                client = hf_hub.HfDatasetHub(repo, token)
+                models = [MODEL] if MODEL.is_file() and MODEL.with_suffix(".json").is_file() else []
+                res = hf_hub.push_to_hub(client, REC_DIR, models=models)
+                self.training_note = (
+                    f"허브 업로드 완료 ({repo}): 새 녹화 {res['new_recordings']}개, "
+                    f"모델 {res['models']}개 (기존 {res['already_on_hub']}개)"
+                )
+            except Exception as exc:
+                self.training_note = f"허브 업로드 실패: {exc}"
+            self.training_busy = ""
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot()
+    def pullFromHub(self):
+        if self.training_busy:
+            return
+        self.training_busy = "Hugging Face 허브에서 팀 데이터 내려받는 중…"
+        self.trainingChanged.emit()
+
+        def work():
+            from tools import hub as hf_hub
+            from src.training_center import REC_DIR
+            try:
+                hf_hub.load_dotenv()
+                repo = os.environ.get(hf_hub.ENV_REPO, hf_hub.DEFAULT_REPO)
+                token = os.environ.get(hf_hub.ENV_TOKEN, "")
+                client = hf_hub.HfDatasetHub(repo, token)
+                res = hf_hub.pull_from_hub(client, REC_DIR, include_models=True)
+                from src.training_center import run_post_recording_pipeline
+                for rec_file in sorted(REC_DIR.rglob("*.jsonl.gz")):
+                    if "cleaned" in rec_file.parts or "augmented" in rec_file.parts:
+                        continue
+                    if rec_file.parent != REC_DIR and not (REC_DIR / rec_file.name).exists():
+                        import shutil
+                        shutil.copy2(rec_file, REC_DIR / rec_file.name)
+                        rec_file = REC_DIR / rec_file.name
+                    if not (REC_DIR / "cleaned" / rec_file.name).exists():
+                        run_post_recording_pipeline(
+                            rec_file,
+                            {"auto_quality_check": True, "auto_clean": True, "auto_offline_augment": True},
+                        )
+                self.training_note = (
+                    f"허브 동기화·정제·증강 완료 ({repo}): 새 녹화 {res['downloaded']}개, "
+                    f"모델 {res['models_downloaded']}개 내려받음"
+                )
+                self.refreshTraining()
+            except Exception as exc:
+                self.training_note = f"허브 동기화 실패: {exc}"
+            self.training_busy = ""
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
+    @Slot(str, result=bool)
+    def focusRecord(self, key):
+        """Open a draft plan; starting is a separate action in the editor."""
+        if self.stage_name != "main" or self.rec_mode != "off" or self.training_job.running:
+            return False
+        from src.gesture_catalog import BY_KEY
+        if key and key not in BY_KEY:
+            return False
+        coverage = self._training_summary.get("coverage", {}).get(key, {})
+        self.recording_editor.open(key, coverage)
+        self.command(27)
+        return True
+
+    def _start_focused_plan(self, key, plan):
+        if self.stage_name != "main" or self.rec_mode != "off" or self.training_job.running:
+            return
+        self._pause_for_change()
+        self.use_index_pointer = False
+        self.rec_mode, self.rec_focus, self.rec_plan = "guided", key, copy.deepcopy(plan)
+        self.rec_paused = False
         self.stateChanged.emit()
 
     def _training_tick(self):
@@ -535,7 +1245,28 @@ class QtDashboard(QObject):
 
     @Property("QVariantList", notify=trainingChanged)
     def trainingRows(self):
-        return list(self.training_rows)
+        category = getattr(self, "training_filter", "전체")
+        return [r for r in self.training_rows if category == "전체" or r["category"] == category]
+
+    @Property(str, notify=trainingChanged)
+    def trainingFilter(self):
+        return getattr(self, "training_filter", "전체")
+
+    @Property("QStringList", constant=True)
+    def trainingCategories(self):
+        from src.gesture_catalog import CATEGORIES
+        return CATEGORIES
+
+    @Property(str, notify=trainingChanged)
+    def trainingCatalog(self):
+        from src.gesture_catalog import TASKS
+        return f"전체 {len(TASKS)}개 녹화 항목 · {len(self.trainingRows)}개 표시 · 미학습 동작도 녹화 가능"
+
+    @Slot(str)
+    def setTrainingFilter(self, category):
+        if category in self.trainingCategories:
+            self.training_filter = category
+            self.trainingChanged.emit()
 
     @Property(str, notify=trainingChanged)
     def trainingData(self):
@@ -571,6 +1302,9 @@ class QtDashboard(QObject):
         if not s.get("stage"):
             return ""
         text = s["stage"]
+        if s.get("target"):
+            from src.gesture_catalog import NAMES
+            text = NAMES.get(s["target"], s["target"]) + " · " + text
         if s.get("running") and s.get("epoch"):
             text += f" · 반복 {s['epoch']}/{s['epochs']} · 손실 {s.get('loss', 0):.3f}"
         if s.get("running"):
@@ -764,6 +1498,8 @@ class QtDashboard(QObject):
             palm_axes_reset=self.palm_axes_requests[2],
             rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate,
             rec_focus=self.rec_focus, model_version=self.model_version,
+            rec_plan=copy.deepcopy(self.rec_plan), rec_paused=self.rec_paused,
+            rec_discard=self.rec_discard,
         )
 
     def apply_snapshot(self, snap):
@@ -783,6 +1519,20 @@ class QtDashboard(QObject):
         rec_view = getattr(snap, "rec", None)
         if rec_view != self.rec_view:
             self.rec_view = rec_view
+            if isinstance(rec_view, dict) and rec_view.get("mode") == "off" and rec_view.get("file"):
+                rec_file = rec_view.get("file")
+                if rec_file != getattr(self, "_last_handled_rec_file", None):
+                    self._last_handled_rec_file = rec_file
+                    q_msg = rec_view.get("quality_message") or rec_view.get("sub") or f"저장됨: {rec_file}"
+                    q_status = rec_view.get("quality_status") or "pass"
+                    self.last_rec_review = {
+                        "file": rec_file,
+                        "status": q_status,
+                        "score": rec_view.get("quality_score"),
+                        "message": str(q_msg),
+                    }
+                    self.training_note = str(q_msg)
+                    self.trainingChanged.emit()
             self.stateChanged.emit()
         palm_view = getattr(snap, "palm_axes", None)
         if palm_view is not None and palm_view != self.palm_axes_view:
