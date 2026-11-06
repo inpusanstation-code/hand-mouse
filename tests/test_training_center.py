@@ -438,5 +438,249 @@ def test_simulator_extracts_arm_shoulder_pose_target_intent_and_screen_zones(tmp
     assert f6["cursor"] == [320, 180]
 
 
+def _record_postures(folder, postures=(0, 1, 2)):
+    """Record a synthetic guided session containing multiple posture conditions for training/evaluation tests."""
+    from src.recorder import SessionRecorder
+    from tests.test_recording_plan import hand
+    rec = SessionRecorder(folder, "guided", {}, now=0.0)
+    now = 0.0
+    for p in postures:
+        for i in range(24):
+            now += 1.0 / 30.0
+            in_rep = 6 <= i < 16
+            lbl = {
+                "target": "thumb_index" if in_rep else "none",
+                "task": "thumb_index" if in_rep else "none",
+                "phase": "do" if in_rep else "free",
+                "posture": p,
+                "set": p,
+                "rep": 0 if in_rep else -1,
+                "condition_index": p,
+                "condition_key": f"pose-{p}",
+            }
+            rec.frame(now, hand(), label=lbl, rule={"evaluated": True, "targets": ["thumb_index"] if in_rep else []})
+    rec.close()
+    return rec
+
+
+def test_training_mode_option_resolution_and_override_priority():
+    """(a) Verify --mode fast|thorough defaults and individual CLI option override priority."""
+    from scripts import train_tcn
+
+    # Default mode is fast
+    args_default = train_tcn.parse_args([])
+    opts_default = train_tcn.resolve_training_options(args_default, conds=[0, 1, 2], aug_cfg={"factor": 2})
+    assert opts_default["mode"] == "fast"
+    assert opts_default["folds"] is False
+    assert opts_default["test_condition"] == 2
+    assert opts_default["held"] == [2]
+    assert opts_default["window_stride"] == 2
+    assert opts_default["epochs"] == 25
+    assert opts_default["offline_augment"] is False
+    assert opts_default["offline_augment_factor"] == 0
+
+    # When --offline-augment is passed without an integer in fast mode, factor defaults to 1
+    args_fast_aug = train_tcn.parse_args(["--mode", "fast", "--offline-augment"])
+    opts_fast_aug = train_tcn.resolve_training_options(args_fast_aug, conds=[0, 1, 2], aug_cfg={"factor": 3})
+    assert opts_fast_aug["offline_augment"] is True
+    assert opts_fast_aug["offline_augment_factor"] == 1
+    assert opts_fast_aug["max_augmented_per_recording"] == 1
+
+    # Thorough mode defaults: all condition folds (True), stride 1, user augmentation factor
+    args_thorough = train_tcn.parse_args(["--mode", "thorough", "--offline-augment"])
+    opts_thorough = train_tcn.resolve_training_options(args_thorough, conds=[0, 1, 2], aug_cfg={"factor": 3})
+    assert opts_thorough["mode"] == "thorough"
+    assert opts_thorough["folds"] is True
+    assert opts_thorough["held"] == [0, 1, 2]
+    assert opts_thorough["window_stride"] == 1
+    assert opts_thorough["epochs"] == 25
+    assert opts_thorough["offline_augment"] is True
+    assert opts_thorough["offline_augment_factor"] == 3
+    assert opts_thorough["max_augmented_per_recording"] is None
+
+    # Explicit individual options override mode defaults
+    args_override = train_tcn.parse_args([
+        "--mode", "fast",
+        "--folds",
+        "--window-stride", "1",
+        "--epochs", "10",
+        "--test-condition", "1",
+        "--offline-augment", "4",
+    ])
+    opts_override = train_tcn.resolve_training_options(args_override, conds=[0, 1, 2], aug_cfg={"factor": 2})
+    assert opts_override["mode"] == "fast"
+    assert opts_override["folds"] is True
+    assert opts_override["held"] == [0, 1, 2]
+    assert opts_override["window_stride"] == 1
+    assert opts_override["epochs"] == 10
+    assert opts_override["test_condition"] == 1
+    assert opts_override["offline_augment"] is True
+    assert opts_override["offline_augment_factor"] == 4
+    assert opts_override["max_augmented_per_recording"] == 4
+
+    # Hold-out condition selection respects mode and --test-condition overrides (including -1 for 0 folds)
+    conds = [0, 1, 2]
+    assert train_tcn.resolve_held_out_conds(conds, opts_default) == [2]
+    assert train_tcn.resolve_held_out_conds(conds, opts_thorough) == [0, 1, 2]
+    opts_no_fold = train_tcn.resolve_training_options(train_tcn.parse_args(["--test-condition", "-1"]), conds=conds)
+    assert train_tcn.resolve_held_out_conds(conds, opts_no_fold) == []
+    opts_cond1 = train_tcn.resolve_training_options(train_tcn.parse_args(["--test-condition", "1"]), conds=conds)
+    assert train_tcn.resolve_held_out_conds(conds, opts_cond1) == [1]
+
+
+def test_window_stride_halves_training_windows_while_keeping_eval_windows_intact(tmp_path):
+    """(b) Verify --window-stride halves training windows per epoch while keeping evaluation window count intact."""
+    import numpy as np
+    from scripts import train_tcn
+
+    rec = _record_postures(tmp_path, postures=(0, 1, 2)).path
+    sessions = train_tcn.load([str(rec)])
+    s0 = sessions[0]
+    classes = ["none", "thumb_index"]
+    orig = s0["y"].copy()
+    s0["y"][orig == 0] = 0
+    s0["y"][orig > 0] = 1
+    s0["classes"] = classes
+
+    all_x, all_y = train_tcn.pick(sessions, [0, 1, 2])
+    eval_x, eval_y = train_tcn.pick(sessions, [2])
+    total_train_windows = len(all_x)
+    total_eval_windows = len(eval_x)
+    assert total_train_windows >= 20
+    assert total_eval_windows >= 10
+
+    # Epoch 0 and Epoch 1 with stride=2 cover alternating halves of the training windows
+    x_ep0, y_ep0 = train_tcn.slice_with_stride(all_x, all_y, stride=2, offset=0)
+    x_ep1, y_ep1 = train_tcn.slice_with_stride(all_x, all_y, stride=2, offset=1)
+    assert len(x_ep0) == (total_train_windows + 1) // 2
+    assert len(x_ep1) == total_train_windows // 2
+    assert len(x_ep0) + len(x_ep1) == total_train_windows
+    assert np.array_equal(x_ep0[0], all_x[0])
+    assert np.array_equal(x_ep1[0], all_x[1])
+
+    # Evaluation (predict / evaluate) still runs on the full unmodified session windows
+    model = train_tcn.train(
+        all_x, all_y,
+        epochs=2, seed=7, classes=classes, window_stride=2,
+    )
+    probs = train_tcn.predict(model, s0["x"])
+    ev = train_tcn.evaluate(s0, [2], probs, 0.7, 3)
+    assert probs.shape == (len(s0["x"]), 2)
+    assert ev["reps"]["thumb_index"][1] == 1
+
+
+def test_training_job_progress_stays_bounded_for_0_1_and_3_folds():
+    """(c) Verify TrainingJob progress stays in [0, 1] and reaches 1.0 on done for folds = 0, 1, 3."""
+    for folds in (0, 1, 3):
+        job = tc.TrainingJob()
+        job.state = {"running": True, "fold": 0, "folds": 0, "epoch": 0, "epochs": 25, "progress": 0.0}
+        job._apply({"event": "loaded", "folds": folds, "windows": 500})
+        assert 0.0 <= job.snapshot()["progress"] <= 1.0
+
+        prev = job.snapshot()["progress"]
+        for fold in range(1, folds + 1):
+            job._apply({"event": "fold_start", "fold": fold, "folds": folds, "posture": fold - 1})
+            p = job.snapshot()["progress"]
+            assert 0.0 <= p < 1.0
+            for ep in (1, 12, 25):
+                job._apply({
+                    "event": "epoch",
+                    "stage": f"fold{fold - 1}",
+                    "epoch": ep,
+                    "epochs": 25,
+                    "loss": 0.25,
+                })
+                p = job.snapshot()["progress"]
+                assert 0.0 <= p < 1.0
+                assert p >= prev
+                prev = p
+
+        job._apply({"event": "final_start"})
+        p = job.snapshot()["progress"]
+        assert 0.0 <= p < 1.0
+        for ep in (1, 13, 25):
+            job._apply({
+                "event": "epoch",
+                "stage": "final",
+                "epoch": ep,
+                "epochs": 25,
+                "loss": 0.15,
+            })
+            p = job.snapshot()["progress"]
+            assert 0.0 <= p < 1.0
+            assert p >= prev
+            prev = p
+
+        job._apply({"event": "done", "per_gesture": {}})
+        snap = job.snapshot()
+        assert snap["progress"] == 1.0
+        assert "끝" in snap["stage"]
+
+
+def test_per_gesture_and_card_reading_work_with_0_or_1_folds_and_record_metadata(tmp_path):
+    """(d) & (e) Verify 0/1 fold per_gesture & card reading work cleanly and gesture_tcn.json records training_mode metadata."""
+    from scripts import train_tcn
+
+    rec = _record_postures(tmp_path, postures=(0, 1, 2)).path
+    classes = ["none", "thumb_index"]
+
+    # (d-1) 0 folds (held_out_results is empty)
+    pg_zero = train_tcn.per_gesture([], {"none": 30, "thumb_index": 20}, {"none": 0.98, "thumb_index": 0.95}, classes)
+    assert "thumb_index" in pg_zero
+    assert pg_zero["thumb_index"]["rate"] is None
+    assert pg_zero["thumb_index"]["total"] == 0
+    assert pg_zero["none"]["misfires_per_min"] is None
+
+    out_zero = tmp_path / "models_zero"
+    rc_zero = train_tcn.main([
+        "--recordings", str(tmp_path / "*-guided.jsonl.gz"),
+        "--output-dir", str(out_zero),
+        "--mode", "fast",
+        "--test-condition", "-1",
+        "--epochs", "1",
+    ])
+    assert rc_zero == 0
+    card_zero = json.loads((out_zero / "gesture_tcn.json").read_text(encoding="utf-8"))
+    assert card_zero["training_mode"] == "fast"
+    assert card_zero["folds"] == []
+    assert card_zero["window_stride"] == 2
+    assert card_zero["offline_augment_factor"] == 0
+    assert card_zero["epochs"] == 1
+
+    rep_zero = tc.model_report(out_zero / "gesture_tcn.onnx")
+    rows_zero = {r["key"]: r for r in tc.gesture_rows(tc.dataset_summary(tmp_path), rep_zero)}
+    assert rows_zero["thumb_index"]["is_trained"] is True
+    assert "일부 자세 평가" in rows_zero["thumb_index"]["model_text"]
+
+    # (d-2) & (e) 1 fold in fast mode on multi-condition data -> marks partial evaluation ("일부 자세 평가")
+    out_fast = tmp_path / "models_fast"
+    rc_fast = train_tcn.main([
+        "--recordings", str(tmp_path / "*-guided.jsonl.gz"),
+        "--output-dir", str(out_fast),
+        "--mode", "fast",
+        "--epochs", "1",
+    ])
+    assert rc_fast == 0
+    card_fast = json.loads((out_fast / "gesture_tcn.json").read_text(encoding="utf-8"))
+    assert card_fast["training_mode"] == "fast"
+    assert card_fast["folds"] == [2]
+    assert card_fast["window_stride"] == 2
+    assert card_fast["offline_augment_factor"] == 0
+    assert card_fast["epochs"] == 1
+    assert len(card_fast["held_out_results"]) == 1
+
+    rep_fast = tc.model_report(out_fast / "gesture_tcn.onnx")
+    rows_fast = {r["key"]: r for r in tc.gesture_rows(tc.dataset_summary(tmp_path), rep_fast)}
+    assert rows_fast["thumb_index"]["is_trained"] is True
+    assert "일부 자세 평가" in rows_fast["thumb_index"]["model_text"]
+    assert "일부 자세 평가" in rows_fast["thumb_index"]["score_text"]
+
+    # Also verify training_mode persistence in training_selection.json
+    assert tc.get_training_mode(tmp_path) == "fast"
+    assert tc.set_training_mode("thorough", tmp_path) == "thorough"
+    assert tc.get_training_mode(tmp_path) == "thorough"
+
+
+
 
 
