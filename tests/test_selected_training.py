@@ -171,3 +171,29 @@ def test_hot_reload_failure_keeps_previous_gate_and_success_releases_inputs(tmp_
     ui.model_version += 1
     assert rt._gate_for(ui) is not previous
     assert released == [True]
+
+
+def test_selected_training_respects_fast_mode_and_records_card_metadata(tmp_path):
+    from scripts import train_tcn
+    from tests.test_training_center import _record_postures
+
+    _record_postures(tmp_path, postures=(0, 1, 2))
+    out_dir = tmp_path / "models"
+    rc = train_tcn.main([
+        "--recordings", str(tmp_path / "*-guided.jsonl.gz"),
+        "--output-dir", str(out_dir),
+        "--gestures", "thumb_index",
+        "--mode", "fast",
+        "--epochs", "1",
+    ])
+    assert rc == 0
+    manifest = bank.read_bank(out_dir / "gestures")
+    assert "thumb_index" in manifest
+    card_path = out_dir / "gestures" / manifest["thumb_index"]["card"]
+    card = json.loads(card_path.read_text(encoding="utf-8"))
+    assert card["training_mode"] == "fast"
+    assert card["folds"] == [2]
+    assert card["window_stride"] == 2
+    assert card["offline_augment_factor"] == 0
+    assert card["epochs"] == 1
+

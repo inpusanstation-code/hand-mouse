@@ -110,7 +110,7 @@ class QtDashboard(QObject):
         self.recording_editor = RecordingPlanEditor()
         self.recording_editor.startRequested.connect(self._start_focused_plan)
         self.model_version = 0                                  # +1 per newly trained model (runtime reloads the gate)
-        from src.training_center import TrainingJob, get_augmentation_settings
+        from src.training_center import TrainingJob, get_augmentation_settings, get_training_mode
         self.training_job = TrainingJob()
         self.training_rows = []                                 # one row per gesture (src/training_center.gesture_rows)
         self.training_files = []                                # per-file quality & selection rows
@@ -119,6 +119,8 @@ class QtDashboard(QObject):
         self._sim_playback_frames = []                          # per-frame skeleton & event data kept in Python
         self.sim_eval = {}                                      # latest simulator data quality & calibration evaluation
         self.aug_settings = get_augmentation_settings()         # augmentation enabled / strength / factor settings
+        saved_train_mode = self.preferences.value("trainingMode", "", type=str)
+        self.training_mode = saved_train_mode if saved_train_mode in ("fast", "thorough") else get_training_mode()
         self.diag_result = {}                                   # latest app self-diagnostics result
         from tools import hub as hf_hub
         self.hub_config = hf_hub.load_hub_config()
@@ -588,8 +590,17 @@ class QtDashboard(QObject):
                 waiting = len(summary["files"]) - len(files)
                 if waiting:
                     data += f" · 오류/미완료 {waiting}개"
-                model = (f"모델: {report.get('trained')} 학습 · 녹화 {len(report.get('data', []))}개로" if report
-                         else "모델: 아직 없음 (학습하세요)")
+                if report:
+                    rep_mode = report.get("training_mode")
+                    rep_folds = report.get("folds") or []
+                    mode_info = ""
+                    if rep_mode == "fast" or (isinstance(rep_folds, list) and len(rep_folds) == 1):
+                        mode_info = " · 빠른 학습(일부 자세 평가)"
+                    elif rep_mode == "thorough" or (isinstance(rep_folds, list) and len(rep_folds) > 1):
+                        mode_info = f" · 정밀 학습(자세 {len(rep_folds)}개 평가)"
+                    model = f"모델: {report.get('trained')} 학습 · 녹화 {len(report.get('data', []))}개로{mode_info}"
+                else:
+                    model = "모델: 아직 없음 (학습하세요)"
 
                 file_rows = []
                 for f in reversed(summary["files"]):
@@ -1084,9 +1095,52 @@ class QtDashboard(QObject):
         threading.Thread(target=work, daemon=True).start()
         self.training_timer.start()
 
+    @Property(str, notify=trainingChanged)
+    def trainingMode(self):
+        mode = getattr(self, "training_mode", "fast")
+        return mode if mode in ("fast", "thorough") else "fast"
+
+    @Property(int, notify=trainingChanged)
+    def trainingConditionCount(self):
+        summary = getattr(self, "_training_summary", None) or {}
+        if "condition_count" in summary:
+            return int(summary["condition_count"] or 0)
+        conds = {ck for g in (summary.get("per_gesture") or {}).values() for ck in (g.get("postures") or {}).keys() if ck}
+        return len(conds)
+
+    @Property(int, notify=trainingChanged)
+    def thoroughRunCount(self):
+        c = self.trainingConditionCount
+        return (c + 1) if c >= 2 else 1
+
+    @Property(str, notify=trainingChanged)
+    def trainingModeRunsText(self):
+        c = self.trainingConditionCount
+        thorough_runs = (c + 1) if c >= 2 else 1
+        fast_runs = 2 if c >= 2 else 1
+        if self.trainingMode == "thorough":
+            return f"정밀 학습: 전체 {c}개 자세 교차평가 + 최종 모델 (총 {thorough_runs}회 학습 실행 · 오래 걸림)"
+        return f"빠른 학습(권장): 대표 자세 1개 평가(일부 자세 평가) + 최종 모델 (총 {fast_runs}회 학습 실행 · 간격 2 · 증강 1배)"
+
+    @Slot(str)
+    def setTrainingMode(self, mode):
+        norm = str(mode) if str(mode) in ("fast", "thorough") else "fast"
+        self.training_mode = norm
+        prefs = getattr(self, "preferences", None)
+        if prefs is not None:
+            prefs.setValue("trainingMode", norm)
+        try:
+            from src import training_center as tc
+            tc.set_training_mode(norm)
+        except Exception:
+            pass
+        self.trainingChanged.emit()
+
     @Slot()
     def startTraining(self):
-        if self.training_job.start():
+        mode = getattr(self, "training_mode", None)
+        kwargs = {"mode": mode} if mode in ("fast", "thorough") else {}
+        if self.training_job.start(**kwargs):
             self.training_note = ""
             self._training_was_running = True
             self.training_timer.start()
@@ -1101,7 +1155,11 @@ class QtDashboard(QObject):
         if task is None or task.label == "none":
             return
         self._pause_for_change()
-        if self.training_job.start(gestures=[key]):
+        mode = getattr(self, "training_mode", None)
+        kwargs = {"gestures": [key]}
+        if mode in ("fast", "thorough"):
+            kwargs["mode"] = mode
+        if self.training_job.start(**kwargs):
             self.training_note = task.name + " 선택 학습을 시작합니다."
             self._training_was_running = True
             self.training_timer.start()

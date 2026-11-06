@@ -30,8 +30,15 @@ def resolve_cleaned_path(path: Path | str, *, use_cleaned: bool = True) -> Path:
     return p
 
 
-def discover_augmented_paths(paths, *, augmented_dir: Path | None = None) -> list[Path]:
+def discover_augmented_paths(
+    paths,
+    *,
+    augmented_dir: Path | None = None,
+    max_per_recording: int | None = None,
+) -> list[Path]:
     """Find finished offline-augmented recordings in ``augmented/`` matching the given base recordings."""
+    if max_per_recording is not None and max_per_recording <= 0:
+        return []
     found: list[Path] = []
     seen: set[Path] = set()
     for raw_p in paths:
@@ -43,10 +50,14 @@ def discover_augmented_paths(paths, *, augmented_dir: Path | None = None) -> lis
         usable_aug, _ = finished_recordings(aug_dir)
         usable_set = {u.resolve() for u in usable_aug}
         stem = p.name[: -len(".jsonl.gz")] if p.name.endswith(".jsonl.gz") else p.stem
+        per_rec = 0
         for cand in sorted(aug_dir.glob(f"{stem}-aug*.jsonl.gz")):
             if cand.resolve() in usable_set and cand.resolve() not in seen:
                 seen.add(cand.resolve())
                 found.append(cand)
+                per_rec += 1
+                if max_per_recording is not None and per_rec >= max_per_recording:
+                    break
     return found
 
 

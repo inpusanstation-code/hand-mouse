@@ -12,7 +12,6 @@ from uuid import uuid4
 import numpy as np
 import torch
 
-from src.capture_dataset import load_sessions
 from src.gesture_catalog import BY_KEY, CLASSES
 from src.gesture_models import load_single, publish_bank, training_lock
 from src.recorder import finished_recordings, public_source
@@ -43,14 +42,14 @@ def binary_sessions(sessions, label):
 def run(args, training):
     try:
         labels = selected_labels(args.gestures)
-        if args.epochs < 1 or not 0 < args.thr <= 1 or args.k < 1:
+        opts = training.resolve_training_options(args)
+        if opts["epochs"] < 1 or not 0 < args.thr <= 1 or args.k < 1:
             raise ValueError("학습 반복과 확률·연속 프레임 기준을 확인하세요.")
         folder = args.output_dir / "gestures"
         with training_lock(folder):
             from src.training_center import (
                 backup_current_model,
                 filter_selected_recording_paths,
-                get_augmentation_settings,
             )
             paths = sorted(Path(path) for path in glob.glob(args.recordings))
             complete = {p.resolve() for parent in {p.parent for p in paths}
@@ -59,27 +58,7 @@ def run(args, training):
             paths = [Path(p) for p in filter_selected_recording_paths(paths)]
             if not paths:
                 raise ValueError("선택된 완료 녹화가 없습니다.")
-            use_cleaned = not getattr(args, "no_cleaned", False)
-            from src.capture_dataset import discover_augmented_paths, resolve_cleaned_path
-            resolved_primary = [resolve_cleaned_path(p, use_cleaned=use_cleaned) for p in paths]
-            aug_cfg = get_augmentation_settings(paths[0].parent)
-            use_aug = bool(getattr(args, "offline_augment", False))
-            aug_paths = discover_augmented_paths(paths) if use_aug else []
-            extra_records = None
-            if use_aug and not aug_paths:
-                from src.offline_augment import generate_augmented_records
-                extra_records = generate_augmented_records(
-                    resolved_primary,
-                    factor=int(aug_cfg.get("factor", 2)),
-                    rotation_deg=float(aug_cfg.get("rotation_deg", 35.0)),
-                    scale_range=float(aug_cfg.get("scale_range", 0.15)),
-                    jitter_std=float(aug_cfg.get("jitter_std", 0.003)),
-                    time_stretch_range=tuple(aug_cfg.get("time_stretch_range", (0.85, 1.15))),
-                    frame_drop_prob=float(aug_cfg.get("frame_drop_prob", 0.05)),
-                )
-            all_load_paths = list(resolved_primary) + list(aug_paths)
-            sessions = load_sessions(all_load_paths, training.WINDOW, extra_records=extra_records)
-            eval_sessions = sessions[: len(paths)]
+            sessions, eval_sessions, opts = training.load_training_sessions(paths, args, window=training.WINDOW)
             all_y = np.concatenate([session["y"] for session in sessions])
             if not (all_y == CLASSES.index("none")).any():
                 raise ValueError("중립·쉬기 구간의 유효 녹화가 필요합니다.")
@@ -100,16 +79,24 @@ def run(args, training):
                 conds = sorted({int(c) for s in eval_selected for c, y in zip(s["cond"], s["y"]) if c >= 0 and y >= 0})
                 xa, ya = training.pick(selected, conds)
                 xa_eval, ya_eval = training.pick(eval_selected, conds)
-                held = conds if args.folds else ([] if args.test_condition < 0 else [args.test_condition])
+                held = training.resolve_held_out_conds(conds, opts)
                 training.emit("loaded", windows=len(ya), folds=len(held), per_class=dict(Counter(ya_eval.tolist())))
                 results = []
+                evaluated_folds: list[int] = []
                 for fold, test in enumerate(held, 1):
                     x, y = training.pick(selected, [c for c in conds if c != test])
-                    if not len(y) or len(set(y)) != 2:
+                    if test not in conds or not len(y) or len(set(y)) != 2:
                         training.emit("note", text=f"{label}: 조건 {test} 제외 평가는 학습 자료 부족으로 보류합니다.")
                         continue
+                    evaluated_folds.append(int(test))
                     training.emit("fold_start", posture=test, fold=fold, folds=len(held))
-                    model = training.train(x, y, args.epochs, classes=classes)
+                    model = training.train(
+                        x,
+                        y,
+                        opts["epochs"],
+                        classes=classes,
+                        window_stride=opts["window_stride"],
+                    )
                     for session in eval_selected:
                         prob = training.predict(model, session["x"])
                         negative = (session["y"] == 0) & (session["cond"] == test)
@@ -120,7 +107,14 @@ def run(args, training):
                                         "free_minutes": training.free_minutes(session, [test])})
                 training.emit("final_start")
                 losses = []
-                model = training.train(xa, ya, args.epochs, losses=losses, classes=classes)
+                model = training.train(
+                    xa,
+                    ya,
+                    opts["epochs"],
+                    losses=losses,
+                    classes=classes,
+                    window_stride=opts["window_stride"],
+                )
                 pred = training.predict(model, xa_eval).argmax(1)
                 accuracy = {name: round(float((pred[ya_eval == i] == i).mean()), 3) for i, name in enumerate(classes)}
                 per_class = {name: int((ya_eval == i).sum()) for i, name in enumerate(classes)}
@@ -128,6 +122,7 @@ def run(args, training):
                     "classes": classes, "target": label, "model_kind": "gesture_binary",
                     "window": training.WINDOW, "features": FEATURES, "feature_version": FEATURE_VERSION,
                     "threshold": args.thr, "frames_in_a_row": args.k,
+                    **training.card_training_metadata(opts, evaluated_folds),
                     "trained": time.strftime("%Y-%m-%d %H:%M:%S"), "data": sources,
                     "condition_groups": sessions[0]["condition_groups"],
                     "negative_classes": [name for i, name in enumerate(CLASSES)
