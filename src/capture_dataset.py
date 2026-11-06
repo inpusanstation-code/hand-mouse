@@ -125,7 +125,10 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
         target = lab.get("target")
         valid = usable(f) and target not in ("idle", None)
         if valid:
-            s_vec = extract_spatial_features(f.get("lm") or f.get("world"))
+            lm_pts = f.get("lm")
+            if lm_pts is None:
+                lm_pts = f.get("world")
+            s_vec = extract_spatial_features(lm_pts)
             if s_vec is not None:
                 spatial_features[i] = s_vec
         boundary = (cond_keys[i], lab.get("set"))

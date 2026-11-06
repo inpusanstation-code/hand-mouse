@@ -137,3 +137,19 @@ def test_blend_tcn_and_spatial_probs_batch_and_single():
     assert blended.shape == (3,)
     assert np.isclose(blended.sum(), 1.0)
     assert blended[2] > tcn_p[2]
+
+
+def test_extract_record_handles_numpy_array_landmarks():
+    from pathlib import Path
+    from src.capture_dataset import _extract_record
+
+    _, lm_pts = _synthetic_hand(8)
+    arr = np.asarray(lm_pts, dtype=np.float32)
+    frames = [
+        {"t": 0.0, "lm": arr, "world": arr.copy(), "label": {"phase": "do", "target": "thumb_index"}},
+        {"t": 0.033, "lm": arr.copy(), "world": arr.copy(), "label": {"phase": "do", "target": "thumb_index"}},
+    ]
+    rec = _extract_record(Path("synthetic.jsonl.gz"), {"posture": 0, "complete": True}, frames, slim_frames=True)
+    assert rec["spatial_features"].shape == (2, SPATIAL_FEATURES)
+    assert np.any(rec["spatial_features"][0] != 0.0)
+
