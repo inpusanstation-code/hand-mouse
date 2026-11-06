@@ -1,12 +1,12 @@
 """
 Train the gesture TCN on the guided recordings (recordings/*-guided.jsonl.gz) and compare it with the rules.
 
-Run from hand-mouse/:  uv run --locked --extra qt --extra train python scripts/train_tcn.py [--folds] [--epochs 25]
+Run from hand-mouse/:  uv run --locked --extra qt --extra train python scripts/train_tcn.py [--mode fast|thorough] [--epochs 25]
 
 - Every recorded frame becomes a 0.5 s window (15 frames) of src/tcn_features.py features, labelled with what the
   user was asked to do at its last frame: none / thumb_index / thumb_ring ("get ready" and "waiting" frames are left out).
-- Honest test: one posture is held out entirely (default: the last one, the phone moved). `--folds` repeats that
-  for each posture. The final model is then trained on all postures and exported to models/gesture_tcn.onnx with
+- Honest test: one posture is held out entirely (default: the last one, the phone moved). `--folds` (or `--mode thorough`)
+  repeats that for each posture. The final model is then trained on all postures and exported to models/gesture_tcn.onnx with
   models/gesture_tcn.json (classes, window, feature version, decision threshold, where the data came from).
 - Compared per repetition ("did it recognise the gesture asked for") and over the half-fist stretches ("how many
   times did it fire although nothing was asked") - the same two numbers measured for the rules, from the rule
@@ -41,6 +41,196 @@ STARTY = {"scroll_grab", "drag_hold"}
 WINDOW = 15
 PROGRESS = False          # --progress: one JSON object per line on stdout (the app's training center reads them)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+DEFAULT_TRAINING_MODE = "fast"
+DEFAULT_TEST_CONDITION = 2
+DEFAULT_EPOCHS = 25
+TRAINING_MODES: dict[str, dict[str, int | bool | None]] = {
+    "fast": {
+        "folds": False,
+        "test_condition": DEFAULT_TEST_CONDITION,
+        "window_stride": 2,
+        "offline_augment_factor": 1,
+        "epochs": DEFAULT_EPOCHS,
+    },
+    "thorough": {
+        "folds": True,
+        "test_condition": DEFAULT_TEST_CONDITION,
+        "window_stride": 1,
+        "offline_augment_factor": None,
+        "epochs": DEFAULT_EPOCHS,
+    },
+}
+
+
+def slice_with_stride(
+    x: np.ndarray,
+    y: np.ndarray,
+    stride: int = 1,
+    offset: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Subsample training windows by ``stride`` starting at ``offset % stride``."""
+    step = max(1, int(stride))
+    if step <= 1 or len(x) == 0:
+        return x, y
+    start = int(offset) % step
+    if start >= len(x):
+        start = 0
+    return x[start::step], y[start::step]
+
+
+def resolve_training_options(
+    args,
+    conds: list[int] | None = None,
+    aug_cfg: dict | None = None,
+) -> dict:
+    """Resolve effective training parameters from ``--mode`` defaults and explicit CLI overrides."""
+    raw = getattr(args, "_raw_training_args", None)
+    if raw is None:
+        raw = {
+            "mode": getattr(args, "mode", None),
+            "folds": getattr(args, "folds", None),
+            "test_condition": getattr(args, "test_condition", None),
+            "window_stride": getattr(args, "window_stride", None),
+            "epochs": getattr(args, "epochs", None),
+            "offline_augment": getattr(args, "offline_augment", None),
+        }
+        try:
+            args._raw_training_args = raw
+        except AttributeError:
+            pass
+
+    mode = str(raw["mode"] or DEFAULT_TRAINING_MODE).strip().lower()
+    if mode not in TRAINING_MODES:
+        raise ValueError(f"알 수 없는 학습 모드: {mode}")
+    preset = TRAINING_MODES[mode]
+
+    explicit_folds = raw["folds"]
+    explicit_test_cond = raw["test_condition"]
+    if explicit_folds is True:
+        use_folds = True
+        test_condition = int(preset["test_condition"]) if explicit_test_cond is None else int(explicit_test_cond)
+    elif explicit_test_cond is not None:
+        use_folds = False
+        test_condition = int(explicit_test_cond)
+    elif explicit_folds is False:
+        use_folds = False
+        test_condition = int(preset["test_condition"])
+    else:
+        use_folds = bool(preset["folds"])
+        test_condition = int(preset["test_condition"])
+
+    raw_stride = raw["window_stride"]
+    window_stride = int(preset["window_stride"]) if raw_stride is None else int(raw_stride)
+    if window_stride < 1:
+        raise ValueError("window-stride는 1 이상이어야 합니다.")
+
+    raw_epochs = raw["epochs"]
+    epochs = int(preset["epochs"]) if raw_epochs is None else int(raw_epochs)
+
+    cfg_factor = max(1, int((aug_cfg or {}).get("factor", 2)))
+    preset_factor = preset["offline_augment_factor"]
+    mode_factor = cfg_factor if preset_factor is None else int(preset_factor)
+
+    raw_aug = raw["offline_augment"]
+    if isinstance(raw_aug, bool):
+        use_aug = raw_aug
+        aug_factor = mode_factor if use_aug else 0
+        max_aug_per_rec = (mode_factor if preset_factor is not None else None) if use_aug else 0
+    elif raw_aug is None:
+        use_aug = False
+        aug_factor = 0
+        max_aug_per_rec = 0
+    else:
+        val = str(raw_aug).strip().lower()
+        if val in ("0", "false", "no", "off"):
+            use_aug = False
+            aug_factor = 0
+            max_aug_per_rec = 0
+        elif val in ("true", "yes", "on"):
+            use_aug = True
+            aug_factor = mode_factor
+            max_aug_per_rec = mode_factor if preset_factor is not None else None
+        else:
+            parsed_factor = max(0, int(val))
+            use_aug = parsed_factor > 0
+            aug_factor = parsed_factor
+            max_aug_per_rec = parsed_factor
+
+    held: list[int] | None = None
+    if conds is not None:
+        held = list(conds) if use_folds else ([] if test_condition < 0 else [test_condition])
+
+    args.mode = mode
+    args.folds = use_folds
+    args.test_condition = test_condition
+    args.window_stride = window_stride
+    args.epochs = epochs
+    args.offline_augment = use_aug
+
+    return {
+        "mode": mode,
+        "folds": use_folds,
+        "test_condition": test_condition,
+        "held": held,
+        "window_stride": window_stride,
+        "epochs": epochs,
+        "offline_augment": use_aug,
+        "offline_augment_factor": aug_factor,
+        "max_augmented_per_recording": max_aug_per_rec,
+    }
+
+
+def resolve_held_out_conds(conds: list[int], opts: dict) -> list[int]:
+    """Return the posture condition indices to hold out for evaluation."""
+    if opts.get("folds"):
+        return list(conds)
+    test_cond = int(opts.get("test_condition", DEFAULT_TEST_CONDITION))
+    return [] if test_cond < 0 else [test_cond]
+
+
+def card_training_metadata(opts: dict, evaluated_folds: list[int]) -> dict:
+    """Standard metadata fields describing the training mode and schedule for model cards."""
+    return {
+        "epochs": int(opts["epochs"]),
+        "training_mode": str(opts["mode"]),
+        "folds": [int(c) for c in evaluated_folds],
+        "window_stride": int(opts["window_stride"]),
+        "offline_augment_factor": int(opts["offline_augment_factor"]),
+    }
+
+
+def load_training_sessions(paths, args, *, window: int = WINDOW):
+    """Load cleaned primary recordings and mode-appropriate offline-augmented recordings."""
+    from src.capture_dataset import discover_augmented_paths, load_sessions, resolve_cleaned_path
+    from src.training_center import get_augmentation_settings
+
+    use_cleaned = not getattr(args, "no_cleaned", False)
+    resolved_primary = [resolve_cleaned_path(p, use_cleaned=use_cleaned) for p in paths]
+    aug_cfg = get_augmentation_settings(Path(paths[0]).parent)
+    opts = resolve_training_options(args, aug_cfg=aug_cfg)
+    use_aug = bool(opts["offline_augment"])
+    aug_paths = (
+        discover_augmented_paths(paths, max_per_recording=opts["max_augmented_per_recording"])
+        if use_aug
+        else []
+    )
+    extra_records = None
+    if use_aug and not aug_paths and opts["offline_augment_factor"] > 0:
+        from src.offline_augment import generate_augmented_records
+        extra_records = generate_augmented_records(
+            resolved_primary,
+            factor=int(opts["offline_augment_factor"]),
+            rotation_deg=float(aug_cfg.get("rotation_deg", 35.0)),
+            scale_range=float(aug_cfg.get("scale_range", 0.15)),
+            jitter_std=float(aug_cfg.get("jitter_std", 0.003)),
+            time_stretch_range=tuple(aug_cfg.get("time_stretch_range", (0.85, 1.15))),
+            frame_drop_prob=float(aug_cfg.get("frame_drop_prob", 0.05)),
+        )
+    all_load_paths = [str(p) for p in resolved_primary] + [str(p) for p in aug_paths]
+    sessions = load_sessions(all_load_paths, window, use_cleaned=False, extra_records=extra_records)
+    eval_sessions = sessions[: len(paths)]
+    return sessions, eval_sessions, opts
 
 
 def emit(event: str, **info) -> None:
@@ -120,8 +310,9 @@ def augment(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def train(x, y, epochs: int, seed: int = 0, stage: str = "", losses=None, classes=None):
+def train(x, y, epochs: int, seed: int = 0, stage: str = "", losses=None, classes=None, window_stride: int = 1):
     classes = classes or CLASSES
+    stride = max(1, int(window_stride))
     torch.manual_seed(seed)
     if DEVICE.type == "cuda":
         torch.cuda.manual_seed_all(seed)
@@ -130,7 +321,7 @@ def train(x, y, epochs: int, seed: int = 0, stage: str = "", losses=None, classe
     counts = np.bincount(y, minlength=len(classes)).astype(np.float64)
     weight = torch.tensor((counts.sum() / np.maximum(counts, 1)) ** 0.5, dtype=torch.float32, device=DEVICE)
     lossf = nn.CrossEntropyLoss(weight=weight / weight.mean())
-    use_large_batch = DEVICE.type == "cuda" and len(x) >= 4096
+    use_large_batch = DEVICE.type == "cuda" and (len(x) // stride) >= 4096
     bs = 4096 if use_large_batch else 256
     lr = 2e-3 if use_large_batch else 1e-3
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -138,12 +329,21 @@ def train(x, y, epochs: int, seed: int = 0, stage: str = "", losses=None, classe
     yt = torch.from_numpy(np.ascontiguousarray(y, dtype=np.int64)).to(DEVICE)
     for ep in range(epochs):
         model.train()
-        perm = torch.randperm(len(xt), device=DEVICE)
+        if stride > 1 and len(xt) > 0:
+            offset = ep % stride
+            if offset >= len(xt):
+                offset = 0
+            ep_xt = xt[offset::stride]
+            ep_yt = yt[offset::stride]
+        else:
+            ep_xt = xt
+            ep_yt = yt
+        perm = torch.randperm(len(ep_xt), device=DEVICE)
         total = torch.zeros((), device=DEVICE, dtype=torch.float64)
         for i in range(0, len(perm), bs):
             idx = perm[i:i + bs]
             opt.zero_grad(set_to_none=True)
-            loss = lossf(model(augment(xt[idx])), yt[idx])
+            loss = lossf(model(augment(ep_xt[idx])), ep_yt[idx])
             loss.backward()
             opt.step()
             total += loss.detach().to(torch.float64) * len(idx)
@@ -334,12 +534,19 @@ def show(name, r):
 
 
 # ---------------------------------------------------------------- main
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--recordings", default=str(ROOT / "recordings" / "*-guided.jsonl.gz"))
-    ap.add_argument("--test-condition", type=int, default=2)
-    ap.add_argument("--folds", action="store_true", help="hold out each posture in turn")
-    ap.add_argument("--epochs", type=int, default=25)
+    ap.add_argument(
+        "--mode",
+        choices=tuple(TRAINING_MODES.keys()),
+        default=DEFAULT_TRAINING_MODE,
+        help="training preset: fast (default, 1 eval fold + stride 2) or thorough (all folds + stride 1)",
+    )
+    ap.add_argument("--window-stride", type=int, default=None, help="training window sampling stride (overrides mode default)")
+    ap.add_argument("--test-condition", type=int, default=None)
+    ap.add_argument("--folds", action="store_true", default=None, help="hold out each posture in turn")
+    ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--thr", type=float, default=0.7)
     ap.add_argument("--k", type=int, default=3, help="frames in a row above the threshold that count as the gesture")
     ap.add_argument("--no-export", action="store_true")
@@ -347,8 +554,22 @@ def main() -> int:
     ap.add_argument("--output-dir", type=Path, default=ROOT / "models", help="model output folder")
     ap.add_argument("--gestures", nargs="+", help="train only these gesture tasks as independent binary models")
     ap.add_argument("--no-cleaned", action="store_true", help="ignore recordings/cleaned/ and use raw files only")
-    ap.add_argument("--offline-augment", action="store_true", help="include offline-augmented sequences during training")
-    a = ap.parse_args()
+    ap.add_argument(
+        "--offline-augment",
+        nargs="?",
+        const=True,
+        default=None,
+        help="include offline-augmented sequences during training (optionally specify factor)",
+    )
+    return ap
+
+
+def parse_args(argv: list[str] | None = None):
+    return build_arg_parser().parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = parse_args(argv)
     global PROGRESS
     PROGRESS = a.progress
     if a.gestures:
@@ -360,7 +581,6 @@ def main() -> int:
     from src.training_center import (
         backup_current_model,
         filter_selected_recording_paths,
-        get_augmentation_settings,
     )
     paths = sorted(glob.glob(a.recordings))
     folders = sorted({str(Path(p).parent) for p in paths})
@@ -377,27 +597,7 @@ def main() -> int:
         print("no selected recordings found:", a.recordings)
         return 1
     t0 = time.perf_counter()
-    use_cleaned = not getattr(a, "no_cleaned", False)
-    from src.capture_dataset import discover_augmented_paths, resolve_cleaned_path
-    resolved_primary = [resolve_cleaned_path(p, use_cleaned=use_cleaned) for p in paths]
-    aug_cfg = get_augmentation_settings(Path(paths[0]).parent)
-    use_aug = bool(getattr(a, "offline_augment", False))
-    aug_paths = discover_augmented_paths(paths) if use_aug else []
-    extra_records = None
-    if use_aug and not aug_paths:
-        from src.offline_augment import generate_augmented_records
-        extra_records = generate_augmented_records(
-            resolved_primary,
-            factor=int(aug_cfg.get("factor", 2)),
-            rotation_deg=float(aug_cfg.get("rotation_deg", 35.0)),
-            scale_range=float(aug_cfg.get("scale_range", 0.15)),
-            jitter_std=float(aug_cfg.get("jitter_std", 0.003)),
-            time_stretch_range=tuple(aug_cfg.get("time_stretch_range", (0.85, 1.15))),
-            frame_drop_prob=float(aug_cfg.get("frame_drop_prob", 0.05)),
-        )
-    all_load_paths = list(resolved_primary) + [str(p) for p in aug_paths]
-    sessions = load(all_load_paths, use_cleaned=False, extra_records=extra_records)
-    eval_sessions = sessions[: len(paths)]
+    sessions, eval_sessions, opts = load_training_sessions(paths, a, window=WINDOW)
     present = {int(y) for s in sessions for y in s["y"] if y >= 0}
     classes = [name for i, name in enumerate(CLASSES) if i in present]
     if "none" not in classes or len(classes) < 2:
@@ -412,25 +612,34 @@ def main() -> int:
     xa, ya = pick(sessions, conds)
     xa_eval, ya_eval = pick(eval_sessions, conds)
     per_class = dict(Counter(classes[i] for i in ya_eval))
+    held = resolve_held_out_conds(conds, opts)
     if not PROGRESS:
         print(f"{len(paths)} recording(s), postures {conds}, {len(ya)} labelled windows {per_class}"
               f"  ({time.perf_counter() - t0:.1f} s to load)")
     emit("loaded", recordings=len(paths), postures=conds, windows=int(len(ya)), per_class=per_class,
-         folds=len(conds) if a.folds else (0 if a.test_condition < 0 else 1))
+         folds=len(held))
 
-    held = conds if a.folds else ([] if a.test_condition < 0 else [a.test_condition])
     summary = []
-    for test in held:
+    evaluated_folds: list[int] = []
+    for fold_idx, test in enumerate(held, 1):
         train_conds = [c for c in conds if c != test]
         x, y = pick(sessions, train_conds)
         if test not in conds or not len(y) or len(set(y)) < len(classes):
             emit("note", text=f"조건 {test} 제외 평가는 보류: 나머지 조건에도 학습할 모든 동작의 데이터가 필요합니다.")
             continue
+        evaluated_folds.append(int(test))
         if not PROGRESS:
-            print(f"\n== held-out posture {test} (train on {train_conds}, {len(y)} windows)")
-        emit("fold_start", posture=test, fold=held.index(test) + 1, folds=len(held))
+            print(f"\n== held-out posture {test} (train on {train_conds}, {len(y)} windows, stride {opts['window_stride']})")
+        emit("fold_start", posture=test, fold=fold_idx, folds=len(held))
         t1 = time.perf_counter()
-        model = train(x, y, a.epochs, stage=f"fold{test}", classes=classes)
+        model = train(
+            x,
+            y,
+            opts["epochs"],
+            stage=f"fold{test}",
+            classes=classes,
+            window_stride=opts["window_stride"],
+        )
         if not PROGRESS:
             print(f"    trained in {time.perf_counter() - t1:.0f} s")
         for s in eval_sessions:
@@ -446,10 +655,18 @@ def main() -> int:
     if a.no_export:
         return 0
     if not PROGRESS:
-        print(f"\n== final model on all postures {conds}")
+        print(f"\n== final model on all postures {conds} (stride {opts['window_stride']})")
     emit("final_start")
     losses: list = []
-    model = train(xa, ya, a.epochs, stage="final", losses=losses, classes=classes)
+    model = train(
+        xa,
+        ya,
+        opts["epochs"],
+        stage="final",
+        losses=losses,
+        classes=classes,
+        window_stride=opts["window_stride"],
+    )
     pred = predict(model, xa_eval).argmax(1)
     train_acc = {name: round(float((pred[ya_eval == c] == c).mean()), 3) for c, name in enumerate(classes) if (ya_eval == c).any()}
     a.output_dir.mkdir(parents=True, exist_ok=True)
@@ -465,7 +682,8 @@ def main() -> int:
     results = [{"posture": t, "rules": r, "tcn": m, "free_minutes": round(fm, 2)} for t, r, m, fm in summary]
     info = {
         "classes": classes, "window": WINDOW, "features": FEATURES, "feature_version": FEATURE_VERSION,
-        "threshold": a.thr, "frames_in_a_row": a.k, "epochs": a.epochs,
+        "threshold": a.thr, "frames_in_a_row": a.k,
+        **card_training_metadata(opts, evaluated_folds),
         "trained": time.strftime("%Y-%m-%d %H:%M:%S"),
         "data": [{"file": Path(s["path"]).name, "pc": public_source(s["meta"])[0],
                   "camera": dict(s["meta"].get("camera") or {}, note=public_source(s["meta"])[1]),
