@@ -1373,7 +1373,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 text: dashboard.simQualityHeadline
                                 font.pixelSize: 11
-                                color: window.ink
+                                color: window.navy
                                 wrapMode: Text.Wrap
                             }
                             RowLayout {
@@ -1466,7 +1466,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 text: dashboard.augSummary
                                 font.pixelSize: 11
-                                color: window.ink
+                                color: window.navy
                                 wrapMode: Text.Wrap
                             }
                             RowLayout {
@@ -2114,9 +2114,10 @@ ApplicationWindow {
                             // Media Player Transport Controls (여유 있게 배치 + 재생 중일 때만 연두색 선택 표시)
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 5
+                                spacing: 4
                                 CompactButton {
                                     text: "⏮ 처음"
+                                    leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2125,6 +2126,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: "⏪ -10F"
+                                    leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2133,6 +2135,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: "◀ -1F"
+                                    leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2141,6 +2144,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: simTabRoot.isPlaying ? "⏸ 일시정지" : "▶ 재생"
+                                    leftPadding: 10; rightPadding: 10
                                     accent: simTabRoot.isPlaying
                                     primary: !simTabRoot.isPlaying
                                     enabled: simTabRoot.totalFrames > 0
@@ -2152,6 +2156,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: "⏹ 정지"
+                                    leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2160,6 +2165,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: "+1F ▶"
+                                    leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2168,6 +2174,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: "+10F ⏩"
+                                    leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2176,6 +2183,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: "다음 이벤트 ⏭"
+                                    leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2183,12 +2191,13 @@ ApplicationWindow {
                                     }
                                 }
                                 Item { Layout.fillWidth: true }
-                                TextLabel { text: "재생 배속:"; font.pixelSize: 11; color: window.muted }
+                                TextLabel { text: "배속:"; font.pixelSize: 11; color: window.muted }
                                 Repeater {
                                     model: [0.25, 0.5, 1.0, 2.0, 4.0]
                                     delegate: CompactButton {
                                         required property real modelData
                                         text: modelData + "x"
+                                        leftPadding: 7; rightPadding: 7
                                         accent: Math.abs(simTabRoot.playSpeed - modelData) < 0.01
                                         onClicked: simTabRoot.playSpeed = modelData
                                     }
