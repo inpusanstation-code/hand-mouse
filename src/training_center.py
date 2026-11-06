@@ -104,10 +104,12 @@ def load_training_selection(rec_dir: Path = REC_DIR) -> Dict[str, Any]:
             if isinstance(data, dict):
                 excluded = [str(x) for x in data.get("excluded", []) if x]
                 aug = _normalize_aug_settings(data.get("augmentation"))
-                return {"excluded": sorted(set(excluded)), "augmentation": aug}
+                raw_mode = str(data.get("training_mode", "fast"))
+                mode = raw_mode if raw_mode in ("fast", "thorough") else "fast"
+                return {"excluded": sorted(set(excluded)), "augmentation": aug, "training_mode": mode}
         except Exception:
             pass
-    return {"excluded": [], "augmentation": _normalize_aug_settings({})}
+    return {"excluded": [], "augmentation": _normalize_aug_settings({}), "training_mode": "fast"}
 
 
 def save_training_selection(selection: Dict[str, Any], rec_dir: Path = REC_DIR) -> None:
@@ -117,6 +119,8 @@ def save_training_selection(selection: Dict[str, Any], rec_dir: Path = REC_DIR) 
     excluded = sorted({Path(str(x)).name for x in selection.get("excluded", current.get("excluded", [])) if x})
     aug_raw = selection.get("augmentation", current.get("augmentation", {}))
     aug = _normalize_aug_settings(aug_raw)
+    raw_mode = str(selection.get("training_mode", current.get("training_mode", "fast")))
+    mode = raw_mode if raw_mode in ("fast", "thorough") else "fast"
     payload = {
         "excluded": excluded,
         "augmentation": {
@@ -124,11 +128,25 @@ def save_training_selection(selection: Dict[str, Any], rec_dir: Path = REC_DIR) 
             "strength": aug["strength"],
             "factor": aug["factor"],
         },
+        "training_mode": mode,
     }
     _selection_path(folder).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def get_training_mode(rec_dir: Path = REC_DIR) -> str:
+    mode = str(load_training_selection(rec_dir).get("training_mode", "fast"))
+    return mode if mode in ("fast", "thorough") else "fast"
+
+
+def set_training_mode(mode: str, rec_dir: Path = REC_DIR) -> str:
+    norm = str(mode) if str(mode) in ("fast", "thorough") else "fast"
+    sel = load_training_selection(rec_dir)
+    sel["training_mode"] = norm
+    save_training_selection(sel, rec_dir)
+    return norm
 
 
 def get_augmentation_settings(rec_dir: Path = REC_DIR) -> Dict[str, Any]:
@@ -526,12 +544,14 @@ def dataset_summary(rec_dir: Path = REC_DIR, *, compute_quality: bool = True) ->
             per[task]["minutes"] += minutes
     newest = max(selected_mtimes, default=0.0)
     total = sum(p.stat().st_size for p in files)
+    all_conditions = sorted({ck for g in per.values() for ck in g.get("postures", {}).keys() if ck})
     return {
         "files": out_files,
         "per_gesture": per,
         "newest": newest,
         "total_bytes": total,
         "coverage": coverage,
+        "condition_count": len(all_conditions),
         "excluded_count": sum(1 for f in out_files if not f.get("selected", True) and "error" not in f),
     }
 
@@ -579,12 +599,16 @@ def gesture_rows(summary: Dict[str, Any], report: Optional[Dict[str, Any]]) -> L
         classes = [c for c in current.get("classes", list(pg)) if c not in disabled or specialist is not None]
         is_trained = bool(specialist) or (not is_disabled and task.label != "none" and task.label in classes)
         stale = bool(current) and summary.get("newest", 0) > current.get("mtime", 0)
+        cur_mode = current.get("training_mode")
+        cur_folds = current.get("folds") or []
+        is_partial_eval = bool(cur_mode == "fast" or (isinstance(cur_folds, list) and len(cur_folds) == 1))
+        mode_tag = " · 빠른 학습(일부 자세 평가)" if is_partial_eval else (" · 정밀 학습(전체 자세 평가)" if cur_mode == "thorough" else "")
         if specialist:
-            model_text = "선택 동작 모델 · " + str(specialist.get("trained", ""))
+            model_text = "선택 동작 모델 · " + str(specialist.get("trained", "")) + mode_tag
         elif is_disabled:
             model_text = "학습 초기화됨 · 현재 규칙으로 동작"
         elif task.label in classes:
-            model_text = "TCN 학습됨"
+            model_text = "TCN 학습됨" + mode_tag
         else:
             model_text = "TCN 학습 전 · 현재 규칙으로 동작"
         row = {"key": key, "name": name, "reps": d["reps"], "postures": len(d["postures"]),
@@ -608,6 +632,8 @@ def gesture_rows(summary: Dict[str, Any], report: Optional[Dict[str, Any]]) -> L
             row["score_text"] = "아직 평가 없음" if score is None else f"오작동 {score:.1f}회/분"
             if score is not None and row["rules_misfires_per_min"] is not None:
                 row["score_text"] += f" (규칙 {row['rules_misfires_per_min']:.1f})"
+            if score is not None and is_partial_eval:
+                row["score_text"] += " · 일부 자세 평가"
         else:
             data_ok = row["reps"] >= GOAL_REPS and row["postures"] >= GOAL_POSTURES
             row["data_text"] = f"{row['reps']}회 / 목표 {GOAL_REPS}회 · 자세 {row['postures']}/{GOAL_POSTURES}"
@@ -621,6 +647,8 @@ def gesture_rows(summary: Dict[str, Any], report: Optional[Dict[str, Any]]) -> L
             row["score_text"] = "아직 평가 없음" if row["rate"] is None else f"인식 {row['rate'] * 100:.0f}%"
             if row["rate"] is not None and row["rules_rate"] is not None:
                 row["score_text"] += f" (규칙 {row['rules_rate'] * 100:.0f}%)"
+            if row["rate"] is not None and is_partial_eval:
+                row["score_text"] += " · 일부 자세 평가"
         if row["train_accuracy"] is not None:
             row["fit_text"] = f"학습 {row['train_accuracy'] * 100:.0f}%"
         else:
@@ -664,13 +692,23 @@ class TrainingJob:
     def running(self) -> bool:
         return bool(self.state.get("running"))
 
-    def start(self, epochs: int = 25, gestures=None, *, offline_augment: Optional[bool] = None) -> bool:
+    def start(
+        self,
+        epochs: int = 25,
+        gestures=None,
+        *,
+        mode: Optional[str] = None,
+        offline_augment: Optional[bool] = None,
+    ) -> bool:
         if self.running:
             return False
+        resolved_mode = mode if mode in ("fast", "thorough") else get_training_mode()
         if offline_augment is None:
             offline_augment = bool(get_augmentation_settings().get("enabled", True))
         env = dict(os.environ, PYTHONIOENCODING="utf-8")
-        args = [sys.executable, str(ROOT / "scripts" / "train_tcn.py"), "--folds", "--progress", "--epochs", str(epochs)]
+        args = [sys.executable, str(ROOT / "scripts" / "train_tcn.py"), "--mode", resolved_mode, "--progress", "--epochs", str(epochs)]
+        if resolved_mode == "thorough":
+            args.append("--folds")
         if offline_augment:
             args.append("--offline-augment")
         if gestures is not None:
@@ -681,7 +719,8 @@ class TrainingJob:
         self.proc = subprocess.Popen(args, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding="utf-8", errors="replace", env=env, creationflags=flags)
         with self._lock:
-            self.state = {"running": True, "stage": "데이터 읽는 중", "fold": 0, "folds": 0, "epoch": 0, "epochs": epochs,
+            self.state = {"running": True, "stage": "데이터 읽는 중", "mode": resolved_mode,
+                          "fold": 0, "folds": 0, "epoch": 0, "epochs": epochs,
                           "progress": 0.0, "started": time.time(), "log": []}
         threading.Thread(target=self._read, daemon=True).start()
         return True
@@ -726,7 +765,7 @@ class TrainingJob:
                 s["target"] = ev["target"]
                 s["stage"] = "선택 동작 학습 · " + NAMES.get(ev["target"], ev["target"])
             elif kind == "loaded":
-                s["folds"] = int(ev.get("folds", 0))
+                s["folds"] = max(0, int(ev.get("folds", 0)))
                 s["windows"] = ev.get("windows")
                 s["stage"] = f"데이터 {ev.get('windows')}개 구간"
             elif kind == "fold_start":
@@ -751,9 +790,12 @@ class TrainingJob:
                 s["log"] = (s.get("log", []) + [ev.get("text", "")])[-20:]
             elif kind == "error":
                 s["error"] = ev.get("text")
-            steps = s["folds"] + 1
-            done = (max(0, s["fold"] - 1) + s["epoch"] / max(1, s["epochs"])) / max(1, steps)
-            s["progress"] = 1.0 if kind == "done" else round(min(0.99, done), 3)
+            steps = max(1, int(s.get("folds", 0)) + 1)
+            cur_fold = max(0, int(s.get("fold", 0)))
+            cur_epoch = max(0, int(s.get("epoch", 0)))
+            total_epochs = max(1, int(s.get("epochs", 1)))
+            done = 0.0 if cur_fold == 0 else ((cur_fold - 1) + min(1.0, cur_epoch / total_epochs)) / steps
+            s["progress"] = 1.0 if kind == "done" else round(max(0.0, min(0.99, done)), 3)
             if kind != "done" and s.get("gesture_count"):
                 s["progress"] = round((s["gesture_index"] - 1 + s["progress"]) / s["gesture_count"], 3)
 

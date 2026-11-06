@@ -2585,6 +2585,35 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
+                TextLabel {
+                    text: "학습 모드"
+                    font.bold: true
+                    font.pixelSize: 12
+                }
+                CompactButton {
+                    text: "빠른 학습(권장) · 2회"
+                    accent: dashboard.trainingMode === "fast"
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                    onClicked: dashboard.setTrainingMode("fast")
+                }
+                CompactButton {
+                    text: "정밀 학습(전체 폴드, 오래 걸림) · " + dashboard.thoroughRunCount + "회"
+                    accent: dashboard.trainingMode === "thorough"
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                    onClicked: dashboard.setTrainingMode("thorough")
+                }
+                TextLabel {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    elide: Text.ElideRight
+                    text: dashboard.trainingModeRunsText
+                    font.pixelSize: 11
+                    color: window.muted
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
                 ColumnLayout {
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
@@ -2593,7 +2622,9 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                         text: dashboard.trainingStage !== "" ? dashboard.trainingStage
-                              : "학습: 자세 하나씩 빼고 평가한 뒤 전체로 최종 모델을 만들어요 (CPU로 몇 분)"
+                              : (dashboard.trainingMode === "thorough"
+                                 ? "학습: 전체 자세를 하나씩 빼고 교차평가한 뒤 최종 모델을 만들어요 (전체 폴드, 오래 걸림)"
+                                 : "학습: 대표 자세 1개로 빠르게 평가(일부 자세 평가)한 뒤 최종 모델을 만들어요 (권장)")
                         font.pixelSize: 12; wrapMode: Text.Wrap
                     }
                     Rectangle {
