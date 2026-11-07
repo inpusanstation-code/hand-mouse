@@ -135,7 +135,8 @@ def hand_features(landmarks: Sequence[Any]) -> Dict[str, Any]:
     tdx, tdy = pts[THUMB_TIP][0] - pts[2][0], pts[THUMB_TIP][1] - pts[2][1]
     thumb_up = -tdy / math.hypot(tdx, tdy) if math.hypot(tdx, tdy) > 1e-6 else 0.0   # cos of the angle between the thumb and "up" on the screen
     palm_ratio = d2(pts[5], pts[17]) / palm_len           # palm width / length: ~0.9-1.3 palm to the camera, 2+ when a fist points AT it
-    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy)}
+    depth_3d = max((abs(p[2] - wrist[2]) for p in pts), default=0.0)
+    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy), "depth_3d": depth_3d}
 
 
 @dataclass
@@ -224,12 +225,46 @@ class MotionMode:
         # little-finger knuckles", which depends on where the thumb is: a thumbs-up pointing sideways failed, a fist with the
         # thumb bent underneath passed.
         straight = f.get("thumb_straight")
-        thumb_out = (straight >= self.cfg("motion_thumb_straight")) if straight is not None             else f["thumb_tuck"] >= self.cfg("motion_thumb_out")
+        thumb_out = (straight >= self.cfg("motion_thumb_straight")) if straight is not None else f["thumb_tuck"] >= self.cfg("motion_thumb_out")
+        curls = sorted(float(c) for c in f["curl"])
+        fold_limit = self.cfg("motion_fold_ratio")
+        curl_mean = sum(curls) / max(1, len(curls))
+        palm_r = f.get("palm_ratio", 1.0)
+        real_3d = float(f.get("depth_3d", 0.0)) > 1e-4
+        angled_thumbs_up = (
+            straight is not None
+            and straight >= 0.94
+            and f.get("thumb_up", 1.0) >= 0.78
+            and (palm_r >= 1.15 or (real_3d and straight >= 0.97 and f.get("thumb_up", 1.0) >= 0.88))
+        )
+        folded = (
+            curls[-1] <= fold_limit
+            or (
+                fold_limit >= 1.0
+                and len(curls) >= 4
+                and curls[2] <= fold_limit
+                and curls[-1] <= fold_limit + 0.22
+                and curl_mean <= 1.05
+            )
+            or (
+                angled_thumbs_up
+                and fold_limit >= 1.0
+                and len(curls) >= 4
+                and curls[0] <= 1.12
+                and curls[1] <= 1.30
+                and curl_mean <= 1.28
+            )
+        )
+        min_palm = self.cfg("motion_min_palm_ratio")
+        max_palm = self.cfg("motion_max_palm_ratio")
+        if straight is not None and straight >= 0.90 and (curl_mean <= 1.05 or angled_thumbs_up):
+            min_palm = min(min_palm, 0.55)
+            max_palm = max(max_palm, 30.0)
         return (thumb_out
                 and f.get("thumb_up", 1.0) >= self.cfg("motion_thumb_up")
                 and f.get("thumb_len", 9.9) >= self.cfg("motion_thumb_len")
-                and self.cfg("motion_min_palm_ratio") <= f.get("palm_ratio", 1.0) <= self.cfg("motion_max_palm_ratio")
-                and max(f["curl"]) <= self.cfg("motion_fold_ratio"))
+                and min_palm <= palm_r <= max_palm
+                and folded)
 
     def open_hand(self, f: Dict[str, Any]) -> bool:
         """All four fingers fully extended (a swipe is only read from a completely open hand, so that other
@@ -341,10 +376,18 @@ class MotionMode:
         palm = feats["palm"]
         if self._enter_since is None:
             self._enter_since, self._enter_anchor = now, palm
+            self._enter_history = [(now, palm)]
             return None
-        if math.hypot(palm[0] - self._enter_anchor[0], palm[1] - self._enter_anchor[1]) > self.cfg("motion_enter_still"):
-            self._enter_since, self._enter_anchor = now, palm       # the hand is travelling: hold starts over
-            return None
+        still_limit = self.cfg("motion_enter_still")
+        if float(feats.get("depth_3d", 0.0)) > 1e-4:
+            still_limit = max(still_limit, 0.06)
+        hist = getattr(self, "_enter_history", None) or []
+        hist.append((now, palm))
+        self._enter_history = hist
+        if math.hypot(palm[0] - self._enter_anchor[0], palm[1] - self._enter_anchor[1]) > still_limit:
+            while len(hist) > 1 and math.hypot(palm[0] - hist[0][1][0], palm[1] - hist[0][1][1]) > still_limit:
+                hist.pop(0)
+            self._enter_since, self._enter_anchor = hist[0]
         if now - self._enter_since >= self.cfg("motion_enter_hold"):
             return self._enter(now, "pose")
         return None

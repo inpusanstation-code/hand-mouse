@@ -681,6 +681,217 @@ def test_per_gesture_and_card_reading_work_with_0_or_1_folds_and_record_metadata
     assert tc.get_training_mode(tmp_path) == "thorough"
 
 
+def test_gpu_capability_detection_and_device_selection(tmp_path, monkeypatch):
+    """Verify GPU capability detection, device selection persistence, and safe CPU fallback."""
+    from scripts import train_tcn
+
+    cap = tc.detect_gpu_training_capability(force_refresh=True)
+    assert isinstance(cap["cuda_available"], bool)
+    assert cap["recommended_device"] in ("gpu", "cpu")
+    assert isinstance(cap["status_label"], str) and cap["status_label"]
+
+    # Default preference is 'auto'
+    assert tc.get_training_device(tmp_path) == "auto"
+    assert tc.set_training_device("cpu", tmp_path) == "cpu"
+    assert tc.get_training_device(tmp_path) == "cpu"
+    assert tc.resolve_effective_training_device(rec_dir=tmp_path, cuda_available=True) == "cpu"
+
+    assert tc.set_training_device("gpu", tmp_path) == "gpu"
+    assert tc.get_training_device(tmp_path) == "gpu"
+    # When CUDA is available, 'gpu' resolves to 'gpu'; when unavailable, falls back to 'cpu'
+    assert tc.resolve_effective_training_device(rec_dir=tmp_path, cuda_available=True) == "gpu"
+    assert tc.resolve_effective_training_device(rec_dir=tmp_path, cuda_available=False) == "cpu"
+
+    # CLI --device resolution in train_tcn
+    args_cpu = train_tcn.parse_args(["--device", "cpu"])
+    opts_cpu = train_tcn.resolve_training_options(args_cpu)
+    assert opts_cpu["device"] == "cpu"
+    assert opts_cpu["effective_device"] == "cpu"
+    assert opts_cpu["device_name"] == "CPU"
+
+    # Simulate a PC without CUDA and verify --device gpu safely falls back to cpu
+    monkeypatch.setattr(train_tcn.torch.cuda, "is_available", lambda: False)
+    args_gpu_no_cuda = train_tcn.parse_args(["--device", "gpu"])
+    opts_fallback = train_tcn.resolve_training_options(args_gpu_no_cuda)
+    assert opts_fallback["device"] == "gpu"
+    assert opts_fallback["effective_device"] == "cpu"
+    meta = train_tcn.card_training_metadata(opts_fallback, [2])
+    assert meta["training_device"] == "cpu"
+
+
+def test_evaluate_training_improvement_and_gesture_rows_deltas(tmp_path):
+    """Verify post-training Before-vs-After improvement evaluation and per-gesture row delta badges."""
+    before_report = {
+        "classes": ["none", "thumb_index", "thumb_ring"],
+        "per_gesture": {
+            "none": {"free_minutes": 2.0, "misfires": 4, "rules_misfires": 6, "misfires_per_min": 2.0, "rules_misfires_per_min": 3.0},
+            "thumb_index": {"recognised": 14, "total": 20, "rate": 0.70, "rules_rate": 0.65, "train_accuracy": 0.90},
+            "thumb_ring": {"recognised": 18, "total": 20, "rate": 0.90, "rules_rate": 0.80, "train_accuracy": 0.96},
+        },
+        "spatial_mlp": {"test_accuracy": 88.5},
+        "specialists": {},
+    }
+    after_report = {
+        "classes": ["none", "thumb_index", "thumb_ring", "thumb_middle"],
+        "per_gesture": {
+            "none": {"free_minutes": 2.0, "misfires": 1, "rules_misfires": 6, "misfires_per_min": 0.5, "rules_misfires_per_min": 3.0},
+            "thumb_index": {"recognised": 18, "total": 20, "rate": 0.90, "rules_rate": 0.65, "train_accuracy": 0.97},
+            "thumb_ring": {"recognised": 17, "total": 20, "rate": 0.85, "rules_rate": 0.80, "train_accuracy": 0.94},
+            "thumb_middle": {"recognised": 16, "total": 20, "rate": 0.80, "rules_rate": 0.60, "train_accuracy": 0.95},
+        },
+        "spatial_mlp": {"test_accuracy": 94.0},
+        "specialists": {},
+    }
+    dummy_model = tmp_path / "gesture_tcn.onnx"
+    imp = tc.evaluate_training_improvement(
+        after_report=after_report,
+        before_report=before_report,
+        backup_id="backup:backup-test",
+        model=dummy_model,
+        backup_dir=tmp_path / "backups",
+    )
+    assert imp["available"] is True
+    assert imp["has_before_model"] is True
+    assert imp["can_rollback"] is True
+    assert imp["backup_id"] == "backup:backup-test"
+    assert imp["spatial_accuracy_delta"] == 5.5
+    assert "직전 모델 대비" in imp["headline"]
+
+    by_label = {item["label"]: item for item in imp["items"]}
+    # thumb_index improved from 70% to 90% (+20%p)
+    assert by_label["thumb_index"]["status"] == "improved"
+    assert by_label["thumb_index"]["delta_prev_pp"] == 20.0
+    assert "+20%p" in by_label["thumb_index"]["badge"]
+    # thumb_ring regressed from 90% to 85% (-5%p)
+    assert by_label["thumb_ring"]["status"] == "regressed"
+    assert by_label["thumb_ring"]["delta_prev_pp"] == -5.0
+    # thumb_middle is newly trained compared to before_report
+    assert by_label["thumb_middle"]["status"] in ("improved", "new")
+    # none misfires dropped from 2.0/min to 0.5/min (-1.5/min)
+    assert by_label["none"]["status"] == "improved"
+    assert by_label["none"]["delta_prev"] == -1.5
+
+    # Persisted JSON can be reloaded
+    loaded = tc.load_last_training_improvement(model=dummy_model)
+    assert loaded["available"] is True
+    assert loaded["headline"] == imp["headline"]
+
+    # Gesture rows receive delta_badge, delta_status, and delta_detail
+    summary = tc.dataset_summary(tmp_path)
+    rows = {r["key"]: r for r in tc.gesture_rows(summary, after_report, imp)}
+    assert rows["thumb_index"]["delta_status"] == "improved"
+    assert "+20%p" in rows["thumb_index"]["delta_badge"]
+    assert "70% → 90%" in rows["thumb_index"]["delta_detail"]
+
+
+def test_training_substage_events_and_dashboard_work_progress():
+    """Verify TrainingJob substage progress updates and QtDashboard work progress properties."""
+    from src.qt_dashboard import QtDashboard
+
+    job = tc.TrainingJob()
+    job.state = {"running": True, "fold": 0, "folds": 1, "epoch": 0, "epochs": 25, "progress": 0.02, "stage": "준비 중…"}
+    job._apply({"event": "substage", "stage": "녹화 파일 읽는 중 (1/3)…", "progress": 0.08})
+    snap = job.snapshot()
+    assert snap["stage"] == "녹화 파일 읽는 중 (1/3)…"
+    assert abs(snap["progress"] - 0.08) < 1e-6
+
+    ui = QtDashboard()
+    assert ui.appWorking is False
+    ui._set_busy_task("모델 시뮬레이션 실행 중", "[1/3단계] 프레임 추론 중…", 0.35)
+    assert ui.appWorking is True
+    assert ui.workTitle == "모델 시뮬레이션 실행 중"
+    assert "[1/3단계]" in ui.workDetail
+    assert ui.workIndeterminate is False
+    assert ui.workPercentText == "35%"
+    assert "초 경과" in ui.workElapsedText
+
+    ui._set_busy_task("")
+    assert ui.appWorking is False
+    assert ui.workPercentText == ""
+
+
+def test_diagnose_label_performance_and_adaptive_boost_summary(tmp_path):
+    """Verify root-cause drop diagnosis and adaptive posture boost reporting."""
+    dummy_model = tmp_path / "gesture_tcn.onnx"
+    dummy_model.write_bytes(b"dummy")
+
+    before_report = {
+        "classes": ["none", "thumb_middle"],
+        "folds": [2],
+        "training_mode": "fast",
+        "data": [{"file": "rec1.jsonl.gz"}],
+        "per_gesture": {
+            "thumb_middle": {
+                "rate": 0.80,
+                "rules_rate": 0.90,
+                "recognised": 32,
+                "total": 40,
+                "train_accuracy": 1.0,
+            },
+        },
+    }
+    after_report = {
+        "classes": ["none", "thumb_middle"],
+        "folds": [0, 1, 2],
+        "training_mode": "thorough",
+        "data": [{"file": "rec1.jsonl.gz"}, {"file": "rec2-new.jsonl.gz"}],
+        "condition_groups": [
+            {"name": "정면 · 중앙"},
+            {"name": "손등 보임 · 좌측"},
+            {"name": "오른쪽 기울기 · 우측"},
+        ],
+        "held_out_results": [
+            {"posture": 0, "tcn": {"reps": {"thumb_middle": [40, 42]}, "misfires": {}, "confused": 0}, "rules": {"reps": {"thumb_middle": [38, 42]}, "misfires": {}}},
+            {"posture": 1, "tcn": {"reps": {"thumb_middle": [20, 41]}, "misfires": {}, "confused": 2}, "rules": {"reps": {"thumb_middle": [37, 41]}, "misfires": {}}},
+            {"posture": 2, "tcn": {"reps": {"thumb_middle": [26, 41]}, "misfires": {}, "confused": 0}, "rules": {"reps": {"thumb_middle": [38, 41]}, "misfires": {}}},
+        ],
+        "final_results": [
+            {"posture": 0, "tcn": {"reps": {"thumb_middle": [42, 42]}, "misfires": {}, "confused": 0}},
+            {"posture": 1, "tcn": {"reps": {"thumb_middle": [41, 41]}, "misfires": {}, "confused": 0}},
+            {"posture": 2, "tcn": {"reps": {"thumb_middle": [41, 41]}, "misfires": {}, "confused": 0}},
+        ],
+        "adaptive_boost": {
+            "triggered": True,
+            "rounds": 2,
+            "target_postures": [1, 2],
+            "heterogeneous_postures": [1, 2],
+            "posture_details": [
+                {"posture": 1, "name": "손등 보임 · 좌측", "zero_shot_rate": 0.488, "after_final_rate": 1.0, "boosted": True},
+                {"posture": 2, "name": "오른쪽 기울기 · 우측", "zero_shot_rate": 0.634, "after_final_rate": 1.0, "boosted": True},
+            ],
+        },
+        "per_gesture": {
+            "thumb_middle": {
+                "rate": 0.694,
+                "zero_shot_rate": 0.694,
+                "final_rate": 1.0,
+                "rules_rate": 0.911,
+                "recognised": 86,
+                "total": 124,
+                "train_accuracy": 1.0,
+            },
+        },
+    }
+
+    imp = tc.evaluate_training_improvement(
+        before_report=before_report,
+        after_report=after_report,
+        model=dummy_model,
+    )
+    by_label = {item["label"]: item for item in imp["items"]}
+    tm = by_label["thumb_middle"]
+    assert tm["status"] == "regressed"
+    assert "적응형 자세 재학습(2회) 완료" in tm["boost_summary"]
+    assert "이질적인 자세·각도 차이" in tm["diagnosis_summary"]
+    assert "손등 보임 · 좌측" in tm["diagnosis_summary"]
+    assert any("평가 범위 확대 영향" in r for r in tm["diagnosis_reasons"])
+    assert any("신규 녹화 데이터 영향" in r for r in tm["diagnosis_reasons"])
+    assert any("타 동작 혼동" in r for r in tm["diagnosis_reasons"])
+
+
+
+
+
 
 
 

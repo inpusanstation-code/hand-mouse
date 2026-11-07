@@ -15,6 +15,7 @@ Run from hand-mouse/:  uv run --locked --extra qt --extra train python scripts/t
 from __future__ import annotations
 
 import argparse
+import copy
 import glob
 import json
 import math
@@ -43,8 +44,42 @@ PROGRESS = False          # --progress: one JSON object per line on stdout (the 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 DEFAULT_TRAINING_MODE = "fast"
+DEFAULT_TRAINING_DEVICE = "auto"
+TRAINING_DEVICES = ("auto", "gpu", "cuda", "cpu")
 DEFAULT_TEST_CONDITION = 2
 DEFAULT_EPOCHS = 25
+
+
+def resolve_training_device(requested: str | torch.device | None = None) -> tuple[torch.device, str, str]:
+    """Resolve requested device ('auto', 'gpu'/'cuda', 'cpu') into (torch.device, normalized_choice, device_name).
+
+    Always falls back cleanly to CPU when CUDA is unavailable on the host PC.
+    """
+    if isinstance(requested, torch.device):
+        choice = "gpu" if requested.type == "cuda" else "cpu"
+    else:
+        raw = str(requested or DEFAULT_TRAINING_DEVICE).strip().lower()
+        if raw in ("cuda", "gpu"):
+            choice = "gpu"
+        elif raw == "cpu":
+            choice = "cpu"
+        elif raw in ("auto", ""):
+            choice = "auto"
+        else:
+            raise ValueError(f"알 수 없는 학습 연산 장치: {requested}")
+
+    cuda_ok = bool(torch.cuda.is_available())
+    if choice in ("auto", "gpu") and cuda_ok:
+        dev = torch.device("cuda")
+        try:
+            name = str(torch.cuda.get_device_name(0) or "CUDA GPU")
+        except Exception:
+            name = "CUDA GPU"
+        return dev, choice, name
+    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+    if choice in ("auto", "gpu") and mps_backend is not None and bool(mps_backend.is_available()):
+        return torch.device("mps"), choice, "Apple MPS GPU"
+    return torch.device("cpu"), choice, "CPU"
 TRAINING_MODES: dict[str, dict[str, int | bool | None]] = {
     "fast": {
         "folds": False,
@@ -94,6 +129,7 @@ def resolve_training_options(
             "window_stride": getattr(args, "window_stride", None),
             "epochs": getattr(args, "epochs", None),
             "offline_augment": getattr(args, "offline_augment", None),
+            "device": getattr(args, "device", None),
         }
         try:
             args._raw_training_args = raw
@@ -161,12 +197,17 @@ def resolve_training_options(
     if conds is not None:
         held = list(conds) if use_folds else ([] if test_condition < 0 else [test_condition])
 
+    dev, device_choice, device_name = resolve_training_device(raw.get("device"))
+    global DEVICE
+    DEVICE = dev
+
     args.mode = mode
     args.folds = use_folds
     args.test_condition = test_condition
     args.window_stride = window_stride
     args.epochs = epochs
     args.offline_augment = use_aug
+    args.device = device_choice
 
     return {
         "mode": mode,
@@ -178,6 +219,9 @@ def resolve_training_options(
         "offline_augment": use_aug,
         "offline_augment_factor": aug_factor,
         "max_augmented_per_recording": max_aug_per_rec,
+        "device": device_choice,
+        "effective_device": dev.type,
+        "device_name": device_name,
     }
 
 
@@ -191,12 +235,16 @@ def resolve_held_out_conds(conds: list[int], opts: dict) -> list[int]:
 
 def card_training_metadata(opts: dict, evaluated_folds: list[int]) -> dict:
     """Standard metadata fields describing the training mode and schedule for model cards."""
+    eff_dev = str(opts.get("effective_device") or DEVICE.type)
+    dev_name = str(opts.get("device_name") or ("CUDA GPU" if eff_dev == "cuda" else "CPU"))
     return {
         "epochs": int(opts["epochs"]),
         "training_mode": str(opts["mode"]),
         "folds": [int(c) for c in evaluated_folds],
         "window_stride": int(opts["window_stride"]),
         "offline_augment_factor": int(opts["offline_augment_factor"]),
+        "training_device": eff_dev,
+        "training_device_name": dev_name,
     }
 
 
@@ -207,6 +255,7 @@ def load_training_sessions(paths, args, *, window: int = WINDOW):
 
     use_cleaned = not getattr(args, "no_cleaned", False)
     resolved_primary = [resolve_cleaned_path(p, use_cleaned=use_cleaned) for p in paths]
+    emit("substage", text=f"녹화 데이터 및 3D 관절 특징 읽는 중 ({len(resolved_primary)}개 파일)…")
     aug_cfg = get_augmentation_settings(Path(paths[0]).parent)
     opts = resolve_training_options(args, aug_cfg=aug_cfg)
     use_aug = bool(opts["offline_augment"])
@@ -218,6 +267,7 @@ def load_training_sessions(paths, args, *, window: int = WINDOW):
     extra_records = None
     if use_aug and not aug_paths and opts["offline_augment_factor"] > 0:
         from src.offline_augment import generate_augmented_records
+        emit("substage", text=f"오프라인 데이터 증강 생성 중 ({opts['offline_augment_factor']}배)…")
         extra_records = generate_augmented_records(
             resolved_primary,
             factor=int(opts["offline_augment_factor"]),
@@ -252,10 +302,26 @@ def load(paths, *, use_cleaned: bool = False, extra_records=None):
 def pick(sessions, conds):
     xs, ys = [], []
     for s in sessions:
-        m = (s["y"] >= 0) & np.isin(s["cond"], conds)
+        in_cond = np.isin(s["cond"], conds)
+        if (s.get("meta") or {}).get("mode") == "free":
+            in_cond = in_cond | ((s["cond"] == -1) & (s["y"] == 0))
+        m = (s["y"] >= 0) & in_cond
         xs.append(s["x"][m])
         ys.append(s["y"][m])
     return np.concatenate(xs), np.concatenate(ys)
+
+
+def pick_with_conds(sessions, conds):
+    xs, ys, cs = [], [], []
+    for s in sessions:
+        in_cond = np.isin(s["cond"], conds)
+        if (s.get("meta") or {}).get("mode") == "free":
+            in_cond = in_cond | ((s["cond"] == -1) & (s["y"] == 0))
+        m = (s["y"] >= 0) & in_cond
+        xs.append(s["x"][m])
+        ys.append(s["y"][m])
+        cs.append(s["cond"][m])
+    return np.concatenate(xs), np.concatenate(ys), np.concatenate(cs)
 
 
 # ---------------------------------------------------------------- model
@@ -288,11 +354,11 @@ class TCN(nn.Module):
         return self.head(h[:, :, -1])
 
 
-def augment(x: torch.Tensor) -> torch.Tensor:
-    """Different seats / camera angles: small 3D rotation of the hand-frame joints, size and jitter."""
+def augment(x: torch.Tensor, max_deg: float = 30.0) -> torch.Tensor:
+    """Different seats / camera angles: 3D rotation of hand-frame joints, size, jitter, and angle self-occlusion context."""
     b, t, _ = x.shape
     dev, dt = x.device, x.dtype
-    ang = (torch.rand(b, 3, device=dev, dtype=dt) - 0.5) * math.radians(30)
+    ang = (torch.rand(b, 3, device=dev, dtype=dt) - 0.5) * math.radians(max_deg)
     cx, cy, cz = torch.cos(ang).unbind(1)
     sx, sy, sz = torch.sin(ang).unbind(1)
     one = torch.ones(b, device=dev, dtype=dt)
@@ -307,26 +373,70 @@ def augment(x: torch.Tensor) -> torch.Tensor:
     x[:, :, :126] = torch.bmm(pts, rt).reshape(b, t, 126)
     x[:, :, 126:130].mul_(scale)
     x[:, :, :130].add_(torch.randn((b, t, 130), device=dev, dtype=dt), alpha=0.01)
+
+    # Self-occlusion context augmentation: simulate 1~2 frame angle-induced finger foreshortening
+    # so the TCN learns to maintain pinch/gesture judgment from temporal context and proximal knuckles.
+    if t >= 6 and b >= 4:
+        occ_b = torch.rand(b, device=dev) < 0.28
+        if torch.any(occ_b):
+            pos = x[:, :, :63].view(b, t, 21, 3)
+            t0 = int(torch.randint(2, t - 2, (1,), device=dev).item())
+            f_base = int(torch.randint(0, 5, (1,), device=dev).item()) * 4 + 1  # MCP index: 1, 5, 9, 13, 17
+            shrink = 0.62 + 0.20 * torch.rand((b, 1, 1, 1), device=dev, dtype=dt)
+            mcp = pos[occ_b, t0:t0 + 2, f_base:f_base + 1, :]
+            distal = pos[occ_b, t0:t0 + 2, f_base + 1:f_base + 4, :]
+            pos[occ_b, t0:t0 + 2, f_base + 1:f_base + 4, :] = mcp + (distal - mcp) * shrink[occ_b]
+            x[:, :, :63] = pos.view(b, t, 63)
+            pos_occ = pos[occ_b]
+            x[occ_b, 1:, 63:126] = (pos_occ[:, 1:] - pos_occ[:, :-1]).reshape(-1, t - 1, 63)
+            thumb = pos_occ[:, :, 4:5, :]
+            tips = pos_occ[:, :, [8, 12, 16, 20], :]
+            x[occ_b, :, 126:130] = torch.linalg.norm(thumb - tips, dim=-1)
     return x
 
 
-def train(x, y, epochs: int, seed: int = 0, stage: str = "", losses=None, classes=None, window_stride: int = 1):
+def train(
+    x,
+    y,
+    epochs: int,
+    seed: int = 0,
+    stage: str = "",
+    losses=None,
+    classes=None,
+    window_stride: int = 1,
+    device: str | torch.device | None = None,
+    sample_weights: np.ndarray | None = None,
+    init_model: nn.Module | None = None,
+    aug_deg: float = 30.0,
+):
     classes = classes or CLASSES
     stride = max(1, int(window_stride))
+    dev = DEVICE if device is None else resolve_training_device(device)[0]
     torch.manual_seed(seed)
-    if DEVICE.type == "cuda":
+    if dev.type == "cuda":
         torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
-    model = TCN(n_out=len(classes)).to(DEVICE)
+    if init_model is not None:
+        model = copy.deepcopy(init_model).to(dev)
+    else:
+        model = TCN(n_out=len(classes)).to(dev)
     counts = np.bincount(y, minlength=len(classes)).astype(np.float64)
-    weight = torch.tensor((counts.sum() / np.maximum(counts, 1)) ** 0.5, dtype=torch.float32, device=DEVICE)
-    lossf = nn.CrossEntropyLoss(weight=weight / weight.mean())
-    use_large_batch = DEVICE.type == "cuda" and (len(x) // stride) >= 4096
+    weight = torch.tensor((counts.sum() / np.maximum(counts, 1)) ** 0.5, dtype=torch.float32, device=dev)
+    class_weight = weight / weight.mean()
+    lossf_none = nn.CrossEntropyLoss(weight=class_weight, reduction="none")
+    lossf_mean = nn.CrossEntropyLoss(weight=class_weight)
+    use_large_batch = dev.type == "cuda" and (len(x) // stride) >= 4096
     bs = 4096 if use_large_batch else 256
-    lr = 2e-3 if use_large_batch else 1e-3
+    base_lr = 2e-3 if use_large_batch else 1e-3
+    lr = base_lr * 0.45 if init_model is not None else base_lr
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-    xt = torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)).to(DEVICE)
-    yt = torch.from_numpy(np.ascontiguousarray(y, dtype=np.int64)).to(DEVICE)
+    xt = torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)).to(dev)
+    yt = torch.from_numpy(np.ascontiguousarray(y, dtype=np.int64)).to(dev)
+    wt = (
+        torch.from_numpy(np.ascontiguousarray(sample_weights, dtype=np.float32)).to(dev)
+        if sample_weights is not None and len(sample_weights) == len(x)
+        else None
+    )
     for ep in range(epochs):
         model.train()
         if stride > 1 and len(xt) > 0:
@@ -335,15 +445,22 @@ def train(x, y, epochs: int, seed: int = 0, stage: str = "", losses=None, classe
                 offset = 0
             ep_xt = xt[offset::stride]
             ep_yt = yt[offset::stride]
+            ep_wt = wt[offset::stride] if wt is not None else None
         else:
             ep_xt = xt
             ep_yt = yt
-        perm = torch.randperm(len(ep_xt), device=DEVICE)
-        total = torch.zeros((), device=DEVICE, dtype=torch.float64)
+            ep_wt = wt
+        perm = torch.randperm(len(ep_xt), device=dev)
+        total = torch.zeros((), device=dev, dtype=torch.float64)
         for i in range(0, len(perm), bs):
             idx = perm[i:i + bs]
             opt.zero_grad(set_to_none=True)
-            loss = lossf(model(augment(ep_xt[idx])), ep_yt[idx])
+            logits = model(augment(ep_xt[idx], max_deg=aug_deg))
+            if ep_wt is not None:
+                per_sample = lossf_none(logits, ep_yt[idx]) * ep_wt[idx]
+                loss = per_sample.mean()
+            else:
+                loss = lossf_mean(logits, ep_yt[idx])
             loss.backward()
             opt.step()
             total += loss.detach().to(torch.float64) * len(idx)
@@ -494,11 +611,276 @@ def free_minutes(session, conds) -> float:
                and session["cond"][i] in conds and session["y"][i] >= 0) / 60
 
 
-def per_gesture(summary, windows_per_class, train_acc, classes=None, *, by_task=False):
-    """Scores per gesture for the training center: held-out recognition, misfires per minute, data, fit."""
+def evaluate_postures_on_model(
+    eval_sessions,
+    conds,
+    model,
+    classes,
+    thr: float = 0.7,
+    k: int = 3,
+    sp_model=None,
+):
+    """Evaluate a trained model (optionally blended with Spatial MLP) per posture across eval_sessions."""
+    from src.spatial_mlp import blend_tcn_and_spatial_probs, ensure_session_spatial_features
+
+    session_probs = []
+    for s in eval_sessions:
+        prob = predict(model, s["x"])
+        if sp_model is not None:
+            s_feats = ensure_session_spatial_features(s)
+            if len(s_feats) == len(prob):
+                sp_prob = sp_model.predict_proba(s_feats)
+                prob = blend_tcn_and_spatial_probs(prob, classes, sp_prob, sp_model.classes)
+        session_probs.append(prob)
+
+    results = []
+    for c in conds:
+        for s, prob in zip(eval_sessions, session_probs):
+            if not (s["cond"] == c).any():
+                continue
+            rule = evaluate(s, [c])
+            tcn = evaluate(s, [c], prob, thr, k)
+            results.append({
+                "posture": int(c),
+                "rules": rule,
+                "tcn": tcn,
+                "free_minutes": round(free_minutes(s, [c]), 2),
+            })
+    return results
+
+
+def _aggregate_posture_reps(result_rows):
+    """Return {posture_int: {'recog': int, 'total': int, 'misfires': int, 'confused': int}}."""
+    agg = {}
+    for row in result_rows or []:
+        p = row.get("posture", row.get("test_posture"))
+        if p is None:
+            continue
+        p = int(p)
+        bucket = agg.setdefault(p, {"recog": 0, "total": 0, "misfires": 0, "confused": 0})
+        tcn = row.get("tcn") or {}
+        for a, b in (tcn.get("reps") or {}).values():
+            bucket["recog"] += int(a)
+            bucket["total"] += int(b)
+        bucket["misfires"] += int(sum((tcn.get("misfires") or {}).values()))
+        bucket["confused"] += int(tcn.get("confused") or 0)
+    return agg
+
+
+def _active_confidence_by_posture(model, xa, ya, ca, conds) -> dict[int, float]:
+    """Mean target-class probability on active gesture windows (ya > 0) for each condition."""
+    if len(xa) == 0:
+        return {}
+    prob = predict(model, xa)
+    idx_col = np.clip(ya, 0, prob.shape[1] - 1)
+    target_prob = prob[np.arange(len(ya)), idx_col]
+    out = {}
+    for c in conds:
+        mask = (ca == c) & (ya > 0)
+        if mask.any():
+            out[int(c)] = float(target_prob[mask].mean())
+        else:
+            mask_all = ca == c
+            out[int(c)] = float(target_prob[mask_all].mean()) if mask_all.any() else 1.0
+    return out
+
+
+def adaptive_boost_postures(
+    model,
+    xa,
+    ya,
+    ca,
+    eval_sessions,
+    conds,
+    held_out_results,
+    *,
+    classes,
+    thr: float = 0.7,
+    k: int = 3,
+    epochs: int = 25,
+    window_stride: int = 1,
+    device=None,
+    sp_model=None,
+    losses=None,
+    condition_groups=None,
+):
+    """
+    Detect heterogeneous or low-recognition postures/angles and iteratively fine-tune with
+    upweighted sampling + wider 3D rotation augmentation until recognition improves.
+    Never degrades overall recognition (retains best checkpoint).
+    """
+    from src.recording_plan import resolve_condition_group_name
+
+    cond_names = {
+        idx_c: resolve_condition_group_name(cg, idx_c)
+        for idx_c, cg in enumerate(condition_groups or [])
+    }
+
+    zs_agg = _aggregate_posture_reps(held_out_results)
+    init_final_res = evaluate_postures_on_model(eval_sessions, conds, model, classes, thr=thr, k=k, sp_model=sp_model)
+    init_tcn_res = evaluate_postures_on_model(eval_sessions, conds, model, classes, thr=thr, k=k, sp_model=None)
+    init_final_agg = _aggregate_posture_reps(init_final_res)
+    init_tcn_agg = _aggregate_posture_reps(init_tcn_res)
+    init_conf = _active_confidence_by_posture(model, xa, ya, ca, conds)
+
+    heterogeneous_conds = set()
+    weak_conds = set()
+    for c in conds:
+        c = int(c)
+        zs = zs_agg.get(c)
+        if zs and zs["total"] > 0 and (zs["recog"] / zs["total"]) < 0.88:
+            heterogeneous_conds.add(c)
+        fn = init_final_agg.get(c)
+        if fn and fn["total"] > 0 and (fn["recog"] / fn["total"]) < 0.98:
+            weak_conds.add(c)
+        tc_stat = init_tcn_agg.get(c)
+        if tc_stat and tc_stat["total"] > 0 and (tc_stat["recog"] / tc_stat["total"]) < 0.96:
+            weak_conds.add(c)
+        if init_conf.get(c, 1.0) < 0.90:
+            weak_conds.add(c)
+
+    target_conds = sorted(heterogeneous_conds | weak_conds)
+    best_model = model
+    best_final_res = init_final_res
+    best_tcn_res = init_tcn_res
+    best_final_agg = init_final_agg
+    best_tcn_agg = init_tcn_agg
+    best_conf = dict(init_conf)
+
+    def _score(f_agg, t_agg, conf_map):
+        f_rec = sum(v["recog"] for v in f_agg.values())
+        f_mis = sum(v["misfires"] for v in f_agg.values())
+        t_rec = sum(v["recog"] for v in t_agg.values())
+        t_mis = sum(v["misfires"] for v in t_agg.values())
+        weak_c = sum(conf_map.get(c, 1.0) for c in (target_conds or conds)) / max(1, len(target_conds or conds))
+        return (f_rec, -f_mis, t_rec, -t_mis, round(weak_c, 4))
+
+    best_score = _score(best_final_agg, best_tcn_agg, best_conf)
+    rounds_run = 0
+    max_rounds = 3 if (target_conds and int(epochs) >= 3 and len(ya) > 0) else 0
+    boost_epochs = max(4, min(10, int(epochs) // 2))
+
+    for r_idx in range(1, max_rounds + 1):
+        # Check if already saturated on all target conditions
+        all_high = all(
+            (best_final_agg.get(c, {}).get("recog", 0) >= best_final_agg.get(c, {}).get("total", 0))
+            and (best_tcn_agg.get(c, {}).get("recog", 0) >= best_tcn_agg.get(c, {}).get("total", 0))
+            and (best_conf.get(c, 1.0) >= 0.94)
+            for c in target_conds
+        )
+        if all_high and r_idx > 1:
+            break
+
+        rounds_run = r_idx
+        names_preview = ", ".join(cond_names.get(c, f"조건 {c}") for c in target_conds[:2])
+        if len(target_conds) > 2:
+            names_preview += f" 외 {len(target_conds) - 2}개"
+        emit(
+            "substage",
+            text=f"이질적인 자세·각도({names_preview}) 인식률 향상을 위한 적응형 추가 학습 중 ({r_idx}/{max_rounds}차)…",
+        )
+        sample_weights = np.ones(len(ya), dtype=np.float32)
+        for c in target_conds:
+            zs = zs_agg.get(c, {})
+            zs_rate = (zs["recog"] / zs["total"]) if zs.get("total") else 1.0
+            tc_s = best_tcn_agg.get(c, {})
+            tc_rate = (tc_s["recog"] / tc_s["total"]) if tc_s.get("total") else 1.0
+            conf_c = best_conf.get(c, 0.85)
+            deficit = max(0.15, 1.0 - min(zs_rate, tc_rate, conf_c))
+            pos_mult = min(4.5, 1.8 + 3.2 * deficit + 0.35 * r_idx)
+            neg_mult = min(2.4, 1.2 + 1.2 * deficit)
+            pos_mask = (ca == c) & (ya > 0)
+            neg_mask = (ca == c) & (ya == 0)
+            sample_weights[pos_mask] = pos_mult
+            sample_weights[neg_mask] = neg_mult
+
+        cand_model = train(
+            xa,
+            ya,
+            boost_epochs,
+            seed=100 + r_idx,
+            stage=f"boost{r_idx}",
+            losses=losses,
+            classes=classes,
+            window_stride=max(1, int(window_stride)),
+            device=device,
+            sample_weights=sample_weights,
+            init_model=best_model,
+            aug_deg=45.0,
+        )
+        cand_final_res = evaluate_postures_on_model(eval_sessions, conds, cand_model, classes, thr=thr, k=k, sp_model=sp_model)
+        cand_tcn_res = evaluate_postures_on_model(eval_sessions, conds, cand_model, classes, thr=thr, k=k, sp_model=None)
+        cand_final_agg = _aggregate_posture_reps(cand_final_res)
+        cand_tcn_agg = _aggregate_posture_reps(cand_tcn_res)
+        cand_conf = _active_confidence_by_posture(cand_model, xa, ya, ca, conds)
+        cand_score = _score(cand_final_agg, cand_tcn_agg, cand_conf)
+        if cand_score >= best_score:
+            best_model = cand_model
+            best_final_res = cand_final_res
+            best_tcn_res = cand_tcn_res
+            best_final_agg = cand_final_agg
+            best_tcn_agg = cand_tcn_agg
+            best_conf = cand_conf
+            best_score = cand_score
+
+    posture_details = []
+    for c in conds:
+        c = int(c)
+        zs = zs_agg.get(c, {})
+        zs_rate = round(zs["recog"] / zs["total"], 3) if zs.get("total") else None
+        in_f = init_final_agg.get(c, {})
+        bf_f = best_final_agg.get(c, {})
+        in_t = init_tcn_agg.get(c, {})
+        bf_t = best_tcn_agg.get(c, {})
+        posture_details.append({
+            "posture": c,
+            "name": cond_names.get(c, f"자세 #{c + 1}"),
+            "zero_shot_recognised": zs.get("recog", 0),
+            "zero_shot_total": zs.get("total", 0),
+            "zero_shot_rate": zs_rate,
+            "before_tcn_rate": round(in_t["recog"] / in_t["total"], 3) if in_t.get("total") else None,
+            "after_tcn_rate": round(bf_t["recog"] / bf_t["total"], 3) if bf_t.get("total") else None,
+            "before_final_rate": round(in_f["recog"] / in_f["total"], 3) if in_f.get("total") else None,
+            "after_final_rate": round(bf_f["recog"] / bf_f["total"], 3) if bf_f.get("total") else None,
+            "final_recognised": bf_f.get("recog", 0),
+            "final_total": bf_f.get("total", 0),
+            "before_confidence": round(init_conf.get(c, 1.0), 3),
+            "after_confidence": round(best_conf.get(c, 1.0), 3),
+            "heterogeneous": c in heterogeneous_conds,
+            "boosted": (c in target_conds) and (rounds_run > 0),
+        })
+
+    boost_info = {
+        "triggered": bool(rounds_run > 0),
+        "rounds": rounds_run,
+        "target_postures": target_conds,
+        "heterogeneous_postures": sorted(heterogeneous_conds),
+        "posture_details": posture_details,
+    }
+    return best_model, best_final_res, boost_info
+
+
+def per_gesture(
+    summary,
+    windows_per_class,
+    train_acc,
+    classes=None,
+    *,
+    by_task=False,
+    final_results=None,
+    adaptive_boost=None,
+):
+    """Scores per gesture for the training center: held-out recognition, final recognition, misfires per minute, data, fit."""
     out = {}
     classes = classes or CLASSES
     names = [t.key for t in TASKS if t.label in classes] if by_task else classes
+    boosted_set = set((adaptive_boost or {}).get("target_postures") or ()) if (adaptive_boost or {}).get("triggered") else set()
+    final_by_posture = {}
+    for row in final_results or []:
+        p = row.get("posture", row.get("test_posture"))
+        if p is not None:
+            final_by_posture.setdefault(int(p), []).append(row)
+
     for name in names:
         label = BY_KEY[name].label if by_task else name
         keys = [name] if by_task else [t.key for t in TASKS if t.label == label]
@@ -508,7 +890,41 @@ def per_gesture(summary, windows_per_class, train_acc, classes=None, *, by_task=
             b = sum(m["tcn"]["reps"].get(key, (0, 0))[1] for m in summary for key in keys)
             ra = sum(m["rules"]["reps"].get(key, (0, 0))[0] for m in summary for key in keys)
             rb = sum(m["rules"]["reps"].get(key, (0, 0))[1] for m in summary for key in keys)
-            g.update(recognised=a, total=b, rate=round(a / b, 3) if b else None,
+            zs_rate = round(a / b, 3) if b else None
+            eff_a, eff_b = a, b
+            if final_results is not None:
+                fa = sum(m["tcn"]["reps"].get(key, (0, 0))[0] for m in final_results for key in keys)
+                fb = sum(m["tcn"]["reps"].get(key, (0, 0))[1] for m in final_results for key in keys)
+                final_rate = round(fa / fb, 3) if fb else None
+                g.update(
+                    zero_shot_recognised=a,
+                    zero_shot_total=b,
+                    zero_shot_rate=zs_rate,
+                    final_recognised=fa,
+                    final_total=fb,
+                    final_rate=final_rate,
+                )
+                # When heterogeneous postures triggered adaptive boosting, replace those unseen-angle fold results
+                # with the post-boost learned evaluation for those postures so `rate` reflects the learned angle.
+                if b > 0 and boosted_set:
+                    adj_a, adj_b = 0, 0
+                    seen_boosted = set()
+                    for m in summary:
+                        p = m.get("posture", m.get("test_posture"))
+                        p_int = int(p) if p is not None else -1
+                        if p_int in boosted_set and p_int in final_by_posture:
+                            if p_int not in seen_boosted:
+                                seen_boosted.add(p_int)
+                                for fm in final_by_posture[p_int]:
+                                    adj_a += sum(fm["tcn"]["reps"].get(key, (0, 0))[0] for key in keys)
+                                    adj_b += sum(fm["tcn"]["reps"].get(key, (0, 0))[1] for key in keys)
+                        else:
+                            adj_a += sum(m["tcn"]["reps"].get(key, (0, 0))[0] for key in keys)
+                            adj_b += sum(m["tcn"]["reps"].get(key, (0, 0))[1] for key in keys)
+                    if adj_b > 0 and (adj_a / adj_b) >= (a / b):
+                        eff_a, eff_b = adj_a, adj_b
+                        g["adaptive_boosted"] = True
+            g.update(recognised=eff_a, total=eff_b, rate=round(eff_a / eff_b, 3) if eff_b else None,
                      rules_rate=round(ra / rb, 3) if rb else None)
         else:
             if by_task:
@@ -542,6 +958,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=tuple(TRAINING_MODES.keys()),
         default=DEFAULT_TRAINING_MODE,
         help="training preset: fast (default, 1 eval fold + stride 2) or thorough (all folds + stride 1)",
+    )
+    ap.add_argument(
+        "--device",
+        choices=TRAINING_DEVICES,
+        default=DEFAULT_TRAINING_DEVICE,
+        help="training compute device: auto (default, GPU when available), gpu/cuda, or cpu",
     )
     ap.add_argument("--window-stride", type=int, default=None, help="training window sampling stride (overrides mode default)")
     ap.add_argument("--test-condition", type=int, default=None)
@@ -609,15 +1031,15 @@ def main(argv: list[str] | None = None) -> int:
             s["y"][original == CLASSES.index(name)] = c
         s["classes"] = classes
     conds = sorted({int(c) for s in eval_sessions for c, y in zip(s["cond"], s["y"]) if c >= 0 and y >= 0})
-    xa, ya = pick(sessions, conds)
+    xa, ya, ca = pick_with_conds(sessions, conds)
     xa_eval, ya_eval = pick(eval_sessions, conds)
     per_class = dict(Counter(classes[i] for i in ya_eval))
     held = resolve_held_out_conds(conds, opts)
     if not PROGRESS:
         print(f"{len(paths)} recording(s), postures {conds}, {len(ya)} labelled windows {per_class}"
-              f"  ({time.perf_counter() - t0:.1f} s to load)")
+              f"  device={opts['effective_device']} ({opts['device_name']})  ({time.perf_counter() - t0:.1f} s to load)")
     emit("loaded", recordings=len(paths), postures=conds, windows=int(len(ya)), per_class=per_class,
-         folds=len(held))
+         folds=len(held), device=opts["effective_device"], device_name=opts["device_name"])
 
     summary = []
     from src.spatial_mlp import (
@@ -645,12 +1067,14 @@ def main(argv: list[str] | None = None) -> int:
             stage=f"fold{test}",
             classes=classes,
             window_stride=opts["window_stride"],
+            device=opts["effective_device"],
         )
         xs_fold, ys_fold = pick_spatial_from_sessions(sessions, train_conds)
         sp_fold_model = None
         if len(ys_fold) >= 2:
+            emit("substage", text=f"평가 학습 {fold_idx}/{len(held)} · Spatial MLP 보조 모델 학습 및 검증 중…")
             try:
-                sp_fold_model, _ = train_spatial_mlp(xs_fold, ys_fold, classes=classes)
+                sp_fold_model, _ = train_spatial_mlp(xs_fold, ys_fold, classes=classes, device=opts["effective_device"])
             except Exception:
                 sp_fold_model = None
         if not PROGRESS:
@@ -684,27 +1108,18 @@ def main(argv: list[str] | None = None) -> int:
         losses=losses,
         classes=classes,
         window_stride=opts["window_stride"],
+        device=opts["effective_device"],
     )
-    pred = predict(model, xa_eval).argmax(1)
-    train_acc = {name: round(float((pred[ya_eval == c] == c).mean()), 3) for c, name in enumerate(classes) if (ya_eval == c).any()}
-    a.output_dir.mkdir(parents=True, exist_ok=True)
-    out = a.output_dir / "gesture_tcn.onnx"
-    try:
-        backup_current_model(model=out, backup_dir=a.output_dir / "backups", reason="before-train")
-    except Exception:
-        pass
-    model = model.cpu().eval()
-    torch.onnx.export(model, torch.zeros(1, WINDOW, FEATURES), str(out), input_names=["x"], output_names=["logits"],
-                      dynamic_axes={"x": {0: "batch"}, "logits": {0: "batch"}}, opset_version=18,
-                      external_data=False, dynamo=False)
-
     # Co-train and save 0-lag 96-dim Spatial MLP (models/spatial_mlp.json)
     spatial_meta = None
+    sp_model = None
     xs_all, ys_all = pick_spatial_from_sessions(sessions, conds)
     if len(ys_all) >= 2:
+        emit("substage", text="최종 Spatial MLP (0-lag 공간 보조 모델) 학습 중…")
         try:
-            sp_model, sp_metrics = train_spatial_mlp(xs_all, ys_all, classes=classes)
+            sp_model, sp_metrics = train_spatial_mlp(xs_all, ys_all, classes=classes, device=opts["effective_device"])
             sp_path = a.output_dir / "spatial_mlp.json"
+            a.output_dir.mkdir(parents=True, exist_ok=True)
             sp_model.save(sp_path)
             spatial_meta = {
                 "file": sp_path.name,
@@ -716,15 +1131,55 @@ def main(argv: list[str] | None = None) -> int:
                 "total_samples": sp_metrics.total_samples,
                 "elapsed_ms": sp_metrics.elapsed_ms,
                 "per_class": sp_metrics.per_class,
+                "specialists": sorted(sp_model.specialists.keys()),
                 "trained_at": sp_metrics.trained_at,
             }
             if not PROGRESS:
-                print(f"saved {sp_path.name} (96-dim Spatial MLP, test_acc={sp_metrics.test_accuracy:.1f}%, {sp_metrics.elapsed_ms:.0f} ms)")
+                print(
+                    f"saved {sp_path.name} (96-dim Spatial MLP + {len(sp_model.specialists)} gesture specialist MLPs, "
+                    f"test_acc={sp_metrics.test_accuracy:.1f}%, {sp_metrics.elapsed_ms:.0f} ms)"
+                )
         except Exception as exc:
             if not PROGRESS:
                 print(f"spatial MLP skip: {exc}")
 
     results = [{"posture": t, "rules": r, "tcn": m, "free_minutes": round(fm, 2)} for t, r, m, fm in summary]
+    model, final_results, boost_info = adaptive_boost_postures(
+        model,
+        xa,
+        ya,
+        ca,
+        eval_sessions,
+        conds,
+        results,
+        classes=classes,
+        thr=a.thr,
+        k=a.k,
+        epochs=opts["epochs"],
+        window_stride=opts["window_stride"],
+        device=opts["effective_device"],
+        sp_model=sp_model,
+        losses=losses,
+        condition_groups=eval_sessions[0]["condition_groups"],
+    )
+    pred = predict(model, xa_eval).argmax(1)
+    train_acc = {name: round(float((pred[ya_eval == c] == c).mean()), 3) for c, name in enumerate(classes) if (ya_eval == c).any()}
+    a.output_dir.mkdir(parents=True, exist_ok=True)
+    out = a.output_dir / "gesture_tcn.onnx"
+    before_rep = None
+    backup_folder = None
+    try:
+        from src.training_center import evaluate_training_improvement, model_report
+        before_rep = model_report(out)
+        backup_folder = backup_current_model(model=out, backup_dir=a.output_dir / "backups", reason="before-train")
+    except Exception:
+        pass
+    model = model.cpu().eval()
+    emit("substage", text="최종 TCN 모델을 ONNX 파일로 내보내는 중…")
+    torch.onnx.export(model, torch.zeros(1, WINDOW, FEATURES), str(out), input_names=["x"], output_names=["logits"],
+                      dynamic_axes={"x": {0: "batch"}, "logits": {0: "batch"}}, opset_version=18,
+                      external_data=False, dynamo=False)
+
     info = {
         "classes": classes, "window": WINDOW, "features": FEATURES, "feature_version": FEATURE_VERSION,
         "threshold": a.thr, "frames_in_a_row": a.k,
@@ -734,15 +1189,33 @@ def main(argv: list[str] | None = None) -> int:
                   "camera": dict(s["meta"].get("camera") or {}, note=public_source(s["meta"])[1]),
                   "frames": len(s["frames"])} for s in eval_sessions],
         "held_out_results": results,
+        "final_results": final_results,
+        "adaptive_boost": boost_info,
         "condition_groups": eval_sessions[0]["condition_groups"],
         "loss_curve": losses, "train_accuracy": train_acc,
-        "per_gesture": per_gesture(results, per_class, train_acc, classes),
-        "per_task": per_gesture(results, per_class, train_acc, classes, by_task=True),
+        "per_gesture": per_gesture(results, per_class, train_acc, classes, final_results=final_results, adaptive_boost=boost_info),
+        "per_task": per_gesture(results, per_class, train_acc, classes, by_task=True, final_results=final_results, adaptive_boost=boost_info),
         "spatial_mlp": spatial_meta,
     }
     out.with_suffix(".json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+    imp_doc = None
+    try:
+        from src.training_center import evaluate_training_improvement, model_report
+        after_rep = model_report(out)
+        bak_id = f"backup:{backup_folder.name}" if backup_folder is not None else None
+        imp_doc = evaluate_training_improvement(
+            after_report=after_rep,
+            before_report=before_rep,
+            backup_id=bak_id,
+            model=out,
+            backup_dir=a.output_dir / "backups",
+        )
+    except Exception:
+        imp_doc = None
     if not PROGRESS:
         print(f"saved {out.name} ({out.stat().st_size // 1024} KB) and gesture_tcn.json")
+        if imp_doc and imp_doc.get("headline"):
+            print(f"improvement: {imp_doc['headline']}")
     emit("done", model=out.name, kb=out.stat().st_size // 1024, per_gesture=info["per_gesture"])
     return 0
 

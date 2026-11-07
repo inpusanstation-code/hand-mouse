@@ -17,22 +17,48 @@ OPTIONS = {
     "camera": ["눈높이", "위에서 아래로", "아래에서 위로", "왼쪽 측면", "오른쪽 측면", "직접 지정"],
     "lighting": ["보통", "밝음", "어두움", "역광", "직접 지정"],
 }
-TIMINGS = {"reps": (1, 100, 10), "prep": (0.5, 10, 1.5), "hold": (0.5, 10, 2.0),
-           "rest": (0.5, 10, 1.5), "free_seconds": (10, 900, 60)}
+ORIENTATION_GUIDES = {
+    "손바닥 정면": "손바닥이 카메라를 정면으로 마주보게 편하게 든 기본 자세",
+    "손등 정면": "손등이 카메라 쪽을 보이도록 손을 뒤집은 자세",
+    "왼쪽으로 기울임": "손목을 살짝 돌려 손끝·손바닥이 왼쪽(10~11시 방향, 약 20~30°)으로 기울어진 자세",
+    "오른쪽으로 기울임": "손목을 살짝 돌려 손끝·손바닥이 오른쪽(1~2시 방향, 약 20~30°)으로 기울어진 자세",
+    "손끝 위": "손가락 끝이 천장(12시 방향)을 향하도록 똑바로 세운 자세",
+    "손끝 아래": "손목에 힘을 빼고 손가락 끝이 아래(6시 방향)로 살짝 처진 자세",
+    "옆면": "엄지나 새끼손가락 옆날이 카메라를 향하도록 세운 옆모습 자세",
+}
+POSTURE_GUIDES = {
+    "바로 앉기": "의자에 편하게 정면으로 앉은 자세",
+    "뒤로 기대기": "등받이에 편하게 기댄 자세",
+    "몸을 왼쪽으로": "몸이나 팔을 살짝 왼쪽으로 기대거나 옮긴 자세",
+    "몸을 오른쪽으로": "몸이나 팔을 살짝 오른쪽으로 기대거나 옮긴 자세",
+    "서 있기": "일어서서 손을 든 자세",
+    "직접 지정": "사용자 지정 자세",
+}
+TIMINGS = {"reps": (1, 100, 1), "prep": (0.0, 10, 0.0), "hold": (0.5, 60, 15.0),
+           "rest": (0.0, 10, 0.0), "free_seconds": (10, 900, 60)}
+
+
+def orientation_guide(orientation: str) -> str:
+    return ORIENTATION_GUIDES.get(str(orientation or ""), "")
+
+
+def posture_guide(posture: str) -> str:
+    return POSTURE_GUIDES.get(str(posture or ""), "")
 
 
 def condition(**values):
     base = {"name": "새 자세", "enabled": True, "notes": "",
             **{k: v[0] for k, v in OPTIONS.items()}, **{k: v[2] for k, v in TIMINGS.items()}}
+    base["position"] = "자유 이동"
     base["distance"] = OPTIONS["distance"][1]
     base.update(values)
     return base
 
 
 def preset(name="basic"):
-    rows = [condition(name="정면 · 중앙"),
-            condition(name="왼쪽 방향 · 왼쪽", orientation="왼쪽으로 기울임", position="왼쪽", posture="몸을 왼쪽으로"),
-            condition(name="오른쪽 방향 · 오른쪽", orientation="오른쪽으로 기울임", position="오른쪽", posture="몸을 오른쪽으로")]
+    rows = [condition(name="전체 화면 · 손바닥 정면 (기본)", position="자유 이동"),
+            condition(name="전체 화면 · 손목 왼쪽 살짝 회전 (10시 방향)", orientation="왼쪽으로 기울임", position="자유 이동", posture="몸을 왼쪽으로"),
+            condition(name="전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향)", orientation="오른쪽으로 기울임", position="자유 이동", posture="몸을 오른쪽으로")]
     if name == "diverse":
         rows += [condition(name="손등 · 위", orientation="손등 정면", position="위"),
                  condition(name="손끝 아래 · 아래", orientation="손끝 아래", position="아래"),
@@ -92,7 +118,47 @@ def label_condition_key(label):
 
 
 def description(row):
-    return " · ".join(row[k] for k in OPTIONS) + (f" · {row['notes']}" if row.get("notes") else "")
+    base = " · ".join(row[k] for k in OPTIONS) + (f" · {row['notes']}" if row.get("notes") else "")
+    guide = orientation_guide(row.get("orientation", ""))
+    return f"{base} ({guide})" if guide else base
+
+
+def resolve_condition_group_name(key_or_obj, idx: int = 0, path=PLAN_PATH) -> str:
+    """Resolve a condition_groups entry (dict or 'pose-...' key) into a readable Korean label."""
+    if isinstance(key_or_obj, dict):
+        raw = str(key_or_obj.get("name") or key_or_obj.get("description") or f"자세 #{idx + 1}")
+        return raw.split(" (손")[0].strip()
+    key_str = str(key_or_obj or "").strip()
+    if not key_str or not key_str.startswith("pose-"):
+        return key_str or f"자세 #{idx + 1}"
+
+    candidates = []
+    for p_name in ("basic", "diverse", "positions"):
+        candidates.extend(preset(p_name).get("conditions", []))
+    # Include legacy basic preset positions (중앙/왼쪽/오른쪽) so older recordings resolve cleanly
+    candidates.extend([
+        condition(name="손바닥 정면 · 중앙", position="중앙"),
+        condition(name="손목 왼쪽 회전 (10시) · 좌측", orientation="왼쪽으로 기울임", position="왼쪽", posture="몸을 왼쪽으로"),
+        condition(name="손목 오른쪽 회전 (2시) · 우측", orientation="오른쪽으로 기울임", position="오른쪽", posture="몸을 오른쪽으로"),
+    ])
+    try:
+        if Path(path).is_file():
+            doc = json.loads(Path(path).read_text(encoding="utf-8"))
+            for pl in (doc.get("plans") or {}).values():
+                if isinstance(pl, dict):
+                    candidates.extend(pl.get("conditions") or [])
+    except Exception:
+        pass
+    for row in candidates:
+        try:
+            if not isinstance(row, dict):
+                continue
+            norm_row = condition(**{k: row[k] for k in row if k in OPTIONS or k in ("name", "notes")})
+            if condition_key(norm_row) == key_str:
+                return str(norm_row.get("name") or f"자세 #{idx + 1}").split(" (손")[0].strip()
+        except Exception:
+            continue
+    return f"자세 #{idx + 1}"
 
 
 def duration(plan, focus):
@@ -106,10 +172,16 @@ def duration(plan, focus):
 
 
 def load_plan(focus, path=PLAN_PATH):
+    from src.gesture_catalog import BY_KEY
+    task = BY_KEY.get(focus or "")
+    default_plan = preset()
+    if task and task.direction:
+        for r in default_plan["conditions"]:
+            r.update({"reps": 10, "prep": 0.5, "hold": 1.5, "rest": 1.0})
     if not Path(path).exists():
-        return preset()
+        return default_plan
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    return normalise(doc.get("plans", {}).get(focus or "all", preset()))
+    return normalise(doc.get("plans", {}).get(focus or "all", default_plan))
 
 
 def save_plan(plan, focus, path=PLAN_PATH):

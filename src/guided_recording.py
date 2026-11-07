@@ -15,14 +15,14 @@ the current frame, `view(now)` what the screen shows.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
-from src.recording_plan import normalise, condition_key, description
+from src.recording_plan import normalise, condition_key, description, orientation_guide
 from src.gesture_catalog import Task, TASKS, tasks_for
 
 DEFAULTS: Dict[str, float] = {
-    "rec_reps": 15.0,          # repetitions per set
-    "rec_prep": 1.0,           # s "get ready"
-    "rec_do": 1.6,             # s "do it"
-    "rec_rest": 1.6,           # s "rest"
+    "rec_reps": 1.0,           # continuous hold by default (or >1 when repeating)
+    "rec_prep": 0.0,           # s "get ready" (0 = no prep interruption)
+    "rec_do": 15.0,            # s "do it" (continuous gesture hold)
+    "rec_rest": 0.0,           # s "rest" (0 = no rest interruption)
     "rec_free_seconds": 180.0,  # s of a free (unlabelled-gesture) stretch per posture
 }
 
@@ -86,7 +86,7 @@ class GuidedSession:
             self._t0 += max(0.0, now - (self._last_update if self._last_update is not None else now))
         self._last_update = now
         self._held = held
-        self.hold_reason = "일시정지 · 계속을 눌러주세요" if self.paused else "손의 3D 관절을 찾는 중 · 타이머가 멈췄어요" if not available else ""
+        self.hold_reason = "일시정지 · 스페이스바 또는 [계속]을 눌러주세요" if self.paused else "손의 3D 관절을 찾는 중 · 타이머가 멈췄어요" if not available else ""
         if held:
             return False
         if now - self._t0 >= self._set_length(cur[1]):
@@ -136,10 +136,16 @@ class GuidedSession:
         extra = {"condition_detail": details, "paused": self.paused,
                  "position": self.rows[cond]["position"] if self.rows else "자유 이동"}
         if not self.running:
-            return {"prompt": f"{self.conditions[cond]} 준비 후 [시작]을 누르세요", "sub": head,
+            orient = self.rows[cond].get("orientation", "") if self.rows else ""
+            guide = orientation_guide(orient)
+            guide_txt = f" [{guide}]" if guide else ""
+            return {"prompt": f"{self.conditions[cond]}{guide_txt} · 자세를 잡은 뒤 스페이스바(또는 [시작])를 누르세요", "sub": head,
                     "progress": 0.0, "overall": overall, "waiting": True, **extra}
         phase, rep, progress = self._step(now)
         if phase == "free":
+            prompt = task.do
+            sub = f"{head} · 남은 시간 {max(0, int(self._set_length(task) - (now - self._t0)))}초"
+        elif self.cfg("rec_prep") == 0 and self.cfg("rec_rest") == 0 and int(self.cfg("rec_reps")) == 1:
             prompt = task.do
             sub = f"{head} · 남은 시간 {max(0, int(self._set_length(task) - (now - self._t0)))}초"
         else:

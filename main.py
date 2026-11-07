@@ -38,7 +38,7 @@ from src.mouse_controller import MouseController
 from src.scroll_target import ScrollTargetFinder
 from src.window_probe import window_center_at
 from src.settings_panel import SettingsPanel
-from src.hotkeys import VK_0, VK_F2, VK_NUMPAD0, VK_O, KeyPoller
+from src.hotkeys import VK_0, VK_F2, VK_O, KeyPoller
 from src.win_perf import keep_responsive_in_background
 from src.perf_log import PerfLog
 from src.pipeline import InferencePipeline, Snapshot
@@ -374,7 +374,7 @@ def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
             want_settings = key in (ord("o"), ord("O"), ord("0"))
             if keys.available:
                 want_settings = want_settings or keys.pressed([VK_F2]) or keys.pressed(
-                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True)
+                    [VK_O, VK_0], require_focus=True)
             if want_settings and dashboard.stage_name == "main":
                 runtime.post("pause")
                 settings.toggle()
@@ -529,7 +529,7 @@ def run_dashboard(args, perf, engine, camera, tracker, mouse, settings, keys, pe
             toggle_settings = key in (ord("o"), ord("O"), ord("0"))
             if keys.available:
                 toggle_settings = toggle_settings or keys.pressed([VK_F2]) or keys.pressed(
-                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True
+                    [VK_O, VK_0], require_focus=True
                 )
             elif key in (ord("o"), ord("O"), ord("0")):
                 toggle_settings = True
@@ -866,7 +866,7 @@ def main() -> int:
             want_settings = False
             if keys.available:
                 want_settings = keys.pressed([VK_F2]) or keys.pressed(
-                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True
+                    [VK_O, VK_0], require_focus=True
                 )
             elif key in (ord("o"), ord("O"), ord("0")):
                 want_settings = True

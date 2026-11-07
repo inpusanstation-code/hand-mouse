@@ -83,8 +83,14 @@ def test_train_save_load_spatial_mlp_and_predict(tmp_path):
     assert model.feat_dim == SPATIAL_FEATURES
     assert model.feature_version == SPATIAL_FEATURE_VERSION
 
+    model_gpu, metrics_gpu = train_spatial_mlp(x_arr, y_arr, classes=classes, epochs=35, seed=7, device="gpu")
+    assert metrics_gpu.train_accuracy >= 95.0
+    assert metrics_gpu.test_accuracy >= 90.0
+
     out_file = model.save(tmp_path / "spatial_mlp.json")
     reloaded = SpatialMlpModel.load(out_file)
+    assert set(reloaded.specialists.keys()) == {"thumb_index", "thumb_ring"}
+    assert reloaded.specialists["thumb_ring"].classes == ("none", "thumb_ring")
     pred = reloaded.predict(extract_spatial_features(pts_ring))
     assert pred["action"] == "thumb_ring"
     assert pred["confidence"] > 0.7

@@ -116,7 +116,7 @@ class Dashboard:
         self.control.configure(text="일시정지" if not paused else "제어 시작")
         self.detected.configure(text="● 손 감지됨" if detected else "○ 손 대기", fg="#08775e" if detected else MUTED)
         state = "입력 꺼짐" if paused else "연습 모드" if self.dry_run else "입력 활성"
-        label = ACTIONS.get(action, "손짓 대기") if detected and not paused else ""
+        label = ACTIONS.get(action, "포인터 이동") if detected and not paused else ""
         self.action.configure(text=f"{state}  ·  {label}" if label else state)
         if self.details:
             self.detail.configure(text=f"{fps:.1f} fps   ·   추론 {detect_ms:.1f} ms" + (f"   ·   {status}" if status else ""))

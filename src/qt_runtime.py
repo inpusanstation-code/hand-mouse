@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import cv2
 
 from src.failure_log import FailureRecorder
+from src.finger_kinematics import CausalFingerTracker
 from src.close_sign import CloseSign
 from src.toggle_sign import ToggleSign
 from src.motion_mode import ACTION_LABELS, MotionMode
@@ -37,7 +38,7 @@ from src.gesture_gate import DEFAULT_MODEL as GATE_MODEL, GestureGate, load_pred
 from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
 from src.hand_selection import selected_detection
-from src.hand_tracker import HandTracker, pinch_guides
+from src.hand_tracker import HandLandmark, HandTracker, pinch_guides
 from src.pointer_engine import PointerEngine, PointerSettings
 from src.pointer_workspace import FINGERTIPS
 from src.tracking_test import TrackingTest, result_line
@@ -160,6 +161,8 @@ class QtRuntime:
         self.motion = MotionMode(engine.config)
         self.close_sign = CloseSign(engine.config)
         self.toggle_sign = ToggleSign(engine.config)
+        self.finger_tracker = CausalFingerTracker()
+        self._guided_rep_token = None
         self._close_notice, self._close_notice_until = "", 0.0
         self._motion_seen = 0
         self._motion_last = ""
@@ -482,6 +485,27 @@ class QtRuntime:
                 cv2.circle(frame, (px, py), 10, (49, 35, 17), -1, cv2.LINE_AA)
                 cv2.putText(frame, str(number), (px - 5, py + 5), cv2.FONT_HERSHEY_SIMPLEX, .46, color, 1, cv2.LINE_AA)
         elif detections and not index_mode and not motion_active and not close_hold and not toggle_hold and not palm_calibrating:
+            if self._guided is not None:
+                glab = self._guided.label(t0)
+                gtok = (glab.get("task"), glab.get("set"), glab.get("rep"), glab.get("phase") == "do")
+                if gtok != self._guided_rep_token:
+                    self._guided_rep_token = gtok
+                    engine._desktop_armed = True
+                    engine._desktop_since = None
+                    engine._last_trigger_times.clear()
+                    engine._last_curled_at = -1e9
+                    engine._last_halffist_at = -1e9
+                    engine._index_released_at = -1e9
+                    engine._scroll_released_at = -1e9
+                    engine._pinky_fired_at = -1e9
+                    engine._desktop_fired_at = -1e9
+                    engine._side_released_at = -1e9
+                    engine._side_armed = {"index": True, "ring": True, "pinky": True}
+                    engine._click_fresh = {"middle": True, "ring": True, "pinky": True}
+                    engine._secondary_since.clear()
+                    engine._secondary_off.clear()
+                    engine._index_pinched = False
+                    engine._middle_hold_pinched = False
             hand = detections[0]
             result = engine.process(hand.landmarks)
             rule_action = result.action
@@ -521,7 +545,24 @@ class QtRuntime:
 
         now = time.perf_counter()
         status = self._status if now <= self._status_until else ""
-        action = self._recent_action if now < self._recent_until else result.action
+        if now < self._recent_until:
+            action = self._recent_action
+        elif result.action and result.action != "none":
+            action = result.action
+        elif self.mouse.switcher_open:
+            action = "task_switcher"
+        elif result.active_gesture in (
+            "thumb_pinky_pinch",
+            "thumb_ring_pinch",
+            "thumb_middle_pinch",
+            "thumb_index_pinch",
+            "thumb_index_middle_pinch",
+        ):
+            action = str(engine._gesture_cfg(result.active_gesture).get("action", "move_cursor"))
+        elif detections and not index_mode:
+            action = "move_cursor"
+        else:
+            action = result.action
         self.frames += 1
         snap = Snapshot(
             seq=self.frames, frame=frame, detected=bool(detections), paused=self.paused, action=action,
@@ -866,7 +907,12 @@ class QtRuntime:
             return
         hand = detections[0] if detections else None
         pose = self._pose_raw[1] if self._pose_raw is not None and t0 - self._pose_raw[0] < 0.25 else None
-        label = self._guided.label(t0) if self._guided is not None else {"target": "none", "phase": "use"}
+        if self._guided is not None:
+            label = self._guided.label(t0)
+        elif getattr(self.ui, "rec_paused", False):
+            label = {"target": "idle", "phase": "paused"}
+        else:
+            label = {"target": "none", "phase": "use"}
         rule = None
         if result is not None:
             dd = result.distances or {}
@@ -901,7 +947,19 @@ class QtRuntime:
         if self._guided is not None:
             v = dict(self._guided.view(t0))
         else:
-            v = {"prompt": "평소처럼 쓰세요 · 이상하면 F", "sub": "", "progress": 0.0, "overall": 0.0, "waiting": False}
+            free_paused = bool(getattr(self.ui, "rec_paused", False))
+            v = {
+                "prompt": (
+                    "일시정지 · 팔을 올리고 자세를 잡은 뒤 스페이스바(또는 [계속])를 눌러 녹화를 시작하세요"
+                    if free_paused
+                    else "평소처럼 쓰세요 (스페이스바: 일시정지 · 이상하면 F)"
+                ),
+                "sub": "",
+                "progress": 0.0,
+                "overall": 0.0,
+                "waiting": False,
+                "paused": free_paused,
+            }
         v.update(mode=self._rec_mode, frames=self._rec.frames, file=self._rec.path.name, marks=self._rec.marks)
         v["sub"] = (v.get("sub") or "") + f"  ·  {self._rec.frames}프레임 녹화 중"
         return v

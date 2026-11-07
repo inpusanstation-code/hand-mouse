@@ -196,4 +196,10 @@ def test_selected_training_respects_fast_mode_and_records_card_metadata(tmp_path
     assert card["window_stride"] == 2
     assert card["offline_augment_factor"] == 0
     assert card["epochs"] == 1
+    assert isinstance(card.get("spatial_mlp"), dict)
+    assert card["spatial_mlp"]["classes"] == ["none", "thumb_index"]
+    from src.spatial_mlp import compose_spatial_mlp
+    composed_sp = compose_spatial_mlp(out_dir / "gesture_tcn.onnx")
+    assert composed_sp is not None
+    assert "thumb_index" in composed_sp.specialists
 

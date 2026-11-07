@@ -96,6 +96,234 @@ def _normalize_aug_settings(raw: Any) -> Dict[str, Any]:
     }
 
 
+_GPU_CAPABILITY_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _probe_nvidia_hardware() -> Tuple[str, float, int, str]:
+    """Return (first_gpu_name, vram_gb, device_count, driver_version) reported by nvidia-smi if present."""
+    if not isinstance(getattr(subprocess, "Popen", None), type):
+        return "", 0.0, 0, ""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return "", 0.0, 0, ""
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        res = subprocess.run(
+            [exe, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.5,
+            creationflags=flags,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout:
+            lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+            if lines:
+                parts = [p.strip() for p in lines[0].split(",")]
+                name = parts[0]
+                vram_gb = 0.0
+                if len(parts) > 1:
+                    try:
+                        vram_gb = round(float(parts[1]) / 1024.0, 1)
+                    except ValueError:
+                        vram_gb = 0.0
+                driver_ver = parts[2] if len(parts) > 2 else ""
+                return name, vram_gb, len(lines), driver_ver
+    except Exception:
+        pass
+    return "", 0.0, 0, ""
+
+
+def _recommended_pytorch_cuda_index(driver_version: str = "") -> str:
+    """Pick the best PyTorch CUDA wheel index URL for the host PC's NVIDIA driver version."""
+    try:
+        major = int(float(str(driver_version).strip().split(".")[0]))
+        if major >= 580:
+            return "https://download.pytorch.org/whl/cu132"
+        if major >= 560:
+            return "https://download.pytorch.org/whl/cu128"
+        if major >= 525:
+            return "https://download.pytorch.org/whl/cu124"
+        if major > 0:
+            return "https://download.pytorch.org/whl/cu118"
+    except (ValueError, IndexError):
+        pass
+    return "https://download.pytorch.org/whl/cu132"
+
+
+def _probe_torch_version_lightweight() -> Tuple[str, str]:
+    """Read torch.__version__ and torch.version.cuda from torch/version.py without importing torch (~1 ms)."""
+    torch_mod = sys.modules.get("torch")
+    if torch_mod is not None:
+        ver = str(getattr(torch_mod, "__version__", "") or "")
+        cuda_ver = str(getattr(getattr(torch_mod, "version", None), "cuda", "") or "")
+        return ver, cuda_ver
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("torch")
+        if spec and spec.origin:
+            ver_file = Path(spec.origin).with_name("version.py")
+            if ver_file.is_file():
+                ns: Dict[str, Any] = {}
+                exec(ver_file.read_text(encoding="utf-8", errors="replace"), ns)  # noqa: S102
+                ver = str(ns.get("__version__") or "")
+                cuda_ver = str(ns.get("cuda") or "")
+                return ver, cuda_ver
+    except Exception:
+        pass
+    return "", ""
+
+
+def detect_gpu_training_capability(*, force_refresh: bool = False) -> Dict[str, Any]:
+    """Detect whether CUDA GPU training is available on this PC without importing heavy torch DLLs in the UI."""
+    global _GPU_CAPABILITY_CACHE
+    if _GPU_CAPABILITY_CACHE is not None and not force_refresh:
+        return dict(_GPU_CAPABILITY_CACHE)
+
+    nvidia_hw_name, hw_vram_gb, hw_count, driver_ver = _probe_nvidia_hardware()
+    nvidia_hw_present = bool(nvidia_hw_name)
+    torch_version, torch_cuda = _probe_torch_version_lightweight()
+
+    cuda_available = False
+    device_count = 0
+    device_name = ""
+    vram_gb = 0.0
+
+    torch_mod = sys.modules.get("torch")
+    if torch_mod is not None and hasattr(torch_mod, "cuda"):
+        try:
+            cuda_available = bool(torch_mod.cuda.is_available())
+            if cuda_available:
+                device_count = int(torch_mod.cuda.device_count())
+                device_name = str(torch_mod.cuda.get_device_name(0) or nvidia_hw_name or "NVIDIA CUDA GPU")
+                try:
+                    props = torch_mod.cuda.get_device_properties(0)
+                    vram_gb = round(float(getattr(props, "total_memory", 0)) / (1024 ** 3), 1)
+                except Exception:
+                    vram_gb = hw_vram_gb
+        except Exception:
+            cuda_available = False
+    elif nvidia_hw_present and bool(torch_cuda):
+        cuda_available = True
+        device_count = max(1, hw_count)
+        device_name = nvidia_hw_name
+        vram_gb = hw_vram_gb
+
+    can_install_cuda = bool(nvidia_hw_present and not cuda_available and bool(torch_version))
+
+    if cuda_available:
+        vram_str = f" · {vram_gb:.1f}GB" if vram_gb > 0 else ""
+        status_label = f"GPU 가속 가능 ({device_name}{vram_str})"
+    elif can_install_cuda:
+        status_label = f"NVIDIA GPU 감지됨 ({nvidia_hw_name}) · 현재 CPU 전용 PyTorch 설치됨"
+    else:
+        status_label = "GPU 미감지 (CPU 학습 전용)"
+
+    info: Dict[str, Any] = {
+        "cuda_available": cuda_available,
+        "device_count": device_count,
+        "device_name": device_name or nvidia_hw_name,
+        "vram_gb": vram_gb,
+        "driver_version": driver_ver,
+        "torch_version": torch_version,
+        "nvidia_hardware_present": nvidia_hw_present,
+        "nvidia_hardware_name": nvidia_hw_name,
+        "can_install_cuda_torch": can_install_cuda,
+        "recommended_cuda_index": _recommended_pytorch_cuda_index(driver_ver),
+        "recommended_device": "gpu" if cuda_available else "cpu",
+        "status_label": status_label,
+    }
+    _GPU_CAPABILITY_CACHE = dict(info)
+    return info
+
+
+def install_cuda_torch(index_url: Optional[str] = None) -> Dict[str, Any]:
+    """Install CUDA-enabled PyTorch into the current Python environment using uv pip (auto-matching driver)."""
+    if not index_url:
+        _, _, _, drv = _probe_nvidia_hardware()
+        index_url = _recommended_pytorch_cuda_index(drv)
+    uv_exe = shutil.which("uv")
+    if not uv_exe:
+        local_uv = Path.home() / ".local" / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+        if local_uv.is_file():
+            uv_exe = str(local_uv)
+    if not uv_exe:
+        raise RuntimeError("uv 실행 파일을 찾을 수 없습니다.")
+
+    cmd = [
+        uv_exe,
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--reinstall-package",
+        "torch",
+        "torch",
+        "--index-url",
+        index_url,
+    ]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    res = subprocess.run(
+        cmd,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=flags,
+        check=False,
+    )
+    if res.returncode != 0:
+        err_tail = (res.stderr or res.stdout or "").strip()[-400:]
+        raise RuntimeError(f"CUDA PyTorch 설치 실패: {err_tail}")
+
+    # Re-probe in a fresh subprocess because torch is already imported in this process
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, torch; "
+            "ok = bool(torch.cuda.is_available()); "
+            "name = torch.cuda.get_device_name(0) if ok else ''; "
+            "vram = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1) if ok else 0.0; "
+            "print(json.dumps({'cuda_available': ok, 'device_name': name, 'vram_gb': vram, 'torch_version': torch.__version__}))",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=flags,
+        check=False,
+    )
+    global _GPU_CAPABILITY_CACHE
+    _GPU_CAPABILITY_CACHE = None
+    cap = detect_gpu_training_capability(force_refresh=True)
+    if probe.returncode == 0 and probe.stdout.strip():
+        try:
+            sub_info = json.loads(probe.stdout.strip().splitlines()[-1])
+            if sub_info.get("cuda_available"):
+                vram_gb = float(sub_info.get("vram_gb") or 0.0)
+                dev_name = str(sub_info.get("device_name") or cap.get("device_name") or "NVIDIA CUDA GPU")
+                vram_str = f" · {vram_gb:.1f}GB" if vram_gb > 0 else ""
+                cap.update({
+                    "cuda_available": True,
+                    "device_count": max(1, int(cap.get("device_count") or 1)),
+                    "device_name": dev_name,
+                    "vram_gb": vram_gb,
+                    "torch_version": str(sub_info.get("torch_version") or cap.get("torch_version") or ""),
+                    "can_install_cuda_torch": False,
+                    "recommended_device": "gpu",
+                    "status_label": f"GPU 가속 가능 ({dev_name}{vram_str})",
+                })
+                _GPU_CAPABILITY_CACHE = dict(cap)
+        except Exception:
+            pass
+    return cap
+
+
 def load_training_selection(rec_dir: Path = REC_DIR) -> Dict[str, Any]:
     path = _selection_path(rec_dir)
     if path.is_file():
@@ -106,10 +334,22 @@ def load_training_selection(rec_dir: Path = REC_DIR) -> Dict[str, Any]:
                 aug = _normalize_aug_settings(data.get("augmentation"))
                 raw_mode = str(data.get("training_mode", "fast"))
                 mode = raw_mode if raw_mode in ("fast", "thorough") else "fast"
-                return {"excluded": sorted(set(excluded)), "augmentation": aug, "training_mode": mode}
+                raw_dev = str(data.get("training_device", "auto")).strip().lower()
+                device = raw_dev if raw_dev in ("auto", "gpu", "cpu") else "auto"
+                return {
+                    "excluded": sorted(set(excluded)),
+                    "augmentation": aug,
+                    "training_mode": mode,
+                    "training_device": device,
+                }
         except Exception:
             pass
-    return {"excluded": [], "augmentation": _normalize_aug_settings({}), "training_mode": "fast"}
+    return {
+        "excluded": [],
+        "augmentation": _normalize_aug_settings({}),
+        "training_mode": "fast",
+        "training_device": "auto",
+    }
 
 
 def save_training_selection(selection: Dict[str, Any], rec_dir: Path = REC_DIR) -> None:
@@ -121,6 +361,8 @@ def save_training_selection(selection: Dict[str, Any], rec_dir: Path = REC_DIR) 
     aug = _normalize_aug_settings(aug_raw)
     raw_mode = str(selection.get("training_mode", current.get("training_mode", "fast")))
     mode = raw_mode if raw_mode in ("fast", "thorough") else "fast"
+    raw_dev = str(selection.get("training_device", current.get("training_device", "auto"))).strip().lower()
+    device = raw_dev if raw_dev in ("auto", "gpu", "cpu") else "auto"
     payload = {
         "excluded": excluded,
         "augmentation": {
@@ -129,6 +371,7 @@ def save_training_selection(selection: Dict[str, Any], rec_dir: Path = REC_DIR) 
             "factor": aug["factor"],
         },
         "training_mode": mode,
+        "training_device": device,
     }
     _selection_path(folder).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -147,6 +390,40 @@ def set_training_mode(mode: str, rec_dir: Path = REC_DIR) -> str:
     sel["training_mode"] = norm
     save_training_selection(sel, rec_dir)
     return norm
+
+
+def get_training_device(rec_dir: Path = REC_DIR) -> str:
+    dev = str(load_training_selection(rec_dir).get("training_device", "auto")).strip().lower()
+    return dev if dev in ("auto", "gpu", "cpu") else "auto"
+
+
+def set_training_device(device: str, rec_dir: Path = REC_DIR) -> str:
+    raw = str(device or "auto").strip().lower()
+    if raw == "cuda":
+        raw = "gpu"
+    norm = raw if raw in ("auto", "gpu", "cpu") else "auto"
+    sel = load_training_selection(rec_dir)
+    sel["training_device"] = norm
+    save_training_selection(sel, rec_dir)
+    return norm
+
+
+def resolve_effective_training_device(
+    requested: Optional[str] = None,
+    rec_dir: Path = REC_DIR,
+    *,
+    cuda_available: Optional[bool] = None,
+) -> str:
+    """Resolve user preference ('auto', 'gpu', 'cpu') against actual GPU capability -> 'gpu' or 'cpu'."""
+    choice = str(requested or get_training_device(rec_dir)).strip().lower()
+    if choice == "cuda":
+        choice = "gpu"
+    if choice not in ("auto", "gpu", "cpu"):
+        choice = "auto"
+    has_gpu = bool(detect_gpu_training_capability()["cuda_available"]) if cuda_available is None else bool(cuda_available)
+    if choice in ("auto", "gpu") and has_gpu:
+        return "gpu"
+    return "cpu"
 
 
 def get_augmentation_settings(rec_dir: Path = REC_DIR) -> Dict[str, Any]:
@@ -262,11 +539,23 @@ def get_recording_quality(path: Path, *, compute_if_missing: bool = True) -> Dic
         return {"status": "fail", "score": 0.0, "summary": f"품질 검사 실패: {exc}", "issues": [str(exc)]}
 
 
-def evaluate_all_recordings_quality(rec_dir: Path = REC_DIR, *, force: bool = False, auto_exclude_failed: bool = False) -> List[Dict[str, Any]]:
+def evaluate_all_recordings_quality(
+    rec_dir: Path = REC_DIR,
+    *,
+    force: bool = False,
+    auto_exclude_failed: bool = False,
+    progress_cb=None,
+) -> List[Dict[str, Any]]:
     folder = Path(rec_dir)
     files = sorted(folder.glob("*.jsonl.gz"))
+    total = len(files)
     results = []
-    for p in files:
+    for idx, p in enumerate(files, 1):
+        if callable(progress_cb):
+            try:
+                progress_cb(round((idx - 0.5) / max(1, total), 3), f"[{idx}/{total}개 파일] '{p.name}' 품질 검사 중…")
+            except Exception:
+                pass
         q_cache = p.with_name(p.name + ".quality.json")
         if force and q_cache.is_file():
             try:
@@ -277,6 +566,11 @@ def evaluate_all_recordings_quality(rec_dir: Path = REC_DIR, *, force: bool = Fa
         if auto_exclude_failed and q.get("status") == "fail":
             set_recording_selected(p.name, False, folder)
         results.append({"file": p.name, "selected": is_recording_selected(p.name, folder), **q})
+    if callable(progress_cb):
+        try:
+            progress_cb(1.0, f"전체 {total}개 녹화 파일 품질 전수검사 완료")
+        except Exception:
+            pass
     return results
 
 
@@ -418,6 +712,7 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
     conditions: List[str] = []
     planned_positions: List[str] = []
     zone_counts: Dict[str, int] = defaultdict(int)
+    spatial_acc: Dict[str, Dict[Tuple[int, int], List[float]]] = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0]))
     for row_cfg in (meta.get("capture_plan") or {}).get("conditions") or []:
         if isinstance(row_cfg, dict) and row_cfg.get("enabled", True):
             pos_val = str(row_cfg.get("position") or "").strip()
@@ -428,13 +723,16 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
         if isinstance(f.get("pose"), list) and len(f["pose"]) >= 6:
             pose_frames += 1
         lm_f = f.get("lm")
+        px_val: Optional[float] = None
+        py_val: Optional[float] = None
         if isinstance(lm_f, list) and len(lm_f) == 21:
             try:
-                px = sum(float(lm_f[j][0]) for j in (0, 5, 9, 13, 17)) / 5.0
-                py = sum(float(lm_f[j][1]) for j in (0, 5, 9, 13, 17)) / 5.0
-                zone_counts[_classify_screen_zone(px, py)] += 1
+                px_val = sum(float(lm_f[j][0]) for j in (0, 5, 9, 13, 17)) / 5.0
+                py_val = sum(float(lm_f[j][1]) for j in (0, 5, 9, 13, 17)) / 5.0
+                zone_counts[_classify_screen_zone(px_val, py_val)] += 1
             except Exception:
-                pass
+                px_val = None
+                py_val = None
         lab = f.get("label") or {}
         pos_lbl = lab.get("position")
         if isinstance(pos_lbl, str) and pos_lbl.strip() and pos_lbl.strip() not in planned_positions:
@@ -450,6 +748,23 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
         valid_frames += 1
         ck = label_condition_key(lab)
         task = lab.get("task")
+        if px_val is not None and py_val is not None:
+            c_px = min(0.999, max(0.0, px_val))
+            c_py = min(0.999, max(0.0, py_val))
+            gx = min(15, max(0, int(c_px * 16.0)))
+            gy = min(9, max(0, int(c_py * 10.0)))
+            s_lbl: Optional[str] = None
+            if lab.get("phase") == "do" and task in BY_KEY and not is_free(task):
+                s_lbl = BY_KEY[task].label
+            elif lab.get("phase") == "free" and is_free(task):
+                s_lbl = "none"
+            elif meta.get("mode") == "free" and lab.get("target") == "none":
+                s_lbl = "none"
+            if s_lbl:
+                cell = spatial_acc[s_lbl][(gx, gy)]
+                cell[0] += 1.0
+                cell[1] += c_px
+                cell[2] += c_py
         if lab.get("phase") in ("do", "rest") and task in BY_KEY and not is_free(task):
             key = (lab["task"], ck, lab.get("set"), lab.get("rep"))
             item = repetitions[key]
@@ -463,7 +778,7 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
         elif meta.get("mode") == "free" and lab.get("target") == "none":
             free[("none", "use")] += seconds[i]
     for (task, ck, _, _), item in repetitions.items():
-        if item["do"] > 0 and (not item.get("new") or (item["do"] >= 0.25 and item["rest"])):
+        if item["do"] > 0 and (not item.get("new") or (item["do"] >= 0.25 and (item["rest"] or item["do"] >= 1.0))):
             reps[task][ck] += 1
     for task, by_condition in reps.items():
         coverage[task] = {ck: {"reps": n, "seconds": 0.0} for ck, n in by_condition.items()}
@@ -481,6 +796,14 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
     )
     screen_zones_dict = dict(zone_counts)
     screen_zones_text = _format_screen_zones_summary(screen_zones_dict, planned_positions)
+    spatial_bins_dict: Dict[str, List[List[float]]] = {}
+    for s_lbl, grid_map in spatial_acc.items():
+        bins_list = []
+        for (gx, gy), (cnt, sx, sy) in sorted(grid_map.items()):
+            if cnt > 0:
+                bins_list.append([int(gx), int(gy), int(cnt), round(sx / cnt, 4), round(sy / cnt, 4)])
+        if bins_list:
+            spatial_bins_dict[s_lbl] = bins_list
     data = {
         "summary_version": 5,
         "file": path.name, "size": stat.st_size, "mtime": int(stat.st_mtime), "mode": meta.get("mode"),
@@ -490,6 +813,7 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
         "coverage": coverage, "valid_frames": valid_frames, "pose_frames": pose_frames,
         "screen_zones": screen_zones_dict,
         "screen_zones_text": screen_zones_text,
+        "spatial_bins": spatial_bins_dict,
         "planned_positions": planned_positions,
         "seconds": float(seconds.sum()),
         "marks": sum(1 for e in events if e.get("kind") == "mark"),
@@ -500,6 +824,33 @@ def _summarise_file(path: Path) -> Dict[str, Any]:
     except OSError:
         pass
     return data
+
+
+def _get_file_spatial_bins(path: Path) -> Dict[str, List[List[float]]]:
+    """Return cached 16x10 per-gesture spatial bins for a recording, computing and caching if missing."""
+    if not path.is_file():
+        return {}
+    cache = path.with_name(path.name + ".summary.json")
+    stat = path.stat()
+    if cache.exists():
+        try:
+            doc = json.loads(cache.read_text(encoding="utf-8"))
+            if (
+                doc.get("summary_version") == 5
+                and doc.get("size") == stat.st_size
+                and doc.get("mtime") == int(stat.st_mtime)
+                and isinstance(doc.get("spatial_bins"), dict)
+            ):
+                return doc["spatial_bins"]
+        except Exception:
+            pass
+    try:
+        if cache.exists():
+            cache.unlink(missing_ok=True)
+        doc = _summarise_file(path)
+        return dict(doc.get("spatial_bins") or {})
+    except Exception:
+        return {}
 
 
 def dataset_summary(rec_dir: Path = REC_DIR, *, compute_quality: bool = True) -> Dict[str, Any]:
@@ -569,29 +920,644 @@ def storage_text(summary: Dict[str, Any]) -> Tuple[str, bool]:
 def model_report(model: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     model = Path(model) if model is not None else MODEL
     info_path = Path(model).with_suffix(".json")
-    if not Path(model).exists() or not info_path.exists():
-        return None
-    info = json.loads(info_path.read_text(encoding="utf-8"))
-    info["mtime"] = Path(model).stat().st_mtime
+    bank_dir = Path(model).parent / "gestures"
     from src.gesture_models import read_bank
+
+    bank_entries = read_bank(bank_dir) if (bank_dir / "manifest.json").is_file() else {}
+    has_main = Path(model).exists() and info_path.exists()
+    if not has_main and not bank_entries:
+        return None
+    if has_main:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        info["mtime"] = Path(model).stat().st_mtime
+    else:
+        info = {"classes": ["none"], "per_gesture": {}, "per_task": {}, "mtime": 0.0}
     info["specialists"] = {}
-    for label, entry in read_bank(Path(model).parent / "gestures").items():
-        path = Path(model).parent / "gestures" / entry["card"]
+    for label, entry in bank_entries.items():
+        path = bank_dir / entry["card"]
+        if not path.is_file():
+            continue
         card = json.loads(path.read_text(encoding="utf-8"))
         card["mtime"] = path.stat().st_mtime
         info["specialists"][label] = card
+        if path.stat().st_mtime > float(info.get("mtime") or 0.0):
+            info["mtime"] = path.stat().st_mtime
+    sp_path = Path(model).parent / "spatial_mlp.json"
+    if sp_path.is_file():
+        try:
+            sp_doc = json.loads(sp_path.read_text(encoding="utf-8"))
+            sp_meta = dict(sp_doc.get("metadata") or {})
+            sp_specs = list((sp_doc.get("specialists") or {}).keys())
+            info["spatial_mlp_live"] = {
+                "test_accuracy": sp_meta.get("test_accuracy"),
+                "train_accuracy": sp_meta.get("train_accuracy"),
+                "specialists": sp_specs,
+            }
+            if not isinstance(info.get("spatial_mlp"), dict):
+                info["spatial_mlp"] = info["spatial_mlp_live"]
+        except Exception:
+            pass
     return info
 
 
+def _extract_label_metrics(report: Optional[Dict[str, Any]], label: str) -> Dict[str, Any]:
+    """Extract effective evaluation metrics for a gesture label ('none' or gesture class) from a model report."""
+    if not report:
+        return {"trained": False}
+    disabled = set(report.get("disabled_gestures") or ())
+    spec = (report.get("specialists") or {}).get(label) if label != "none" else None
+    is_disabled = (label in disabled) and (spec is None)
+    if is_disabled:
+        return {"trained": False, "disabled": True}
+    source = spec if spec is not None else report
+    pg = source.get("per_gesture") or {}
+    m = dict(pg.get(label) or {})
+    classes = list(source.get("classes") or [])
+    is_trained = bool(spec is not None) or (label in classes and not is_disabled)
+    if label == "none" and not m and (report.get("specialists")):
+        # Aggregate free-move misfires across specialist cards when no main card exists
+        specs = list((report.get("specialists") or {}).values())
+        none_entries = [(s.get("per_gesture") or {}).get("none") or {} for s in specs]
+        mins = max([float(e.get("free_minutes") or 0.0) for e in none_entries] or [0.0])
+        tcn_mis = sum(int(e.get("misfires") or 0) for e in none_entries)
+        rule_mis = max([int(e.get("rules_misfires") or 0) for e in none_entries] or [0])
+        if mins > 0:
+            m = {
+                "free_minutes": round(mins, 2),
+                "misfires": tcn_mis,
+                "rules_misfires": rule_mis,
+                "misfires_per_min": round(tcn_mis / mins, 2),
+                "rules_misfires_per_min": round(rule_mis / mins, 2),
+            }
+            is_trained = True
+
+    sp_acc = None
+    if spec and isinstance(spec.get("spatial_mlp"), dict):
+        sp_meta = spec["spatial_mlp"].get("metadata") or {}
+        sp_acc = sp_meta.get("test_accuracy")
+    if sp_acc is None:
+        sp_live = report.get("spatial_mlp_live") or report.get("spatial_mlp") or {}
+        if isinstance(sp_live, dict):
+            spec_map = sp_live.get("specialists")
+            if isinstance(spec_map, dict) and isinstance(spec_map.get(label), dict):
+                sp_acc = spec_map[label].get("test_accuracy")
+            elif label != "none":
+                per_cls = sp_live.get("per_class") or {}
+                if isinstance(per_cls.get(label), dict):
+                    sp_acc = per_cls[label].get("accuracy")
+    # Compute per-posture breakdown for this label from held_out_results / final_results + condition_groups
+    from src.recording_plan import resolve_condition_group_name
+
+    cond_groups = list(source.get("condition_groups") or [])
+    cond_names: Dict[int, str] = {
+        idx_c: resolve_condition_group_name(cg, idx_c) for idx_c, cg in enumerate(cond_groups)
+    }
+
+    label_task_keys = [k for k, t in BY_KEY.items() if t.label == label]
+    held_by_posture: Dict[int, Dict[str, int]] = {}
+    for hr in source.get("held_out_results") or []:
+        p = hr.get("posture", hr.get("test_posture"))
+        if p is None:
+            continue
+        p_int = int(p)
+        bucket = held_by_posture.setdefault(p_int, {"recog": 0, "total": 0, "confused": 0, "misfires": 0})
+        tcn = hr.get("tcn") or {}
+        reps = tcn.get("reps") or {}
+        for tk in label_task_keys:
+            if tk in reps and len(reps[tk]) >= 2:
+                bucket["recog"] += int(reps[tk][0])
+                bucket["total"] += int(reps[tk][1])
+        bucket["confused"] += int(tcn.get("confused") or 0)
+        bucket["misfires"] += int(sum((tcn.get("misfires") or {}).values()))
+
+    final_by_posture: Dict[int, Dict[str, int]] = {}
+    for fr in source.get("final_results") or []:
+        p = fr.get("posture", fr.get("test_posture"))
+        if p is None:
+            continue
+        p_int = int(p)
+        bucket = final_by_posture.setdefault(p_int, {"recog": 0, "total": 0, "confused": 0, "misfires": 0})
+        tcn = fr.get("tcn") or {}
+        reps = tcn.get("reps") or {}
+        for tk in label_task_keys:
+            if tk in reps and len(reps[tk]) >= 2:
+                bucket["recog"] += int(reps[tk][0])
+                bucket["total"] += int(reps[tk][1])
+        bucket["confused"] += int(tcn.get("confused") or 0)
+        bucket["misfires"] += int(sum((tcn.get("misfires") or {}).values()))
+
+    posture_breakdown: List[Dict[str, Any]] = []
+    all_p_indices = sorted(set(held_by_posture.keys()) | set(final_by_posture.keys()))
+    for p_int in all_p_indices:
+        hb = held_by_posture.get(p_int, {})
+        fb = final_by_posture.get(p_int, {})
+        zs_r = round(hb["recog"] / hb["total"], 3) if hb.get("total") else None
+        fn_r = round(fb["recog"] / fb["total"], 3) if fb.get("total") else None
+        posture_breakdown.append({
+            "posture": p_int,
+            "name": cond_names.get(p_int, f"자세 #{p_int + 1}"),
+            "zero_shot_rate": zs_r,
+            "zero_shot_recognised": hb.get("recog", 0),
+            "zero_shot_total": hb.get("total", 0),
+            "final_rate": fn_r,
+            "final_recognised": fb.get("recog", 0),
+            "final_total": fb.get("total", 0),
+            "confused": hb.get("confused", 0),
+            "misfires": hb.get("misfires", 0),
+        })
+
+    return {
+        "trained": is_trained,
+        "specialist": spec is not None,
+        "rate": m.get("rate"),
+        "zero_shot_rate": m.get("zero_shot_rate", m.get("rate")),
+        "final_rate": m.get("final_rate"),
+        "adaptive_boosted": bool(m.get("adaptive_boosted")),
+        "adaptive_boost": source.get("adaptive_boost"),
+        "rules_rate": m.get("rules_rate"),
+        "recognised": m.get("recognised"),
+        "total": m.get("total"),
+        "train_accuracy": m.get("train_accuracy"),
+        "misfires_per_min": m.get("misfires_per_min"),
+        "rules_misfires_per_min": m.get("rules_misfires_per_min"),
+        "misfires": m.get("misfires"),
+        "rules_misfires": m.get("rules_misfires"),
+        "free_minutes": m.get("free_minutes"),
+        "spatial_accuracy": sp_acc,
+        "training_mode": source.get("training_mode"),
+        "folds": list(source.get("folds") or []),
+        "files": [str(d.get("file") or "") for d in (source.get("data") or []) if isinstance(d, dict) and d.get("file")],
+        "posture_breakdown": posture_breakdown,
+    }
+
+
+def _diagnose_label_performance(
+    cur: Dict[str, Any],
+    prev: Dict[str, Any],
+    label: str,
+) -> Dict[str, Any]:
+    """
+    Analyze why recognition rate or metrics dropped/changed after training and summarize
+    adaptive posture boosting recovery for heterogeneous hand angles/postures.
+    """
+    reasons: List[str] = []
+    boost_summary = ""
+    cur_rate = cur.get("rate")
+    prev_rate = prev.get("rate") if prev.get("trained") else None
+    zs_rate = cur.get("zero_shot_rate")
+    final_rate = cur.get("final_rate")
+    cur_fit = cur.get("train_accuracy")
+    prev_fit = prev.get("train_accuracy") if prev.get("trained") else None
+    delta_pp = round((cur_rate - prev_rate) * 100.0, 1) if (cur_rate is not None and prev_rate is not None) else None
+
+    if label == "none":
+        cur_mpm = cur.get("misfires_per_min")
+        prev_mpm = prev.get("misfires_per_min") if prev.get("trained") else None
+        if cur_mpm is not None and prev_mpm is not None and (cur_mpm - prev_mpm) >= 0.3:
+            pb = cur.get("posture_breakdown") or []
+            worst_mis = sorted([p for p in pb if p.get("misfires", 0) > 0], key=lambda x: x["misfires"], reverse=True)
+            if worst_mis:
+                w = worst_mis[0]
+                reasons.append(
+                    f"원인 분석: 자유 이동 중 [{w['name']}] 조건에서 오작동({w['misfires']}회)이 집중 발생하여 분당 오작동이 증가했습니다."
+                )
+            else:
+                reasons.append("원인 분석: 자유 이동 구간에서 목표 동작과 유사한 손가락 간격이 감지되어 분당 오작동이 증가했습니다.")
+        return {
+            "diagnosis_reasons": reasons,
+            "diagnosis_summary": " · ".join(reasons),
+            "boost_summary": "",
+        }
+
+    pb = cur.get("posture_breakdown") or []
+    valid_zs = [p for p in pb if p.get("zero_shot_rate") is not None and p.get("zero_shot_total", 0) > 0]
+    weak_postures = [p for p in valid_zs if float(p["zero_shot_rate"]) < 0.78]
+    strong_postures = [p for p in valid_zs if float(p["zero_shot_rate"]) >= 0.80]
+    total_confused = sum(int(p.get("confused") or 0) for p in pb)
+
+    # 1. Check Adaptive Posture Boosting recovery
+    ab = cur.get("adaptive_boost") or {}
+    if isinstance(ab, dict) and ab.get("triggered"):
+        rounds = int(ab.get("rounds") or 1)
+        p_details = ab.get("posture_details") or []
+        boosted_names = [
+            f"{d.get('name')} (미학습 교차 {float(d['zero_shot_rate']) * 100:.0f}% → 재학습 후 {float(d.get('after_final_rate') or 1.0) * 100:.0f}%)"
+            for d in p_details
+            if d.get("boosted") and d.get("zero_shot_rate") is not None
+        ]
+        if boosted_names:
+            boost_summary = (
+                f"적응형 자세 재학습({rounds}회) 완료: 이질적인 각도·자세 [{', '.join(boosted_names[:2])}]를 집중 추가 학습하여 인식률을 끌어올렸습니다."
+            )
+        elif zs_rate is not None and final_rate is not None and final_rate > zs_rate:
+            boost_summary = (
+                f"적응형 자세 재학습({rounds}회) 완료: 새로운 각도·자세 교차검증({zs_rate * 100:.0f}%) 약점을 보완하여 전체 자세 인식률을 {final_rate * 100:.0f}%로 향상했습니다."
+            )
+
+    # 2. Analyze why rate dropped or why zero-shot cross-posture rate is low
+    is_dropped = (delta_pp is not None and delta_pp <= -1.5) or (cur_rate is not None and cur_rate < 0.80)
+    prev_folds = prev.get("folds") or []
+    cur_folds = cur.get("folds") or []
+    prev_files = set(prev.get("files") or [])
+    cur_files = set(cur.get("files") or [])
+    added_files = sorted(cur_files - prev_files)
+
+    if is_dropped or weak_postures:
+        if weak_postures:
+            weak_desc = ", ".join(
+                f"{p['name']}({float(p['zero_shot_rate']) * 100:.0f}%)"
+                for p in sorted(weak_postures, key=lambda x: float(x["zero_shot_rate"]))[:2]
+            )
+            if strong_postures:
+                best_p = max(strong_postures, key=lambda x: float(x["zero_shot_rate"]))
+                reasons.append(
+                    f"이질적인 자세·각도 차이: 기본 자세[{best_p['name']} {float(best_p['zero_shot_rate']) * 100:.0f}%]와 달리 "
+                    f"[{weak_desc}] 자세는 손목 회전·카메라 각도가 이질적이라 해당 자세를 제외하고 채점하는 미학습 교차검증(Zero-shot) 점수가 낮게 측정되었습니다."
+                )
+            else:
+                reasons.append(
+                    f"자세·각도 편차: [{weak_desc}] 조건에서 손 방향/각도 변화가 커서 교차 자세 인식률이 낮게 측정되었습니다."
+                )
+        if prev.get("trained") and len(cur_folds) > len(prev_folds) and len(prev_folds) <= 1:
+            reasons.append(
+                f"평가 범위 확대 영향: 직전 모델은 '빠른 학습(대표 자세 {max(1, len(prev_folds))}개만 검사)'이었고, "
+                f"이번에는 '정밀 학습(전체 {len(cur_folds)}개 자세 엄격 교차검사)'으로 채점 대상에 까다로운 각도가 모두 포함되었습니다."
+            )
+        if added_files and delta_pp is not None and delta_pp < 0:
+            reasons.append(
+                f"신규 녹화 데이터 영향: 새로 추가된 녹화({', '.join(added_files[:2])})에 기존과 다른 손 각도 또는 전환 구간이 포함되어 교차 검증 기준이 달라졌습니다."
+            )
+        if cur_fit is not None and prev_fit is not None and (cur_fit - prev_fit) <= -0.03:
+            reasons.append(
+                f"동작 일관성 저하: 학습 데이터 일치도가 {prev_fit * 100:.0f}% → {cur_fit * 100:.0f}%로 낮아졌습니다 (녹화 중 손 모양 흔들림 가능성)."
+            )
+        elif cur_fit is not None and cur_fit >= 0.97 and (zs_rate is not None and zs_rate < 0.85):
+            if final_rate is not None:
+                reasons.append(
+                    f"실제 최종 모델 성능 정상: 학습 데이터 일치도({cur_fit * 100:.0f}%)와 모든 자세를 학습한 최종 모델 인식률({final_rate * 100:.0f}%)은 정상입니다."
+                )
+            else:
+                reasons.append(
+                    f"실제 최종 모델 성능 정상: 모든 자세를 함께 학습한 최종 모델의 일치도는 {cur_fit * 100:.0f}%로 새로운 각도를 정상 학습했습니다."
+                )
+        if total_confused > 0:
+            reasons.append(f"타 동작 혼동: 반복 수행 중 다른 손동작으로 오인식된 횟수가 {total_confused}회 있었습니다.")
+
+    summary_parts = []
+    if boost_summary:
+        summary_parts.append(boost_summary)
+    if reasons:
+        summary_parts.extend(reasons[:2])
+    return {
+        "diagnosis_reasons": reasons,
+        "diagnosis_summary": " / ".join(summary_parts),
+        "boost_summary": boost_summary,
+    }
+
+
+def evaluate_training_improvement(
+    after_report: Optional[Dict[str, Any]] = None,
+    before_report: Optional[Dict[str, Any]] = None,
+    *,
+    target_keys: Optional[Sequence[str]] = None,
+    backup_id: Optional[str] = None,
+    model: Path = MODEL,
+    backup_dir: Path = BACKUP_DIR,
+) -> Dict[str, Any]:
+    """Compare the newly trained model (`after_report`) against `before_report` (or latest backup) and rules baseline."""
+    if after_report is None:
+        after_report = model_report(model)
+    if not after_report:
+        return {"available": False, "headline": "평가할 학습 모델이 없습니다.", "items": []}
+
+    resolved_backup_id = backup_id
+    if before_report is None and Path(backup_dir).is_dir():
+        backups = sorted(
+            [d for d in Path(backup_dir).glob("backup-*") if d.is_dir()],
+            key=lambda d: d.stat().st_mtime,
+            reverse=True,
+        )
+        if backups:
+            latest_bak = backups[0]
+            resolved_backup_id = f"backup:{latest_bak.name}"
+            before_report = model_report(latest_bak / "gesture_tcn.onnx")
+
+    has_before = bool(before_report)
+    target_labels: Optional[set[str]] = None
+    if target_keys:
+        target_labels = {BY_KEY[k].label for k in target_keys if k in BY_KEY and BY_KEY[k].label != "none"}
+
+    # Map each gesture label to its primary display name in Korean
+    label_Title: Dict[str, str] = {}
+    label_Keys: Dict[str, List[str]] = defaultdict(list)
+    for k, t in BY_KEY.items():
+        if t.label == "none":
+            continue
+        label_Keys[t.label].append(k)
+        if t.label not in label_Title:
+            label_Title[t.label] = t.name
+        elif t.label == "thumb_middle":
+            label_Title[t.label] = "좌클릭 · 드래그 (중지)"
+
+    items: List[Dict[str, Any]] = []
+    by_task_delta: Dict[str, Dict[str, Any]] = {}
+
+    rate_deltas_vs_prev: List[float] = []
+    rate_deltas_vs_rules: List[float] = []
+    improved_cnt = 0
+    regressed_cnt = 0
+
+    for label in CLASSES:
+        if label == "none":
+            continue
+        if target_labels is not None and label not in target_labels:
+            continue
+        cur = _extract_label_metrics(after_report, label)
+        if not cur.get("trained"):
+            continue
+        prev = _extract_label_metrics(before_report, label) if has_before else {"trained": False}
+
+        cur_rate = cur.get("rate")
+        prev_rate = prev.get("rate") if prev.get("trained") else None
+        rules_rate = cur.get("rules_rate")
+        cur_fit = cur.get("train_accuracy")
+        prev_fit = prev.get("train_accuracy") if prev.get("trained") else None
+        cur_sp = cur.get("spatial_accuracy")
+        prev_sp = prev.get("spatial_accuracy") if prev.get("trained") else None
+
+        delta_prev_pp = round((cur_rate - prev_rate) * 100.0, 1) if (cur_rate is not None and prev_rate is not None) else None
+        delta_rules_pp = round((cur_rate - rules_rate) * 100.0, 1) if (cur_rate is not None and rules_rate is not None) else None
+        fit_delta_pp = round((cur_fit - prev_fit) * 100.0, 1) if (cur_fit is not None and prev_fit is not None) else None
+
+        if delta_prev_pp is not None:
+            rate_deltas_vs_prev.append(delta_prev_pp)
+        if delta_rules_pp is not None:
+            rate_deltas_vs_rules.append(delta_rules_pp)
+
+        # Determine badge & status
+        status = "same"
+        badge = "유지 ="
+        if delta_prev_pp is not None:
+            if delta_prev_pp >= 1.0:
+                status = "improved"
+                badge = f"인식 +{delta_prev_pp:.0f}%p ▲"
+                improved_cnt += 1
+            elif delta_prev_pp <= -2.0:
+                status = "regressed"
+                badge = f"인식 {delta_prev_pp:.0f}%p ▼"
+                regressed_cnt += 1
+            else:
+                status = "same"
+                badge = "이전 수준 유지 ="
+        elif fit_delta_pp is not None and abs(fit_delta_pp) >= 1.0:
+            if fit_delta_pp > 0:
+                status = "improved"
+                badge = f"학습정확도 +{fit_delta_pp:.0f}%p ▲"
+                improved_cnt += 1
+            else:
+                status = "regressed"
+                badge = f"학습정확도 {fit_delta_pp:.0f}%p ▼"
+                regressed_cnt += 1
+        elif delta_rules_pp is not None:
+            if delta_rules_pp >= 1.0:
+                status = "improved"
+                badge = f"규칙 대비 +{delta_rules_pp:.0f}%p ▲"
+                improved_cnt += 1
+            elif delta_rules_pp <= -2.0:
+                status = "regressed"
+                badge = f"규칙 대비 {delta_rules_pp:.0f}%p ▼"
+            else:
+                status = "same"
+                badge = "규칙 동률 ="
+        elif not prev.get("trained"):
+            status = "new"
+            badge = "신규 학습 ★"
+            improved_cnt += 1
+
+        # Build concise detail string
+        parts: List[str] = []
+        if cur_rate is not None:
+            if prev_rate is not None:
+                sign = "+" if (delta_prev_pp or 0) > 0 else ""
+                parts.append(f"인식률 {prev_rate * 100:.0f}% → {cur_rate * 100:.0f}% ({sign}{delta_prev_pp:.0f}%p)")
+            else:
+                parts.append(f"인식률 {cur_rate * 100:.0f}%")
+            if rules_rate is not None:
+                r_sign = "+" if (delta_rules_pp or 0) > 0 else ""
+                parts.append(f"규칙 {rules_rate * 100:.0f}% 대비 {r_sign}{delta_rules_pp:.0f}%p")
+        if cur_fit is not None:
+            if prev_fit is not None and fit_delta_pp is not None and abs(fit_delta_pp) >= 1.0:
+                f_sign = "+" if fit_delta_pp > 0 else ""
+                parts.append(f"학습일치 {prev_fit * 100:.0f}%→{cur_fit * 100:.0f}%({f_sign}{fit_delta_pp:.0f}%p)")
+            else:
+                parts.append(f"학습일치 {cur_fit * 100:.0f}%")
+        if isinstance(cur_sp, (int, float)):
+            if isinstance(prev_sp, (int, float)) and abs(float(cur_sp) - float(prev_sp)) >= 0.5:
+                sp_d = float(cur_sp) - float(prev_sp)
+                sp_s = "+" if sp_d > 0 else ""
+                parts.append(f"전용MLP {float(prev_sp):.0f}%→{float(cur_sp):.0f}%({sp_s}{sp_d:.0f}%p)")
+            else:
+                parts.append(f"전용MLP {float(cur_sp):.0f}%")
+
+        diag = _diagnose_label_performance(cur, prev, label)
+        zs_rate = cur.get("zero_shot_rate")
+        final_rate = cur.get("final_rate")
+        if final_rate is not None and zs_rate is not None and abs(final_rate - cur_rate) >= 0.01:
+            parts.append(f"최종모델 전체자세 {final_rate * 100:.0f}%")
+
+        item = {
+            "label": label,
+            "name": label_Title.get(label, label),
+            "status": status,
+            "badge": badge,
+            "detail": " · ".join(parts) if parts else "학습 완료",
+            "diagnosis_summary": diag["diagnosis_summary"],
+            "diagnosis_reasons": diag["diagnosis_reasons"],
+            "boost_summary": diag["boost_summary"],
+            "rate_after": round(cur_rate * 100.0, 1) if cur_rate is not None else None,
+            "rate_before": round(prev_rate * 100.0, 1) if prev_rate is not None else None,
+            "zero_shot_rate": round(zs_rate * 100.0, 1) if zs_rate is not None else None,
+            "final_rate": round(final_rate * 100.0, 1) if final_rate is not None else None,
+            "rules_rate": round(rules_rate * 100.0, 1) if rules_rate is not None else None,
+            "delta_prev_pp": delta_prev_pp,
+            "delta_rules_pp": delta_rules_pp,
+        }
+        items.append(item)
+        for tk in label_Keys.get(label, []):
+            by_task_delta[tk] = item
+
+    # Also evaluate free-movement misfire suppression ('none')
+    cur_none = _extract_label_metrics(after_report, "none")
+    prev_none = _extract_label_metrics(before_report, "none") if has_before else {"trained": False}
+    cur_mpm = cur_none.get("misfires_per_min")
+    prev_mpm = prev_none.get("misfires_per_min") if prev_none.get("trained") else None
+    rules_mpm = cur_none.get("rules_misfires_per_min")
+    mpm_delta_prev = round(cur_mpm - prev_mpm, 2) if (cur_mpm is not None and prev_mpm is not None) else None
+    mpm_delta_rules = round(cur_mpm - rules_mpm, 2) if (cur_mpm is not None and rules_mpm is not None) else None
+
+    if cur_mpm is not None:
+        n_status = "same"
+        n_badge = f"오작동 {cur_mpm:.1f}회/분"
+        if mpm_delta_prev is not None:
+            if mpm_delta_prev <= -0.1:
+                n_status = "improved"
+                n_badge = f"오작동 {mpm_delta_prev:.1f}/분 감소 ▲"
+                improved_cnt += 1
+            elif mpm_delta_prev >= 0.3:
+                n_status = "regressed"
+                n_badge = f"오작동 +{mpm_delta_prev:.1f}/분 증가 ▼"
+                regressed_cnt += 1
+            else:
+                n_badge = "오작동 유지 ="
+        elif mpm_delta_rules is not None and mpm_delta_rules <= -0.1:
+            n_status = "improved"
+            n_badge = f"규칙 대비 {mpm_delta_rules:.1f}/분 감소 ▲"
+
+        n_parts = []
+        if prev_mpm is not None:
+            sign = "+" if (mpm_delta_prev or 0) > 0 else ""
+            n_parts.append(f"자유이동 오작동 {prev_mpm:.1f} → {cur_mpm:.1f}회/분 ({sign}{mpm_delta_prev:.1f})")
+        else:
+            n_parts.append(f"자유이동 오작동 {cur_mpm:.1f}회/분")
+        if rules_mpm is not None:
+            r_sign = "+" if (mpm_delta_rules or 0) > 0 else ""
+            n_parts.append(f"규칙 {rules_mpm:.1f}회/분 ({r_sign}{mpm_delta_rules:.1f})")
+
+        none_diag = _diagnose_label_performance(cur_none, prev_none, "none")
+        none_item = {
+            "label": "none",
+            "name": "커서 이동 중 오작동 억제",
+            "status": n_status,
+            "badge": n_badge,
+            "detail": " · ".join(n_parts),
+            "diagnosis_summary": none_diag["diagnosis_summary"],
+            "diagnosis_reasons": none_diag["diagnosis_reasons"],
+            "boost_summary": "",
+            "misfires_after": cur_mpm,
+            "misfires_before": prev_mpm,
+            "rules_misfires": rules_mpm,
+            "delta_prev": mpm_delta_prev,
+            "delta_rules": mpm_delta_rules,
+        }
+        items.append(none_item)
+        for tk, t in BY_KEY.items():
+            if t.label == "none":
+                by_task_delta[tk] = none_item
+
+    # Overall Spatial MLP summary
+    sp_after = (after_report.get("spatial_mlp_live") or after_report.get("spatial_mlp") or {}).get("test_accuracy")
+    sp_before = (
+        ((before_report or {}).get("spatial_mlp_live") or (before_report or {}).get("spatial_mlp") or {}).get("test_accuracy")
+        if has_before
+        else None
+    )
+    sp_delta = round(float(sp_after) - float(sp_before), 1) if (isinstance(sp_after, (int, float)) and isinstance(sp_before, (int, float))) else None
+
+    avg_prev_pp = round(float(sum(rate_deltas_vs_prev) / len(rate_deltas_vs_prev)), 1) if rate_deltas_vs_prev else None
+    avg_rules_pp = round(float(sum(rate_deltas_vs_rules) / len(rate_deltas_vs_rules)), 1) if rate_deltas_vs_rules else None
+
+    headline_parts: List[str] = []
+    if avg_prev_pp is not None:
+        sign = "+" if avg_prev_pp > 0 else ""
+        headline_parts.append(f"직전 모델 대비 평균 인식률 {sign}{avg_prev_pp:.1f}%p")
+    elif avg_rules_pp is not None:
+        sign = "+" if avg_rules_pp > 0 else ""
+        headline_parts.append(f"기본 규칙 대비 평균 인식률 {sign}{avg_rules_pp:.1f}%p")
+
+    if mpm_delta_prev is not None and abs(mpm_delta_prev) >= 0.05:
+        sign = "+" if mpm_delta_prev > 0 else ""
+        headline_parts.append(f"이동 오작동 {sign}{mpm_delta_prev:.1f}회/분")
+    elif cur_mpm is not None and rules_mpm is not None:
+        headline_parts.append(f"이동 오작동 {cur_mpm:.1f}회/분 (규칙 {rules_mpm:.1f})")
+
+    if isinstance(sp_after, (int, float)):
+        if sp_delta is not None and abs(sp_delta) >= 0.2:
+            sign = "+" if sp_delta > 0 else ""
+            headline_parts.append(f"96차원 전용 MLP {float(sp_after):.1f}% ({sign}{sp_delta:.1f}%p)")
+        else:
+            headline_parts.append(f"96차원 전용 MLP {float(sp_after):.1f}%")
+
+    overall_status = "ok"
+    if regressed_cnt > 0 and improved_cnt == 0:
+        overall_status = "warn"
+    elif improved_cnt > 0:
+        overall_status = "improved"
+
+    scope_prefix = "선택 동작 학습 효과" if target_labels else "전체 학습 개선 효과"
+    headline = f"[{scope_prefix}] " + (" · ".join(headline_parts) if headline_parts else f"총 {len(items)}개 항목 학습 및 검증 완료")
+
+    result = {
+        "diagnosis_version": 2,
+        "available": bool(items),
+        "overall_status": overall_status,
+        "has_before_model": has_before,
+        "headline": headline,
+        "improved_count": improved_cnt,
+        "regressed_count": regressed_cnt,
+        "can_rollback": bool(resolved_backup_id),
+        "backup_id": resolved_backup_id or "",
+        "spatial_accuracy_after": sp_after,
+        "spatial_accuracy_before": sp_before,
+        "spatial_accuracy_delta": sp_delta,
+        "items": items,
+        "by_task": by_task_delta,
+        "evaluated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "dismissed": False,
+    }
+    try:
+        imp_path = Path(model).parent / "last_training_improvement.json"
+        imp_path.parent.mkdir(parents=True, exist_ok=True)
+        imp_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return result
+
+
+def load_last_training_improvement(model: Path = MODEL) -> Dict[str, Any]:
+    """Load `models/last_training_improvement.json` or compute on the fly from latest backup if missing."""
+    imp_path = Path(model).parent / "last_training_improvement.json"
+    if imp_path.is_file():
+        try:
+            doc = json.loads(imp_path.read_text(encoding="utf-8"))
+            if isinstance(doc, dict) and doc.get("available") and doc.get("diagnosis_version") == 2:
+                doc.setdefault("dismissed", False)
+                return doc
+        except Exception:
+            pass
+    rep = model_report(model)
+    if rep is not None:
+        return evaluate_training_improvement(after_report=rep, model=model, backup_dir=Path(model).parent / "backups")
+    return {"available": False, "headline": "", "items": [], "by_task": {}, "dismissed": False}
+
+
 # ---------------------------------------------------------------- what to do next
-def gesture_rows(summary: Dict[str, Any], report: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def gesture_rows(
+    summary: Dict[str, Any],
+    report: Optional[Dict[str, Any]],
+    improvement: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """One row per gesture: data, scores and advice, for the screen."""
     rows = []
     pg = (report or {}).get("per_gesture", {})
     disabled = set((report or {}).get("disabled_gestures") or ())
+    imp_by_task = (improvement or {}).get("by_task") or {}
+    valid_files = sorted(
+        [f for f in summary.get("files", []) if "error" not in f],
+        key=lambda f: int(f.get("mtime", 0)),
+        reverse=True,
+    )
     for key, name in NAMES.items():
         task = BY_KEY[key]
         d = summary["per_gesture"].get(key, {"reps": 0, "postures": {}, "minutes": 0.0})
+        latest_file = ""
+        for vf in valid_files:
+            if (
+                sum((vf.get("reps", {}).get(key) or {}).values()) > 0
+                or float((vf.get("free_minutes") or {}).get(key, 0.0)) > 0.0
+                or key in (vf.get("target_gestures") or [])
+            ):
+                latest_file = str(vf.get("file") or "")
+                break
         specialist = (report or {}).get("specialists", {}).get(task.label)
         is_disabled = (task.label in disabled) and (specialist is None)
         current = {} if is_disabled else (specialist or report or {})
@@ -603,14 +1569,27 @@ def gesture_rows(summary: Dict[str, Any], report: Optional[Dict[str, Any]]) -> L
         cur_folds = current.get("folds") or []
         is_partial_eval = bool(cur_mode == "fast" or (isinstance(cur_folds, list) and len(cur_folds) == 1))
         mode_tag = " · 빠른 학습(일부 자세 평가)" if is_partial_eval else (" · 정밀 학습(전체 자세 평가)" if cur_mode == "thorough" else "")
+        has_sp_spec = bool(
+            (specialist and isinstance(specialist.get("spatial_mlp"), dict))
+            or (
+                isinstance((report or {}).get("spatial_mlp"), dict)
+                and task.label in ((report or {}).get("spatial_mlp", {}).get("specialists") or [])
+            )
+        )
+        mlp_tag = " · 전용 MLP" if has_sp_spec else ""
         if specialist:
-            model_text = "선택 동작 모델 · " + str(specialist.get("trained", "")) + mode_tag
+            model_text = "선택 동작 모델 · " + str(specialist.get("trained", "")) + mlp_tag + mode_tag
         elif is_disabled:
             model_text = "학습 초기화됨 · 현재 규칙으로 동작"
         elif task.label in classes:
-            model_text = "TCN 학습됨" + mode_tag
+            model_text = "TCN 학습됨" + mlp_tag + mode_tag
         else:
             model_text = "TCN 학습 전 · 현재 규칙으로 동작"
+        task_imp = {} if is_disabled else (imp_by_task.get(key) or {})
+        diag_summary = str(task_imp.get("diagnosis_summary") or "")
+        if not diag_summary and not is_disabled and is_trained and report is not None:
+            cur_l = _extract_label_metrics(report, task.label)
+            diag_summary = _diagnose_label_performance(cur_l, {"trained": False}, task.label).get("diagnosis_summary", "")
         row = {"key": key, "name": name, "reps": d["reps"], "postures": len(d["postures"]),
                "category": task.category, "instruction": task.do,
                "model_text": model_text,
@@ -618,7 +1597,13 @@ def gesture_rows(summary: Dict[str, Any], report: Optional[Dict[str, Any]]) -> L
                "is_trained": is_trained, "is_disabled": is_disabled,
                "minutes": d.get("minutes", 0.0), "train_accuracy": m.get("train_accuracy"),
                "rate": m.get("rate"), "rules_rate": m.get("rules_rate"),
-               "misfires_per_min": m.get("misfires_per_min"), "rules_misfires_per_min": m.get("rules_misfires_per_min")}
+               "zero_shot_rate": m.get("zero_shot_rate"), "final_rate": m.get("final_rate"),
+               "misfires_per_min": m.get("misfires_per_min"), "rules_misfires_per_min": m.get("rules_misfires_per_min"),
+               "delta_badge": str(task_imp.get("badge") or ""),
+               "delta_status": str(task_imp.get("status") or ""),
+               "delta_detail": str(task_imp.get("detail") or ""),
+               "diagnosis_summary": diag_summary,
+               "latest_file": latest_file}
         advice, level = [], "ok"
         if task.free:
             data_ok = row["minutes"] >= GOAL_FREE_MIN
@@ -699,14 +1684,26 @@ class TrainingJob:
         *,
         mode: Optional[str] = None,
         offline_augment: Optional[bool] = None,
+        device: Optional[str] = None,
     ) -> bool:
         if self.running:
             return False
         resolved_mode = mode if mode in ("fast", "thorough") else get_training_mode()
+        effective_device = resolve_effective_training_device(device)
         if offline_augment is None:
             offline_augment = bool(get_augmentation_settings().get("enabled", True))
         env = dict(os.environ, PYTHONIOENCODING="utf-8")
-        args = [sys.executable, str(ROOT / "scripts" / "train_tcn.py"), "--mode", resolved_mode, "--progress", "--epochs", str(epochs)]
+        args = [
+            sys.executable,
+            str(ROOT / "scripts" / "train_tcn.py"),
+            "--mode",
+            resolved_mode,
+            "--device",
+            effective_device,
+            "--progress",
+            "--epochs",
+            str(epochs),
+        ]
         if resolved_mode == "thorough":
             args.append("--folds")
         if offline_augment:
@@ -718,8 +1715,15 @@ class TrainingJob:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self.proc = subprocess.Popen(args, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding="utf-8", errors="replace", env=env, creationflags=flags)
+        dev_badge = "GPU" if effective_device == "gpu" else "CPU"
+        try:
+            self._before_report = model_report()
+        except Exception:
+            self._before_report = None
+        self._target_keys = list(gestures) if gestures else None
         with self._lock:
-            self.state = {"running": True, "stage": "데이터 읽는 중", "mode": resolved_mode,
+            self.state = {"running": True, "stage": f"데이터 읽는 중 ({dev_badge})", "mode": resolved_mode,
+                          "device": effective_device,
                           "fold": 0, "folds": 0, "epoch": 0, "epochs": epochs,
                           "progress": 0.0, "started": time.time(), "log": []}
         threading.Thread(target=self._read, daemon=True).start()
@@ -750,10 +1754,27 @@ class TrainingJob:
                 continue
             self._apply(ev)
         code = self.proc.wait()
+        improvement = None
+        if code == 0 and not self.state.get("error"):
+            with self._lock:
+                self.state["stage"] = "학습 전후 모델 인식률 비교 분석 중…"
+            try:
+                after_rep = model_report()
+                improvement = evaluate_training_improvement(
+                    after_report=after_rep,
+                    before_report=getattr(self, "_before_report", None),
+                    target_keys=getattr(self, "_target_keys", None),
+                )
+            except Exception:
+                improvement = None
         with self._lock:
             self.state["running"] = False
             if code != 0 and not self.state.get("error"):
                 self.state["error"] = "학습이 실패했어요: " + " / ".join(self.state.get("log", [])[-3:])
+            if improvement and improvement.get("available"):
+                self.state["improvement"] = improvement
+                if improvement.get("headline"):
+                    self.state["stage"] = f"완료! {improvement['headline']}"
             self.state["finished"] = time.time()
 
     def _apply(self, ev: Dict[str, Any]) -> None:
@@ -767,7 +1788,12 @@ class TrainingJob:
             elif kind == "loaded":
                 s["folds"] = max(0, int(ev.get("folds", 0)))
                 s["windows"] = ev.get("windows")
-                s["stage"] = f"데이터 {ev.get('windows')}개 구간"
+                if ev.get("device"):
+                    s["device"] = "gpu" if str(ev.get("device")) == "cuda" else str(ev.get("device"))
+                if ev.get("device_name"):
+                    s["device_name"] = str(ev.get("device_name"))
+                dev_tag = "GPU" if s.get("device") in ("gpu", "cuda") else "CPU"
+                s["stage"] = f"데이터 {ev.get('windows')}개 구간 ({dev_tag})"
             elif kind == "fold_start":
                 s["fold"] = int(ev.get("fold", 0))
                 s["stage"] = f"평가 학습 {s['fold']}/{s['folds']} (자세 {ev.get('posture')} 빼고)"
@@ -788,6 +1814,18 @@ class TrainingJob:
                 s.setdefault("skipped", []).append(ev.get("file"))
             elif kind == "note":
                 s["log"] = (s.get("log", []) + [ev.get("text", "")])[-20:]
+            elif kind == "substage":
+                msg = ev.get("text") or ev.get("stage")
+                if msg:
+                    s["stage"] = str(msg)
+                if "progress" in ev and ev["progress"] is not None:
+                    p = round(max(0.0, min(0.99, float(ev["progress"]))), 3)
+                    if s.get("gesture_count"):
+                        p = round((s.get("gesture_index", 1) - 1 + p) / s["gesture_count"], 3)
+                    s["progress"] = p
+                elif float(s.get("progress", 0.0)) <= 0.02:
+                    s["progress"] = 0.04
+                return
             elif kind == "error":
                 s["error"] = ev.get("text")
             steps = max(1, int(s.get("folds", 0)) + 1)
@@ -846,9 +1884,14 @@ class GestureModel:
 '''
 
 
-def export_package(out_root: Path = EXPORT_DIR, with_dataset: bool = True) -> Path:
+def export_package(out_root: Path = EXPORT_DIR, with_dataset: bool = True, *, progress_cb=None) -> Path:
     """exports/gesture-tcn-<time>/ (+ .zip): model, its info, the feature code, an example, a README, and the
     per-frame features + labels of every recording (dataset.npz) for training elsewhere."""
+    if callable(progress_cb):
+        try:
+            progress_cb(0.15, "[1/4단계] 현재 모델 및 메타데이터 확인 중…")
+        except Exception:
+            pass
     report = model_report()
     if report is None:
         raise FileNotFoundError("학습한 모델이 없어요. 먼저 학습하세요.")
@@ -856,6 +1899,11 @@ def export_package(out_root: Path = EXPORT_DIR, with_dataset: bool = True) -> Pa
     stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
     out = Path(out_root) / f"gesture-tcn-{stamp}"
     out.mkdir(parents=True, exist_ok=True)
+    if callable(progress_cb):
+        try:
+            progress_cb(0.35, "[2/4단계] ONNX 모델 및 추론 코드 복사 중…")
+        except Exception:
+            pass
     shutil.copy2(MODEL, out / "gesture_tcn.onnx")
     shutil.copy2(MODEL.with_suffix(".json"), out / "gesture_tcn.json")
     shutil.copy2(ROOT / "src" / "tcn_features.py", out / "tcn_features.py")
@@ -896,10 +1944,20 @@ def export_package(out_root: Path = EXPORT_DIR, with_dataset: bool = True) -> Pa
         lines += ["", "## 선택 학습 모델", "선택 모델은 해당 동작에 우선 적용되며 각 확률은 독립적입니다.",
                   ", ".join(entries)]
     if with_dataset:
+        if callable(progress_cb):
+            try:
+                progress_cb(0.65, "[3/4단계] 전체 녹화 데이터셋(dataset.npz) 압축 묶는 중…")
+            except Exception:
+                pass
         lines += ["", "## dataset.npz", "녹화 전체의 프레임별 특징 `x` (n, features), 정답 `y` (-1 = 학습 제외, 그 외 classes 순서), "
                   "자세 `posture`, 녹화 번호 `recording`. 다른 프레임워크에서 다시 학습할 때 쓴다."]
         _export_dataset(out / "dataset.npz", report)
     (out / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if callable(progress_cb):
+        try:
+            progress_cb(0.88, "[4/4단계] 배포 패키지 ZIP 아카이브 생성 중…")
+        except Exception:
+            pass
     shutil.make_archive(str(out), "zip", root_dir=out)
     return out
 
@@ -1227,6 +2285,11 @@ def restore_model_backup(
             if f.is_file() and f.name != "training.lock":
                 shutil.copy2(f, bank_dir / f.name)
 
+    try:
+        (model.parent / "last_training_improvement.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
     return {"restored": src_folder.name, "path": str(src_folder)}
 
 
@@ -1265,12 +2328,632 @@ def reset_gesture_training(
         except Exception:
             pass
 
+    sp_path = model.parent / "spatial_mlp.json"
+    if sp_path.is_file():
+        try:
+            from src.spatial_mlp import SpatialMlpModel
+            sp_model = SpatialMlpModel.load(sp_path)
+            if label in sp_model.specialists:
+                del sp_model.specialists[label]
+                sp_model.save(sp_path)
+        except Exception:
+            pass
+
     return {
         "key": key,
         "label": label,
         "name": task.name,
         "removed_specialist": removed_specialist,
         "disabled_in_main": disabled_in_main,
+    }
+
+
+# ---------------------------------------------------------------- selectable ONNX models, per-model gesture rates & 2D spatial spray heatmap
+_LABEL_DISPLAY_NAMES: Dict[str, str] = {
+    "thumb_middle": "좌클릭 · 드래그 (중지)",
+    "thumb_ring": "우클릭 (약지)",
+    "thumb_index": "스크롤 잡기 (검지)",
+    "thumb_index_middle": "창 이동 3손가락 핀치",
+    "v_sign": "브이(V) 사인",
+    "rock_sign": "락(Rock) 사인",
+    "thumbs_up": "따봉 (엄지 척)",
+    "swipe_left": "← 왼쪽 스와이프",
+    "swipe_right": "→ 오른쪽 스와이프",
+    "swipe_down": "↓ 아래로 스와이프",
+}
+
+
+def get_active_onnx_selection(model: Path = MODEL) -> Dict[str, Any]:
+    """Return the user's active ONNX runtime selection from `models/active_onnx_selection.json`."""
+    sel_file = Path(model).parent / "active_onnx_selection.json"
+    default_sel = {
+        "mode": "composite",
+        "id": "composite:active",
+        "path": str(model),
+    }
+    if sel_file.is_file():
+        try:
+            doc = json.loads(sel_file.read_text(encoding="utf-8"))
+            if isinstance(doc, dict) and doc.get("id"):
+                return {**default_sel, **doc}
+        except Exception:
+            pass
+    return default_sel
+
+
+def _build_onnx_card_gesture_rates(
+    card: Dict[str, Any],
+    *,
+    specialists: Optional[Dict[str, Dict[str, Any]]] = None,
+    use_specialists: bool = True,
+) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[float], Optional[float]]:
+    """Build per-gesture recognition breakdown rows for a given ONNX model card."""
+    spec_map = (specialists or {}) if use_specialists else {}
+    disabled = set(card.get("disabled_gestures") or ()) if not use_specialists else set(card.get("disabled_gestures") or ()) - set(spec_map.keys())
+    card_classes = [str(c) for c in (card.get("classes") or []) if c != "none"]
+    active_labels: List[str] = []
+    for c in CLASSES:
+        if c == "none":
+            continue
+        if (c in spec_map) or (c in card_classes and c not in disabled):
+            active_labels.append(c)
+
+    rows: List[Dict[str, Any]] = []
+    rate_vals: List[float] = []
+    fit_vals: List[float] = []
+
+    for lbl in active_labels:
+        spec_card = spec_map.get(lbl)
+        src_card = spec_card if spec_card is not None else card
+        pg = (src_card.get("per_gesture") or {}).get(lbl) or {}
+        rate = pg.get("rate")
+        rules_rate = pg.get("rules_rate")
+        train_acc = pg.get("train_accuracy")
+        rec_cnt = int(pg.get("recognised") or 0)
+        tot_cnt = int(pg.get("total") or 0)
+
+        sp_acc = None
+        if spec_card and isinstance(spec_card.get("spatial_mlp"), dict):
+            sp_acc = (spec_card["spatial_mlp"].get("metadata") or {}).get("test_accuracy")
+        if sp_acc is None:
+            sp_doc = src_card.get("spatial_mlp_live") or src_card.get("spatial_mlp") or {}
+            if isinstance(sp_doc, dict):
+                sp_acc = sp_doc.get("test_accuracy")
+
+        rate_pct = round(float(rate) * 100.0, 1) if isinstance(rate, (int, float)) else None
+        rules_pct = round(float(rules_rate) * 100.0, 1) if isinstance(rules_rate, (int, float)) else None
+        fit_pct = round(float(train_acc) * 100.0, 1) if isinstance(train_acc, (int, float)) else None
+        sp_pct = round(float(sp_acc), 1) if isinstance(sp_acc, (int, float)) else None
+
+        if rate_pct is not None:
+            rate_vals.append(rate_pct)
+        if fit_pct is not None:
+            fit_vals.append(fit_pct)
+
+        primary_pct = rate_pct if rate_pct is not None else (fit_pct if fit_pct is not None else (sp_pct or 0.0))
+        grade = "high" if primary_pct >= 85.0 else ("mid" if primary_pct >= 65.0 else "low")
+        source_badge = "전용 ONNX" if (spec_card is not None or len(card_classes) == 1) else "통합 TCN"
+
+        badge_parts: List[str] = []
+        if rate_pct is not None:
+            badge_parts.append(f"실전 인식 {rate_pct:.0f}% ({rec_cnt}/{tot_cnt}회)")
+        if fit_pct is not None:
+            badge_parts.append(f"학습일치 {fit_pct:.0f}%")
+        if rules_pct is not None and rate_pct is not None:
+            diff = rate_pct - rules_pct
+            sign = "+" if diff >= 0 else ""
+            badge_parts.append(f"규칙 대비 {sign}{diff:.0f}%p")
+        if sp_pct is not None:
+            badge_parts.append(f"MLP {sp_pct:.0f}%")
+
+        # Find canonical task keys for training this gesture
+        task_keys = [k for k, t in BY_KEY.items() if t.label == lbl]
+        primary_key = lbl if lbl in BY_KEY else (task_keys[0] if task_keys else lbl)
+        disp_name = _LABEL_DISPLAY_NAMES.get(lbl, NAMES.get(primary_key, lbl))
+
+        rows.append({
+            "label": lbl,
+            "key": primary_key,
+            "task_keys": task_keys,
+            "name": disp_name,
+            "source": source_badge,
+            "rate": round(float(primary_pct) / 100.0, 4),
+            "rate_pct": rate_pct,
+            "rules_rate_pct": rules_pct,
+            "train_acc_pct": fit_pct,
+            "spatial_acc_pct": sp_pct,
+            "score_pct": round(float(primary_pct), 1),
+            "hits": rec_cnt,
+            "reps": tot_cnt,
+            "recognised": rec_cnt,
+            "total": tot_cnt,
+            "grade": grade,
+            "detail": " · ".join(badge_parts) if badge_parts else "학습됨",
+        })
+
+    # Extract 'none' misfires_per_min
+    none_pg = ((card.get("per_gesture") or {}).get("none")) or {}
+    mpm = none_pg.get("misfires_per_min")
+    if mpm is None and spec_map:
+        mpm_vals = [
+            float(((sc.get("per_gesture") or {}).get("none") or {}).get("misfires_per_min"))
+            for sc in spec_map.values()
+            if isinstance(((sc.get("per_gesture") or {}).get("none") or {}).get("misfires_per_min"), (int, float))
+        ]
+        if mpm_vals:
+            mpm = round(sum(mpm_vals), 2)
+
+    avg_rate = round(sum(rate_vals) / len(rate_vals), 1) if rate_vals else None
+    avg_fit = round(sum(fit_vals) / len(fit_vals), 1) if fit_vals else None
+    mpm_out = round(float(mpm), 2) if isinstance(mpm, (int, float)) else None
+    return rows, avg_rate, avg_fit, mpm_out
+
+
+def list_available_onnx_models(
+    model: Path = MODEL,
+    backup_dir: Path = BACKUP_DIR,
+    export_dir: Path = EXPORT_DIR,
+) -> List[Dict[str, Any]]:
+    """List all selectable ONNX models (Composite Hybrid, Main TCN, each Specialist ONNX in `models/gestures/`, Backups, Exports)."""
+    from src.gesture_models import read_bank
+
+    model = Path(model)
+    card_path = model.with_suffix(".json")
+    bank_dir = model.parent / "gestures"
+    active_sel = get_active_onnx_selection(model)
+    active_id = str(active_sel.get("id") or "composite:active")
+
+    has_main = model.is_file() and card_path.is_file()
+    main_card: Dict[str, Any] = {}
+    if has_main:
+        try:
+            main_card = json.loads(card_path.read_text(encoding="utf-8"))
+        except Exception:
+            main_card = {}
+
+    sp_path = model.parent / "spatial_mlp.json"
+    if sp_path.is_file():
+        try:
+            sp_doc = json.loads(sp_path.read_text(encoding="utf-8"))
+            main_card["spatial_mlp_live"] = dict(sp_doc.get("metadata") or {})
+        except Exception:
+            pass
+
+    bank_entries = read_bank(bank_dir) if (bank_dir / "manifest.json").is_file() else {}
+    spec_cards: Dict[str, Dict[str, Any]] = {}
+    for lbl, entry in bank_entries.items():
+        c_file = bank_dir / entry.get("card", "")
+        if c_file.is_file():
+            try:
+                spec_cards[lbl] = json.loads(c_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+    items: List[Dict[str, Any]] = []
+
+    # 1. Composite Hybrid (Main TCN + Specialist ONNX Bank + Spatial MLP)
+    if has_main or spec_cards:
+        g_rows, avg_rate, avg_fit, mpm = _build_onnx_card_gesture_rates(
+            main_card, specialists=spec_cards, use_specialists=True
+        )
+        data_files: List[str] = []
+        for d in main_card.get("data") or []:
+            if isinstance(d, dict) and d.get("file") and d["file"] not in data_files:
+                data_files.append(str(d["file"]))
+        for sc in spec_cards.values():
+            for d in sc.get("data") or []:
+                if isinstance(d, dict) and d.get("file") and d["file"] not in data_files:
+                    data_files.append(str(d["file"]))
+
+        g_names = [r["name"] for r in g_rows]
+        t_keys: List[str] = []
+        for r in g_rows:
+            for tk in r.get("task_keys") or [r["key"]]:
+                if tk in BY_KEY and BY_KEY[tk].label != "none" and tk not in t_keys:
+                    t_keys.append(tk)
+
+        rate_badge = f"평균 인식 {avg_rate:.0f}%" if avg_rate is not None else (f"평균 학습일치 {avg_fit:.0f}%" if avg_fit is not None else "평가 대기")
+        mpm_badge = f" · 이동오작동 {mpm:.1f}회/분" if mpm is not None else ""
+        items.append({
+            "id": "composite:active",
+            "title": f"[통합 하이브리드]gesture_tcn.onnx + 전용 ONNX {len(spec_cards)}종 ({len(g_rows)}개 동작 · {rate_badge})",
+            "short_title": f"통합 하이브리드 ({len(g_rows)}종 동작)",
+            "kind": "composite",
+            "onnx_path": str(model),
+            "active": active_id == "composite:active",
+            "trained_at": str(main_card.get("trained") or ""),
+            "classes": [r["label"] for r in g_rows],
+            "gesture_names": g_names,
+            "trainable_keys": t_keys,
+            "avg_rate_pct": avg_rate,
+            "avg_fit_pct": avg_fit,
+            "misfires_per_min": mpm,
+            "gesture_rates": g_rows,
+            "data_files": data_files,
+            "summary": f"메인 TCN과 동작별 전용 ONNX {len(spec_cards)}개를 결합한 권장 모델 · {rate_badge}{mpm_badge}",
+        })
+
+    # 2. Standalone Main TCN (`models/gesture_tcn.onnx`)
+    if has_main:
+        g_rows, avg_rate, avg_fit, mpm = _build_onnx_card_gesture_rates(
+            main_card, specialists=None, use_specialists=False
+        )
+        data_files = [
+            str(d["file"])
+            for d in (main_card.get("data") or [])
+            if isinstance(d, dict) and d.get("file")
+        ]
+        t_keys = []
+        for r in g_rows:
+            for tk in r.get("task_keys") or [r["key"]]:
+                if tk in BY_KEY and BY_KEY[tk].label != "none" and tk not in t_keys:
+                    t_keys.append(tk)
+        rate_badge = f"평균 인식 {avg_rate:.0f}%" if avg_rate is not None else (f"평균 학습일치 {avg_fit:.0f}%" if avg_fit is not None else "평가 대기")
+        items.append({
+            "id": "main:gesture_tcn.onnx",
+            "title": f"[메인 단독 ONNX] models/gesture_tcn.onnx ({len(g_rows)}개 동작 · {rate_badge})",
+            "short_title": "gesture_tcn.onnx (메인 단독)",
+            "kind": "main_only",
+            "onnx_path": str(model),
+            "active": active_id == "main:gesture_tcn.onnx",
+            "trained_at": str(main_card.get("trained") or ""),
+            "classes": [r["label"] for r in g_rows],
+            "gesture_names": [r["name"] for r in g_rows],
+            "trainable_keys": t_keys,
+            "avg_rate_pct": avg_rate,
+            "avg_fit_pct": avg_fit,
+            "misfires_per_min": mpm,
+            "gesture_rates": g_rows,
+            "data_files": data_files,
+            "summary": f"전용 뱅크 없이 메인 gesture_tcn.onnx 단독 추론 · {rate_badge} ({main_card.get('trained', '')})",
+        })
+
+    # 3. Individual Specialist ONNX files in `models/gestures/*.onnx`
+    if bank_dir.is_dir():
+        for onnx_file in sorted(bank_dir.glob("*.onnx")):
+            c_file = onnx_file.with_suffix(".json")
+            if not c_file.is_file():
+                continue
+            try:
+                sc = json.loads(c_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            g_rows, avg_rate, avg_fit, mpm = _build_onnx_card_gesture_rates(
+                sc, specialists=None, use_specialists=False
+            )
+            data_files = [
+                str(d["file"])
+                for d in (sc.get("data") or [])
+                if isinstance(d, dict) and d.get("file")
+            ]
+            lbl = g_rows[0]["label"] if g_rows else onnx_file.stem
+            disp_name = _LABEL_DISPLAY_NAMES.get(lbl, NAMES.get(lbl, lbl))
+            t_keys = [k for k, t in BY_KEY.items() if t.label == lbl and t.label != "none"]
+            if not t_keys and lbl in BY_KEY:
+                t_keys = [lbl]
+            item_id = f"specialist:{onnx_file.name}"
+            rate_badge = f"인식 {avg_rate:.0f}%" if avg_rate is not None else (f"학습일치 {avg_fit:.0f}%" if avg_fit is not None else "학습됨")
+            items.append({
+                "id": item_id,
+                "title": f"[전용 ONNX] gestures/{onnx_file.name} — {disp_name} ({rate_badge})",
+                "short_title": f"{onnx_file.name} ({disp_name})",
+                "kind": "specialist",
+                "onnx_path": str(onnx_file),
+                "active": active_id == item_id,
+                "trained_at": str(sc.get("trained") or ""),
+                "classes": [r["label"] for r in g_rows],
+                "gesture_names": [r["name"] for r in g_rows],
+                "trainable_keys": t_keys,
+                "avg_rate_pct": avg_rate,
+                "avg_fit_pct": avg_fit,
+                "misfires_per_min": mpm,
+                "gesture_rates": g_rows,
+                "data_files": data_files,
+                "summary": f"'{disp_name}' 전용 단일 ONNX 모델 ({onnx_file.name}) · {rate_badge} · 학습일시 {sc.get('trained', '-')}",
+            })
+
+    # 4. Backups & Exports with ONNX models
+    for bak in list_model_backups(backup_dir=backup_dir, export_dir=export_dir)[:8]:
+        folder = Path(bak["path"])
+        bak_onnx = folder / "gesture_tcn.onnx"
+        bak_rep = model_report(bak_onnx)
+        if not bak_rep:
+            continue
+        g_rows, avg_rate, avg_fit, mpm = _build_onnx_card_gesture_rates(
+            bak_rep, specialists=bak_rep.get("specialists"), use_specialists=True
+        )
+        data_files = [
+            str(d["file"])
+            for d in (bak_rep.get("data") or [])
+            if isinstance(d, dict) and d.get("file")
+        ]
+        t_keys = []
+        for r in g_rows:
+            for tk in r.get("task_keys") or [r["key"]]:
+                if tk in BY_KEY and BY_KEY[tk].label != "none" and tk not in t_keys:
+                    t_keys.append(tk)
+        kind_ko = "내보내기 패키지" if bak["source"] == "export" else "백업 스냅샷"
+        rate_badge = f"평균 인식 {avg_rate:.0f}%" if avg_rate is not None else f"{len(g_rows)}개 동작"
+        items.append({
+            "id": bak["id"],
+            "title": f"[{kind_ko}] {bak['name']} ({rate_badge} · {bak['created']})",
+            "short_title": f"{bak['name']} ({kind_ko})",
+            "kind": bak["source"],
+            "onnx_path": str(bak_onnx),
+            "active": active_id == bak["id"],
+            "trained_at": str(bak["created"]),
+            "classes": [r["label"] for r in g_rows],
+            "gesture_names": [r["name"] for r in g_rows],
+            "trainable_keys": t_keys,
+            "avg_rate_pct": avg_rate,
+            "avg_fit_pct": avg_fit,
+            "misfires_per_min": mpm,
+            "gesture_rates": g_rows,
+            "data_files": data_files,
+            "summary": f"{kind_ko} ({bak['reason']}) · {rate_badge} · 생성 {bak['created']}",
+        })
+
+    for it in items:
+        prefix = "★ [실사용 중] " if it.get("active") else ""
+        it["combo_label"] = prefix + str(it.get("title") or it.get("id"))
+        avg_r = it.get("avg_rate_pct")
+        avg_f = it.get("avg_fit_pct")
+        ov_pct = avg_r if isinstance(avg_r, (int, float)) else (avg_f if isinstance(avg_f, (int, float)) else 0.0)
+        it["overall_rate"] = round(float(ov_pct) / 100.0, 4)
+        it["description"] = str(it.get("summary") or "")
+        tks = list(it.get("trainable_keys") or [])
+        it["trainable_key"] = tks[0] if len(tks) == 1 else "all"
+
+    return items
+
+
+def activate_onnx_model(
+    model_id: str,
+    model: Path = MODEL,
+    backup_dir: Path = BACKUP_DIR,
+    export_dir: Path = EXPORT_DIR,
+) -> Dict[str, Any]:
+    """Activate the user-selected ONNX model for live runtime gesture recognition & simulator inspection."""
+    model = Path(model)
+    sel_file = model.parent / "active_onnx_selection.json"
+    sel_file.parent.mkdir(parents=True, exist_ok=True)
+    target_id = str(model_id or "composite:active").strip()
+
+    if target_id in ("", "composite:active"):
+        payload = {
+            "mode": "composite",
+            "id": "composite:active",
+            "path": str(model),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        sel_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            **payload,
+            "message": "통합 하이브리드 ONNX 모델(메인 TCN + 동작별 전용 ONNX 뱅크)을 실사용 모델로 불러왔습니다.",
+        }
+
+    if target_id == "main:gesture_tcn.onnx":
+        if not model.is_file():
+            raise FileNotFoundError(f"메인 ONNX 파일이 없습니다: {model}")
+        payload = {
+            "mode": "main_only",
+            "id": "main:gesture_tcn.onnx",
+            "path": str(model),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        sel_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            **payload,
+            "message": "메인 단독 ONNX 모델(models/gesture_tcn.onnx)을 실사용 모델로 불러왔습니다.",
+        }
+
+    if target_id.startswith("specialist:"):
+        fname = Path(target_id.split(":", 1)[1]).name
+        spec_path = model.parent / "gestures" / fname
+        if not spec_path.is_file():
+            raise FileNotFoundError(f"전용 ONNX 파일을 찾을 수 없습니다: {spec_path}")
+        payload = {
+            "mode": "single_onnx",
+            "id": target_id,
+            "path": str(spec_path),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        sel_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            **payload,
+            "message": f"개별 동작 전용 ONNX 모델(gestures/{fname})을 단독 실사용 모델로 불러왔습니다.",
+        }
+
+    if target_id.startswith("backup:") or target_id.startswith("export:"):
+        backup_current_model(model=model, backup_dir=backup_dir, reason="before-switch")
+        res = restore_model_backup(target_id, model=model, backup_dir=backup_dir, export_dir=export_dir)
+        payload = {
+            "mode": "composite",
+            "id": "composite:active",
+            "restored_from": target_id,
+            "path": str(model),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        sel_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            **payload,
+            "message": f"'{res['restored']}' ONNX 모델 패키지를 현재 활성 모델로 복원 및 적용했습니다.",
+        }
+
+    raise ValueError(f"지원하지 않는 ONNX 모델 ID입니다: {target_id}")
+
+
+def compute_model_spatial_spray(
+    model_id: str = "",
+    gesture_filter: str = "all",
+    rec_dir: Path = REC_DIR,
+    model: Path = MODEL,
+    backup_dir: Path = BACKUP_DIR,
+    export_dir: Path = EXPORT_DIR,
+) -> Dict[str, Any]:
+    """Compute 2D screen-space spray/heatmap distribution showing where on the screen the selected ONNX model
+    was trained to recognize gestures well (density + recognition quality across a 16x10 normalized grid)."""
+    import math
+    from src.recorder import finished_recordings
+
+    folder = Path(rec_dir)
+    models = list_available_onnx_models(model=model, backup_dir=backup_dir, export_dir=export_dir)
+    selected_entry: Optional[Dict[str, Any]] = None
+    if model_id:
+        for m in models:
+            if m["id"] == model_id:
+                selected_entry = m
+                break
+    if selected_entry is None and models:
+        selected_entry = next((m for m in models if m.get("active")), models[0])
+
+    trained_classes = list((selected_entry or {}).get("classes") or [])
+    g_rates_list = list((selected_entry or {}).get("gesture_rates") or [])
+    rate_by_label: Dict[str, float] = {}
+    for gr in g_rates_list:
+        lbl = str(gr.get("label") or "")
+        sc = gr.get("score_pct")
+        if lbl:
+            rate_by_label[lbl] = max(0.25, min(1.0, float(sc) / 100.0)) if isinstance(sc, (int, float)) and sc > 0 else 0.75
+
+    data_files = list((selected_entry or {}).get("data_files") or [])
+    complete_paths, _ = finished_recordings(folder) if folder.is_dir() else ([], [])
+    by_name = {p.name: p for p in complete_paths}
+
+    if data_files:
+        used_paths = [by_name[fn] for fn in data_files if fn in by_name]
+        if not used_paths:
+            used_paths = filter_selected_recording_paths(complete_paths, folder)
+    else:
+        used_paths = filter_selected_recording_paths(complete_paths, folder)
+
+    norm_filter = str(gesture_filter or "all").strip()
+    if norm_filter in BY_KEY and BY_KEY[norm_filter].label != "none":
+        norm_filter = BY_KEY[norm_filter].label
+
+    # Aggregate 16x10 grid: (gx, gy) -> {frames, weighted_quality, sx, sy, per_label_frames}
+    cell_map: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    per_gesture_totals: Dict[str, int] = defaultdict(int)
+    zone_3x3_counts: Dict[str, int] = defaultdict(int)
+
+    for rp in used_paths:
+        bins_by_lbl = _get_file_spatial_bins(rp)
+        for lbl, cell_rows in bins_by_lbl.items():
+            if lbl == "none":
+                continue
+            if trained_classes and lbl not in trained_classes:
+                continue
+            for row in cell_rows:
+                if not isinstance(row, list) or len(row) < 5:
+                    continue
+                gx, gy, cnt, cx, cy = int(row[0]), int(row[1]), int(row[2]), float(row[3]), float(row[4])
+                if cnt <= 0:
+                    continue
+                per_gesture_totals[lbl] += cnt
+                if norm_filter not in ("", "all") and lbl != norm_filter:
+                    continue
+                c_entry = cell_map.get((gx, gy))
+                if c_entry is None:
+                    c_entry = {
+                        "frames": 0,
+                        "quality_sum": 0.0,
+                        "sx": 0.0,
+                        "sy": 0.0,
+                        "by_label": defaultdict(int),
+                    }
+                    cell_map[(gx, gy)] = c_entry
+                g_qual = rate_by_label.get(lbl, 0.8)
+                c_entry["frames"] += cnt
+                c_entry["quality_sum"] += cnt * g_qual
+                c_entry["sx"] += cnt * cx
+                c_entry["sy"] += cnt * cy
+                c_entry["by_label"][lbl] += cnt
+                zone_3x3_counts[_classify_screen_zone(cx, cy)] += cnt
+
+    total_frames = sum(c["frames"] for c in cell_map.values())
+    max_cell_frames = max((c["frames"] for c in cell_map.values()), default=0)
+
+    cells_out: List[Dict[str, Any]] = []
+    for (gx, gy), c in sorted(cell_map.items()):
+        cnt = int(c["frames"])
+        if cnt <= 0 or max_cell_frames <= 0:
+            continue
+        cx = round(c["sx"] / cnt, 4)
+        cy = round(c["sy"] / cnt, 4)
+        linear_ratio = cnt / max_cell_frames
+        # Smooth log/sqrt blend so spray density shows both high-concentration cores and soft outer mist
+        density = round(min(1.0, 0.45 * linear_ratio + 0.55 * math.sqrt(linear_ratio)), 3)
+        qual = round(max(0.0, min(1.0, c["quality_sum"] / cnt)), 3)
+        dom_lbl = max(c["by_label"].items(), key=lambda kv: kv[1])[0]
+        dom_name = _LABEL_DISPLAY_NAMES.get(dom_lbl, NAMES.get(dom_lbl, dom_lbl))
+        cells_out.append({
+            "gx": gx,
+            "gy": gy,
+            "x": cx,
+            "y": cy,
+            "cx": cx,
+            "cy": cy,
+            "frames": cnt,
+            "density": density,
+            "quality": qual,
+            "dominant_label": dom_lbl,
+            "dominant_name": dom_name,
+            "zone": _classify_screen_zone(cx, cy),
+        })
+
+    # Build 3x3 zone summary and blindspot hints
+    all_9_zones = list(_SCREEN_ZONE_LABELS.values())
+    covered_zones = [z for z, c in sorted(zone_3x3_counts.items(), key=lambda kv: kv[1], reverse=True) if c > 0]
+    blind_zones = [z for z in all_9_zones if zone_3x3_counts.get(z, 0) < max(5, int(total_frames * 0.02))]
+    coverage_pct = int(round(100.0 * len(covered_zones) / 9.0)) if total_frames > 0 else 0
+
+    top_zone_parts = [
+        f"{z} {int(round(100.0 * zone_3x3_counts[z] / total_frames))}%"
+        for z in covered_zones[:3]
+    ] if total_frames > 0 else []
+
+    filter_Options: List[Dict[str, Any]] = [
+        {"key": "all", "name": f"전체 동작 ({sum(per_gesture_totals.values())}프레임)"}
+    ]
+    for lbl in (trained_classes or sorted(per_gesture_totals.keys())):
+        if lbl == "none":
+            continue
+        cnt = int(per_gesture_totals.get(lbl, 0))
+        disp = _LABEL_DISPLAY_NAMES.get(lbl, NAMES.get(lbl, lbl))
+        r_pct = rate_by_label.get(lbl)
+        r_str = f" · 인식 {r_pct * 100:.0f}%" if r_pct is not None else ""
+        filter_Options.append({
+            "key": lbl,
+            "name": f"{disp} ({cnt}f{r_str})",
+            "frames": cnt,
+        })
+
+    if total_frames > 0:
+        hotspot_str = " · ".join(top_zone_parts)
+        blind_str = (
+            f" | 학습 부족 영역: {', '.join(blind_zones[:3])}" + (f" 외 {len(blind_zones) - 3}곳" if len(blind_zones) > 3 else "")
+            if blind_zones
+            else " | 9개 화면 영역 고르게 학습됨"
+        )
+        headline = f"집중 학습 영역: {hotspot_str} (화면 {len(covered_zones)}/9영역 · 총 {total_frames}프레임){blind_str}"
+    else:
+        headline = "선택한 조건에 해당하는 화면 위치별 동작 학습 데이터가 아직 없습니다."
+
+    return {
+        "model_id": (selected_entry or {}).get("id", "composite:active"),
+        "model_title": (selected_entry or {}).get("short_title", "통합 하이브리드"),
+        "gesture_filter": norm_filter or "all",
+        "grid_w": 16,
+        "grid_h": 10,
+        "total_frames": total_frames,
+        "max_cell_frames": max_cell_frames,
+        "coverage_pct": coverage_pct,
+        "covered_zone_count": len(covered_zones),
+        "hotspot_zones": top_zone_parts,
+        "blind_zones": blind_zones,
+        "headline": headline,
+        "cells": cells_out,
+        "filter_options": filter_Options,
     }
 
 
@@ -1837,6 +3520,9 @@ def _build_playback_frames(
             "do": f"동작 수행 중" + (f" (#{rep_num}회차)" if rep_num > 0 else ""),
             "rest": "동작 사이 휴식/대기",
             "prepare": "자세 준비 구간",
+            "prep": "자세 준비 구간",
+            "waiting": "다음 세트 시작 대기 (Space 키 대기 구간)",
+            "paused": "녹화 일시정지 구간",
             "free": "자유 이동 (오작동 방지)",
             "use": "일반 마우스 사용",
         }.get(phase, phase or "대기")
@@ -1921,10 +3607,20 @@ def _build_playback_frames(
             "pose_joints": pose_joints,
             "active_arm": active_arm,
             "task": task_lbl,
-            "task_name": NAMES.get(task_lbl, "중립/이동" if task_lbl in ("none", "idle", "") else task_lbl),
+            "task_name": NAMES.get(
+                task_lbl,
+                "세트 전환 대기"
+                if (task_lbl == "idle" or phase in ("waiting", "paused"))
+                else ("중립/이동" if task_lbl in ("none", "") else task_lbl),
+            ),
             "condition": condition_str,
             "target": target_lbl,
-            "target_name": NAMES.get(target_lbl, "중립/이동" if target_lbl in ("none", "idle", "") else target_lbl),
+            "target_name": NAMES.get(
+                target_lbl,
+                "세트 전환 대기"
+                if (target_lbl == "idle" or phase in ("waiting", "paused"))
+                else ("중립/이동" if target_lbl in ("none", "") else target_lbl),
+            ),
             "phase": phase,
             "phase_ko": phase_ko,
             "rep": rep_num,
@@ -1953,8 +3649,9 @@ def simulate_model_on_recording(
     model: Path = MODEL,
     *,
     use_cleaned: bool = True,
+    model_id: str = "",
 ) -> Dict[str, Any]:
-    """Replay a recorded session through the current trained model (and specialist bank) vs. recorded rules."""
+    """Replay a recorded session through the selected ONNX model (or current composite model) vs. recorded rules."""
     import numpy as np
     from src.capture_dataset import CLASSES, load_sessions, resolve_cleaned_path
     from src.gesture_gate import DEFAULT_THRESHOLD
@@ -1972,7 +3669,26 @@ def simulate_model_on_recording(
     using_cleaned = sim_path.resolve() != path.resolve()
     _, raw_frames, _ = read_session(sim_path)
 
-    card_path = model.with_suffix(".json")
+    effective_model = Path(model)
+    sel_id = str(model_id or "").strip()
+    if not sel_id and effective_model.resolve() == MODEL.resolve():
+        sel_id = str(get_active_onnx_selection(effective_model).get("id") or "composite:active")
+
+    sim_mode = "composite"
+    if sel_id == "main:gesture_tcn.onnx":
+        sim_mode = "main_only"
+    elif sel_id.startswith("specialist:"):
+        sim_mode = "single_onnx"
+        fname = Path(sel_id.split(":", 1)[1]).name
+        effective_model = effective_model.parent / "gestures" / fname
+    elif sel_id.startswith("backup:") or sel_id.startswith("export:"):
+        kind_part, f_name = sel_id.split(":", 1)
+        b_root = EXPORT_DIR if kind_part == "export" else BACKUP_DIR
+        b_cand = b_root / Path(f_name).name / "gesture_tcn.onnx"
+        if b_cand.parent.is_dir():
+            effective_model = b_cand
+
+    card_path = effective_model.with_suffix(".json")
     win = 15
     if card_path.is_file():
         try:
@@ -1999,18 +3715,18 @@ def simulate_model_on_recording(
         }
     session = sessions[0]
 
-    bank_dir = model.parent / "gestures"
+    bank_dir = effective_model.parent / "gestures" if sim_mode != "single_onnx" else effective_model.parent
     base_pred = None
     info: Dict[str, Any] = {"classes": ["none"], "window": win, "feature_version": FEATURE_VERSION}
     disabled: set[str] = set()
-    if model.is_file() and card_path.is_file():
+    if effective_model.is_file() and card_path.is_file():
         try:
-            base_pred, info = load_single(model, FEATURE_VERSION)
-            disabled = set(info.get("disabled_gestures") or ())
+            base_pred, info = load_single(effective_model, FEATURE_VERSION)
+            disabled = set(info.get("disabled_gestures") or ()) if sim_mode != "single_onnx" else set()
         except Exception:
             base_pred = None
 
-    specialists = read_bank(bank_dir) if (bank_dir / "manifest.json").is_file() else {}
+    specialists = read_bank(bank_dir) if (sim_mode == "composite" and (bank_dir / "manifest.json").is_file()) else {}
     if base_pred is None and not specialists:
         pb_frames = _build_playback_frames(
             raw_frames, session.get("features"), None, {}, DEFAULT_THRESHOLD, eval_info.get("issues", [])
@@ -2032,7 +3748,10 @@ def simulate_model_on_recording(
 
     if base_pred is None:
         base_pred = lambda _x: np.array([1.0], dtype=np.float64)
-    predict_one, merged_info = compose_predictor(model, base_pred, info)
+    if sim_mode == "composite":
+        predict_one, merged_info = compose_predictor(effective_model, base_pred, info)
+    else:
+        predict_one, merged_info = base_pred, dict(info)
     active_classes = list(merged_info.get("classes", []))
     threshold = float(merged_info.get("threshold", DEFAULT_THRESHOLD))
     thresholds_by_label = dict(merged_info.get("thresholds") or {})
@@ -2053,14 +3772,28 @@ def simulate_model_on_recording(
         if lbl in CLASSES and lbl not in specialists:
             probs[:, CLASSES.index(lbl)] = 0.0
 
-    # Blend 0-lag 96-dim Spatial MLP if models/spatial_mlp.json is available
-    sp_file = model.parent / "spatial_mlp.json"
-    if sp_file.is_file():
+    # Blend 0-lag 96-dim Spatial MLP (+ per-gesture specialist MLPs) if available
+    sp_file = effective_model.parent / "spatial_mlp.json" if sim_mode != "single_onnx" else effective_model.parent.parent / "spatial_mlp.json"
+    if sp_file.is_file() or (bank_dir / "manifest.json").is_file() or sim_mode == "single_onnx":
         try:
-            from src.spatial_mlp import SpatialMlpModel, blend_tcn_and_spatial_probs, ensure_session_spatial_features
-            sp_model = SpatialMlpModel.load(sp_file)
+            from src.spatial_mlp import (
+                SpatialMlpModel,
+                blend_tcn_and_spatial_probs,
+                compose_spatial_mlp,
+                ensure_session_spatial_features,
+            )
+            sp_model = None
+            if sim_mode == "single_onnx":
+                sp_dict = info.get("spatial_mlp")
+                if isinstance(sp_dict, dict):
+                    sp_model = SpatialMlpModel.from_dict(sp_dict)
+            elif sim_mode == "main_only":
+                sp_model = SpatialMlpModel.load(sp_file) if sp_file.is_file() else None
+            else:
+                base_sp = SpatialMlpModel.load(sp_file) if sp_file.is_file() else None
+                sp_model = compose_spatial_mlp(effective_model, base_sp)
             s_feats = ensure_session_spatial_features(session)
-            if len(s_feats) == n_frames:
+            if sp_model is not None and len(s_feats) == n_frames:
                 sp_probs = sp_model.predict_proba(s_feats)
                 probs = blend_tcn_and_spatial_probs(probs, CLASSES, sp_probs, sp_model.classes)
                 for lbl in disabled:
@@ -2078,12 +3811,14 @@ def simulate_model_on_recording(
     # Identify contiguous positive action blocks (or distinct label["rep"] runs)
     rep_blocks: List[List[int]] = []
     cur_block: List[int] = []
-    cur_key: Optional[Tuple[int, Any]] = None
+    cur_key: Optional[Tuple[int, Any, Any]] = None
     for i in range(n_frames):
         cls_id = int(y[i])
         if cls_id > 0:
-            lab_rep = (frames[i].get("label") or {}).get("rep")
-            key = (cls_id, lab_rep)
+            lab_f = frames[i].get("label") or {}
+            lab_set = lab_f.get("set")
+            lab_rep = lab_f.get("rep")
+            key = (cls_id, lab_set, lab_rep)
             if cur_block and key == cur_key:
                 cur_block.append(i)
             else:
@@ -2091,6 +3826,13 @@ def simulate_model_on_recording(
                     rep_blocks.append(cur_block)
                 cur_block = [i]
                 cur_key = key
+        elif cur_block and cur_key is not None and cur_key[2] is not None:
+            lab_f = frames[i].get("label") or {}
+            if lab_f.get("phase") == "do" and lab_f.get("set") == cur_key[1] and lab_f.get("rep") == cur_key[2]:
+                continue
+            rep_blocks.append(cur_block)
+            cur_block = []
+            cur_key = None
         else:
             if cur_block:
                 rep_blocks.append(cur_block)
@@ -2112,7 +3854,9 @@ def simulate_model_on_recording(
         peak_p = float(probs[idx, cls_id].max())
         mean_p = float(probs[idx, cls_id].mean())
         model_hit = peak_p >= lbl_thr
-        rule_hit = any(lbl in _extract_rule_targets(frames[i].get("rule")) for i in idx)
+        rep_s = max(0, idx[0] - 12)
+        rep_e = min(n_frames, idx[-1] + 5)
+        rule_hit = any(lbl in _extract_rule_targets(frames[i].get("rule")) for i in range(rep_s, rep_e))
         t_rel = round(float(frames[idx[0]].get("t", t0)) - t0, 1)
         per_label_reps[lbl]["total"] += 1
         if model_hit:
@@ -2191,7 +3935,22 @@ def simulate_model_on_recording(
                 best_p = p_val
                 best_cls = CLASSES[ci]
         target_ids = [int(v) for v in y[s_i:e_i] if int(v) > 0]
-        target_lbl = CLASSES[target_ids[0]] if target_ids and target_ids[0] < len(CLASSES) else "none"
+        if target_ids and target_ids[0] < len(CLASSES):
+            target_lbl = CLASSES[target_ids[0]]
+        else:
+            raw_do_targets = [
+                str((frames[fi].get("label") or {}).get("target") or "")
+                for fi in range(s_i, e_i)
+                if (frames[fi].get("label") or {}).get("phase") == "do"
+                and str((frames[fi].get("label") or {}).get("target") or "") in CLASSES
+                and str((frames[fi].get("label") or {}).get("target") or "") != "none"
+            ]
+            if raw_do_targets:
+                target_lbl = raw_do_targets[0]
+            elif any(int(v) == 0 for v in y[s_i:e_i]):
+                target_lbl = "none"
+            else:
+                target_lbl = "idle"
         lbl_thr = float(thresholds_by_label.get(best_cls, threshold))
         timeline.append({
             "bin": b,
@@ -2199,7 +3958,11 @@ def simulate_model_on_recording(
             "predicted": best_cls if best_p >= lbl_thr else "none",
             "predicted_name": NAMES.get(best_cls, best_cls) if best_p >= lbl_thr else "중립",
             "target": target_lbl,
-            "target_name": NAMES.get(target_lbl, target_lbl) if target_lbl != "none" else "이동/중립",
+            "target_name": (
+                "세트 전환 대기"
+                if target_lbl == "idle"
+                else (NAMES.get(target_lbl, target_lbl) if target_lbl != "none" else "이동/중립")
+            ),
             "confirmed": best_p >= lbl_thr,
         })
 
@@ -2250,6 +4013,85 @@ def simulate_model_on_recording(
         "playback_frames": pb_frames,
         "quality": eval_info,
         "augmentation": eval_info["augmentation"],
+    }
+
+
+def evaluate_gesture_judgment(
+    gesture_key: str,
+    rec_dir: Path = REC_DIR,
+    model: Path = MODEL,
+) -> Dict[str, Any]:
+    """Run rule + AI model judgment verification across recordings of a specific gesture."""
+    task = BY_KEY.get(gesture_key)
+    if task is None:
+        return {"ok": False, "key": gesture_key, "summary": f"알 수 없는 동작: {gesture_key}"}
+    summary = dataset_summary(rec_dir=rec_dir, compute_quality=False)
+    matching = [
+        f
+        for f in sorted(
+            [f for f in summary.get("files", []) if "error" not in f and f.get("selected", True)],
+            key=lambda f: int(f.get("mtime", 0)),
+            reverse=True,
+        )
+        if (
+            sum((f.get("reps", {}).get(gesture_key) or {}).values()) > 0
+            or float((f.get("free_minutes") or {}).get(gesture_key, 0.0)) > 0.0
+            or gesture_key in (f.get("target_gestures") or [])
+        )
+    ]
+    if not matching:
+        return {
+            "ok": False,
+            "key": gesture_key,
+            "summary": f"'{task.name}' 동작이 포함된 녹화 파일이 없습니다.",
+        }
+    total_reps = 0
+    model_hits = 0
+    rule_hits = 0
+    false_fires = 0
+    file_notes: List[str] = []
+    latest_sim: Optional[Dict[str, Any]] = None
+    target_lbl = task.label
+    for f_info in matching[:5]:
+        fname = str(f_info["file"])
+        try:
+            sim = simulate_model_on_recording(fname, rec_dir=rec_dir, model=model, use_cleaned=True)
+            if latest_sim is None:
+                latest_sim = sim
+            g_entry = next((g for g in sim.get("gestures", []) if g.get("label") == target_lbl or g.get("key") == gesture_key), None)
+            if g_entry and int(g_entry.get("reps", 0)) > 0:
+                r_cnt = int(g_entry["reps"])
+                m_cnt = int(g_entry.get("model_hits", 0))
+                rl_cnt = int(g_entry.get("rule_hits", 0))
+                total_reps += r_cnt
+                model_hits += m_cnt
+                rule_hits += rl_cnt
+                false_fires += int(g_entry.get("false_fires", 0))
+                cond = str(f_info.get("target_conditions_text") or "").strip()
+                cond_tag = f"({cond})" if cond else ""
+                file_notes.append(f"{fname}{cond_tag}: AI {m_cnt}/{r_cnt} · 규칙 {rl_cnt}/{r_cnt}")
+        except Exception:
+            continue
+    if total_reps > 0:
+        m_pct = round(model_hits / total_reps * 100)
+        r_pct = round(rule_hits / total_reps * 100)
+        headline = (
+            f"[{task.name} 판정 검증] 최근 {len(file_notes)}개 녹화 총 {total_reps}회 — "
+            f"AI 모델 {model_hits}/{total_reps}회 ({m_pct}%) · 규칙 {rule_hits}/{total_reps}회 ({r_pct}%)"
+            + (f" · 오작동 {false_fires}회" if false_fires else "")
+        )
+    else:
+        headline = f"[{task.name} 판정 검증] 최근 녹화 {len(matching[:5])}개 점검 완료"
+    return {
+        "ok": True,
+        "key": gesture_key,
+        "latest_file": str(matching[0]["file"]),
+        "total_reps": total_reps,
+        "model_hits": model_hits,
+        "rule_hits": rule_hits,
+        "summary": headline,
+        "detail": " / ".join(file_notes[:3]),
+        "latest_sim": latest_sim,
     }
 
 
@@ -2357,28 +4199,38 @@ def run_app_diagnostics(
             "detail": "아직 학습된 gesture_tcn.onnx 모델이 없습니다.",
         })
 
-    # 3b. Spatial MLP (96-dim 0-lag posture model) live inference check
+    # 3b. Spatial MLP (96-dim 0-lag posture model + per-gesture specialist MLPs) live inference check
     sp_path = model.parent / "spatial_mlp.json"
-    if sp_path.is_file():
+    if sp_path.is_file() or (bank_dir / "manifest.json").is_file():
         try:
             import numpy as np
             from src.spatial_features import SPATIAL_FEATURES
-            from src.spatial_mlp import SpatialMlpModel
-            sp_model = SpatialMlpModel.load(sp_path)
-            sp_out = sp_model.predict_proba(np.zeros((1, SPATIAL_FEATURES), dtype=np.float32))
-            test_acc = sp_model.metadata.get("test_accuracy")
-            acc_str = f", 테스트 정확도 {test_acc:.1f}%" if isinstance(test_acc, (int, float)) else ""
-            if sp_out.shape == (1, len(sp_model.classes)) and np.isfinite(sp_out).all():
-                checks.append({
-                    "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
-                    "status": "ok",
-                    "detail": f"정상 추론 확인 (클래스 {len(sp_model.classes)}개, 은닉층 {sp_model.hidden_units}{acc_str})",
-                })
+            from src.spatial_mlp import SpatialMlpModel, compose_spatial_mlp
+            base_sp = SpatialMlpModel.load(sp_path) if sp_path.is_file() else None
+            sp_model = compose_spatial_mlp(model, base_sp)
+            if sp_model is not None:
+                sp_out = sp_model.predict_proba(np.zeros((1, SPATIAL_FEATURES), dtype=np.float32))
+                test_acc = sp_model.metadata.get("test_accuracy")
+                acc_str = f", 테스트 정확도 {test_acc:.1f}%" if isinstance(test_acc, (int, float)) else ""
+                spec_cnt = len(sp_model.specialists)
+                spec_str = f", 동작별 전용 MLP {spec_cnt}개" if spec_cnt > 0 else ""
+                if sp_out.shape == (1, len(sp_model.classes)) and np.isfinite(sp_out).all():
+                    checks.append({
+                        "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
+                        "status": "ok",
+                        "detail": f"정상 추론 확인 (클래스 {len(sp_model.classes)}개, 은닉층 {sp_model.hidden_units}{spec_str}{acc_str})",
+                    })
+                else:
+                    checks.append({
+                        "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
+                        "status": "fail",
+                        "detail": f"비정상 출력 형태 감지: shape={sp_out.shape}",
+                    })
             else:
                 checks.append({
                     "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
-                    "status": "fail",
-                    "detail": f"비정상 출력 형태 감지: shape={sp_out.shape}",
+                    "status": "warn",
+                    "detail": "아직 학습된 models/spatial_mlp.json 모델이 없습니다.",
                 })
         except Exception as exc:
             checks.append({
@@ -2391,6 +4243,29 @@ def run_app_diagnostics(
             "name": "Spatial MLP 자세 모델 (96차원 0-지연 가드)",
             "status": "warn",
             "detail": "아직 학습된 models/spatial_mlp.json 모델이 없습니다.",
+        })
+
+    # 3c. GPU / CPU training compute capability check
+    gpu_cap = detect_gpu_training_capability()
+    eff_dev = resolve_effective_training_device(rec_dir= Path(rec_dir))
+    if gpu_cap.get("cuda_available"):
+        dev_mode_str = "GPU 가속 선택됨" if eff_dev == "gpu" else "CPU 학습 선택됨"
+        checks.append({
+            "name": "학습 연산 장치 (GPU / CPU)",
+            "status": "ok",
+            "detail": f"{gpu_cap.get('status_label')} · {dev_mode_str}",
+        })
+    elif gpu_cap.get("can_install_cuda_torch"):
+        checks.append({
+            "name": "학습 연산 장치 (GPU / CPU)",
+            "status": "warn",
+            "detail": f"{gpu_cap.get('status_label')} — 학습 센터에서 [GPU 가속 활성화]로 CUDA 사용 가능",
+        })
+    else:
+        checks.append({
+            "name": "학습 연산 장치 (GPU / CPU)",
+            "status": "ok",
+            "detail": f"{gpu_cap.get('status_label')} · CPU 학습 모드 사용 중",
         })
 
     # 4. Recordings & quality integrity check

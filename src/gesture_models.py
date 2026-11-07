@@ -118,7 +118,16 @@ def load_single(path, feature_version):
     window, features = info.get("window"), info.get("features")
     if not isinstance(window, int) or window < 1 or features != 133:
         raise ValueError("모델 입력 크기가 잘못됐습니다.")
-    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 2
+    sess_options.inter_op_num_threads = 1
+    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    try:
+        sess_options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        sess_options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    except Exception:
+        pass
+    session = ort.InferenceSession(str(path), sess_options=sess_options, providers=["CPUExecutionProvider"])
     inputs, outputs = session.get_inputs(), session.get_outputs()
     if (len(inputs) != 1 or len(inputs[0].shape) != 3 or inputs[0].shape[1:] != [window, features]
             or len(outputs) != 1 or len(outputs[0].shape) != 2 or outputs[0].shape[1] != len(classes)):

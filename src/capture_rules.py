@@ -11,7 +11,7 @@ class CaptureRules:
         self.token = None
 
     def observe(self, now, hand, result, label):
-        token = (label.get("task"), label.get("set"))
+        token = (label.get("task"), label.get("set"), label.get("rep"), label.get("phase") == "do")
         task = BY_KEY.get(label.get("task"))
         lm = hand.landmarks if hand else None
         if token != self.token:
@@ -30,6 +30,8 @@ class CaptureRules:
             if t.action and action == t.action:
                 if action == "drag_hold" and ((t.key == "thumb_index_middle") != (gesture == "thumb_index_middle_pinch")):
                     continue
+                targets.append(t.key)
+            elif label.get("phase") == "do" and t.key in ("thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle") and gesture == f"{t.key}_pinch":
                 targets.append(t.key)
         if self.toggle.update(now, lm):
             targets.append("v_sign")

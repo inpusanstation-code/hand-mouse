@@ -44,11 +44,13 @@ Dialog {
         id: seconds
         property string field
         property string label
+        property int minTenths: 0
+        property int maxTenths: 600
         Layout.fillWidth: true
         Caption { text: seconds.label }
         SpinBox {
             Layout.fillWidth: true
-            from: 5; to: 100; stepSize: 5; editable: true
+            from: seconds.minTenths; to: seconds.maxTenths; stepSize: 5; editable: true
             value: Math.round(dialog.editor.selected[seconds.field] * 10)
             textFromValue: function(value, locale) { return (value / 10).toLocaleString(locale, 'f', 1) }
             valueFromText: function(text, locale) { return Math.round(Number.fromLocaleString(locale, text) * 10) }
@@ -70,7 +72,7 @@ Dialog {
         RowLayout {
             Layout.fillWidth: true
             Caption { text: "추천안"; font.bold: true }
-            Button { text: "기본 3자세"; onClicked: dialog.editor.usePreset("basic") }
+            Button { text: "전체 화면 기본 3자세 (권장)"; onClicked: dialog.editor.usePreset("basic") }
             Button { text: "다양한 조건 9자세"; onClicked: dialog.editor.usePreset("diverse") }
             Button { text: "화면 위치 9곳"; onClicked: dialog.editor.usePreset("positions") }
             Item { Layout.fillWidth: true }
@@ -151,12 +153,28 @@ Dialog {
                     }
                     GridLayout {
                         Layout.fillWidth: true; columns: 2; columnSpacing: 12; rowSpacing: 10
-                        Choice { field: "orientation"; label: "손 방향" }
+                        Choice { field: "orientation"; label: "손 방향 (손목 회전/기울기)" }
                         Choice { field: "position"; label: "화면 위치 (미리보기 기준)" }
                         Choice { field: "distance"; label: "카메라와 손 사이 거리" }
                         Choice { field: "posture"; label: "몸 자세" }
                         Choice { field: "camera"; label: "카메라 각도" }
                         Choice { field: "lighting"; label: "조명" }
+                    }
+                    Rectangle {
+                        visible: dialog.editor.orientationGuide !== ""
+                        Layout.fillWidth: true
+                        implicitHeight: orientGuideLbl.implicitHeight + 16
+                        radius: 8
+                        color: "#EEFBF6"
+                        border.color: "#3BC49A"
+                        Caption {
+                            id: orientGuideLbl
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            text: "💡 자세 안내: " + dialog.editor.orientationGuide
+                            color: "#0F6E4F"
+                            font.pixelSize: 12
+                        }
                     }
                     TextField {
                         Layout.fillWidth: true
@@ -176,14 +194,14 @@ Dialog {
                             onValueModified: dialog.editor.setField("reps", value)
                             Accessible.name: "반복 횟수"
                         }
-                        Caption { text: "회 · 동작을 유지하다가 쉬기 안내에 맞춰 풀어주세요."; Layout.fillWidth: true; color: "#526575" }
+                        Caption { text: "회 · 준비·쉬기를 0초로 두면 원하는 동작만 끊김 없이 연속 녹화합니다."; Layout.fillWidth: true; color: "#526575" }
                     }
                     RowLayout {
                         visible: !dialog.editor.neutral
                         Layout.fillWidth: true
-                        Seconds { field: "prep"; label: "준비 (초)" }
-                        Seconds { field: "hold"; label: "동작 유지 (초)" }
-                        Seconds { field: "rest"; label: "쉬기 (초)" }
+                        Seconds { field: "prep"; label: "준비 (초)"; minTenths: 0; maxTenths: 100 }
+                        Seconds { field: "hold"; label: "동작 유지 (초)"; minTenths: 5; maxTenths: 600 }
+                        Seconds { field: "rest"; label: "쉬기 (초)"; minTenths: 0; maxTenths: 100 }
                     }
                     RowLayout {
                         visible: dialog.editor.neutral || dialog.editor.allGestures
@@ -198,7 +216,7 @@ Dialog {
                     }
                     Caption {
                         Layout.fillWidth: true
-                        text: "방향·거리·자세는 직접 맞춰주세요. 녹화 화면에 조건과 위치 안내가 표시됩니다. 손의 3D 관절을 놓치면 타이머가 멈추고, 다시 잡히면 이어집니다."
+                        text: "화면을 구역으로 나누지 않고 전체 화면(자유 이동)을 대상으로 녹화하며, 미리보기에 현재 모델이 학습된 영역이 색깔 음영(스프레이)으로 표시되어 부족한 영역을 자유롭게 채울 수 있습니다."
                         color: "#526575"; font.pixelSize: 12
                     }
                 }

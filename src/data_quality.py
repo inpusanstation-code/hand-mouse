@@ -660,6 +660,10 @@ def clean_recording(
     if not cleaned_frames and frames:
         cleaned_frames = [frames[i] for i in range(n) if not drop_mask[i]] or list(frames)
 
+    # Step 4.5: 5-finger anatomical occlusion & bidirectional pinch-continuity calibration
+    from src.finger_kinematics import reconstruct_hand_sequence
+    cleaned_frames, num_occlusion_calibrated = reconstruct_hand_sequence(cleaned_frames, in_place=True)
+
     # Step 5: Mask too-short disconnected 'do' stretches on the surviving frames
     m = len(cleaned_frames)
     i = 0
@@ -691,6 +695,8 @@ def clean_recording(
     cleaned_meta.pop("end", None)
     cleaned_meta["cleaned"] = True
     cleaned_meta["cleaned_from"] = src_path.name
+    cleaned_meta["occlusion_calibrated"] = True
+    cleaned_meta["occlusion_calibrated_frames"] = int(num_occlusion_calibrated)
     cleaned_meta["quality_score"] = round(float(report.score), 4)
     cleaned_meta["quality_status"] = report.status
 

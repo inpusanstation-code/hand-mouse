@@ -110,17 +110,31 @@ class QtDashboard(QObject):
         self.recording_editor = RecordingPlanEditor()
         self.recording_editor.startRequested.connect(self._start_focused_plan)
         self.model_version = 0                                  # +1 per newly trained model (runtime reloads the gate)
-        from src.training_center import TrainingJob, get_augmentation_settings, get_training_mode
+        from src.training_center import (
+            TrainingJob,
+            detect_gpu_training_capability,
+            get_augmentation_settings,
+            get_training_device,
+            get_training_mode,
+        )
         self.training_job = TrainingJob()
         self.training_rows = []                                 # one row per gesture (src/training_center.gesture_rows)
         self.training_files = []                                # per-file quality & selection rows
         self.model_backups = []                                 # restorable model snapshots & exports
+        self.onnx_models = []                                   # selectable ONNX models with per-gesture rates
+        self.selected_onnx_model_id = "composite:active"        # currently selected ONNX model ID in simulator
+        self.spatial_spray = {}                                 # 2D spatial heatmap/spray distribution for selected ONNX model
+        self.spray_gesture_filter = "all"                       # "all" or specific gesture label for spatial spray
+        self.training_improvement = {}                          # latest before-vs-after training improvement evaluation
         self.sim_result = {}                                    # latest simulator run result (lightweight header)
         self._sim_playback_frames = []                          # per-frame skeleton & event data kept in Python
         self.sim_eval = {}                                      # latest simulator data quality & calibration evaluation
         self.aug_settings = get_augmentation_settings()         # augmentation enabled / strength / factor settings
         saved_train_mode = self.preferences.value("trainingMode", "", type=str)
         self.training_mode = saved_train_mode if saved_train_mode in ("fast", "thorough") else get_training_mode()
+        self._gpu_cap = detect_gpu_training_capability()
+        saved_train_dev = self.preferences.value("trainingDevice", "", type=str)
+        self.training_device_pref = saved_train_dev if saved_train_dev in ("auto", "gpu", "cpu") else get_training_device()
         self.diag_result = {}                                   # latest app self-diagnostics result
         from tools import hub as hf_hub
         self.hub_config = hf_hub.load_hub_config()
@@ -128,6 +142,10 @@ class QtDashboard(QObject):
         self.training_info = ("", "")                           # (data line, model line)
         self.training_storage = ("", False)                     # (recordings size in git, past the split limit)
         self.training_busy = ""                                 # "읽는 중…" / "내보내는 중…"
+        self._task_title = ""                                   # active background task title
+        self._task_step = ""                                    # active background task detailed step
+        self._task_progress = -1.0                              # 0.0..1.0 when determinate, -1.0 when indeterminate
+        self._task_started = 0.0                                # unix timestamp when current busy task started
         self.training_note = ""
         self._training_was_running = False
         self.training_timer = QTimer()
@@ -452,9 +470,14 @@ class QtDashboard(QObject):
 
     @Slot()
     def toggleRecordingPause(self):
-        if self.rec_mode == "guided":
+        if self.rec_mode in ("guided", "free"):
             self.rec_paused = not self.rec_paused
             self.stateChanged.emit()
+
+    @Slot()
+    def handleSpaceKey(self):
+        """Control recording start/pause-resume with Spacebar during active recording, or toggle live mouse control."""
+        self.command(32)
 
     @Property(QObject, constant=True)
     def recordingPlan(self):
@@ -477,7 +500,10 @@ class QtDashboard(QObject):
         self.rec_mode = mode
         self.rec_focus = ""
         self.rec_plan = None
-        self.rec_paused = False
+        # Free mode starts paused so clicking with the mouse and raising the arm is not captured as training data
+        self.rec_paused = (mode == "free")
+        if mode != "off":
+            self._async_update_live_spray("all")
         self.stateChanged.emit()
 
     @Slot()
@@ -555,6 +581,22 @@ class QtDashboard(QObject):
         return self.rec_focus
 
     # ------------------------------------------------------------------ training center (src/training_center.py)
+    def _set_busy_task(self, title: str, step: str = "", progress: float = -1.0):
+        if title:
+            if not getattr(self, "training_busy", "") or getattr(self, "_task_started", 0.0) <= 0.0:
+                self._task_started = time.time()
+            self._task_title = str(title)
+            self._task_step = str(step or title)
+            self._task_progress = float(progress)
+            self.training_busy = f"{title} · {step}" if (step and step != title) else str(title)
+        else:
+            self._task_title = ""
+            self._task_step = ""
+            self._task_progress = -1.0
+            self._task_started = 0.0
+            self.training_busy = ""
+        self.trainingChanged.emit()
+
     @Slot()
     def openTraining(self):
         self.refreshTraining()
@@ -562,7 +604,7 @@ class QtDashboard(QObject):
 
     @Slot()
     def closeTraining(self):
-        if not self.training_job.running:
+        if not self.training_job.running and not self.training_busy:
             self.training_timer.stop()
 
     @Slot()
@@ -570,15 +612,16 @@ class QtDashboard(QObject):
         """Re-read recordings and the model's scores in the background (a new recording takes a few seconds)."""
         if self.training_busy:
             return
-        self.training_busy = "녹화 읽는 중…"
-        self.trainingChanged.emit()
+        self._set_busy_task("녹화 데이터 및 모델 성적 분석 중", "[1/4단계] 녹화 데이터셋 및 품질 요약 스캔 중…", 0.15)
 
         def work():
             from src import training_center as tc
             try:
                 summary = tc.dataset_summary()
+                self._set_busy_task("녹화 데이터 및 모델 성적 분석 중", "[2/4단계] 학습된 AI 모델 성적표 및 개선도 분석 중…", 0.42)
                 report = tc.model_report()
-                rows = tc.gesture_rows(summary, report)
+                improvement = tc.load_last_training_improvement()
+                rows = tc.gesture_rows(summary, report, improvement)
                 files = [f for f in summary["files"] if "error" not in f]
                 selected_files = [f for f in files if f.get("selected", True)]
                 frames = sum(f.get("frames", 0) for f in selected_files)
@@ -598,7 +641,9 @@ class QtDashboard(QObject):
                         mode_info = " · 빠른 학습(일부 자세 평가)"
                     elif rep_mode == "thorough" or (isinstance(rep_folds, list) and len(rep_folds) > 1):
                         mode_info = f" · 정밀 학습(자세 {len(rep_folds)}개 평가)"
-                    model = f"모델: {report.get('trained')} 학습 · 녹화 {len(report.get('data', []))}개로{mode_info}"
+                    rep_dev = str(report.get("training_device") or "")
+                    dev_info = " · GPU 학습" if rep_dev == "cuda" else (" · CPU 학습" if rep_dev == "cpu" else "")
+                    model = f"모델: {report.get('trained')} 학습 · 녹화 {len(report.get('data', []))}개로{mode_info}{dev_info}"
                 else:
                     model = "모델: 아직 없음 (학습하세요)"
 
@@ -658,9 +703,29 @@ class QtDashboard(QObject):
                         })
 
                 self.training_rows, self.training_info = rows, (data, model)
+                self.training_improvement = improvement
                 self.training_files = file_rows
+                self._set_busy_task("녹화 데이터 및 모델 성적 분석 중", "[3/4단계] ONNX 모델 목록 및 화면 영역별 스프레이 분포 계산 중…", 0.72)
                 self.model_backups = tc.list_model_backups()
+                self.onnx_models = tc.list_available_onnx_models()
+                valid_ids = {m["id"] for m in self.onnx_models}
+                if not getattr(self, "selected_onnx_model_id", "") or self.selected_onnx_model_id not in valid_ids:
+                    active_m = next((m for m in self.onnx_models if m.get("active")), None)
+                    self.selected_onnx_model_id = (
+                        active_m["id"]
+                        if active_m
+                        else (self.onnx_models[0]["id"] if self.onnx_models else "composite:active")
+                    )
+                try:
+                    self.spatial_spray = tc.compute_model_spatial_spray(
+                        model_id=self.selected_onnx_model_id,
+                        gesture_filter=getattr(self, "spray_gesture_filter", "all"),
+                    )
+                except Exception:
+                    pass
+                self._set_busy_task("녹화 데이터 및 모델 성적 분석 중", "[4/4단계] 연산 장치(GPU/CPU) 및 시뮬레이터 상태 갱신 중…", 0.92)
                 self.aug_settings = tc.get_augmentation_settings()
+                self._gpu_cap = tc.detect_gpu_training_capability()
                 if file_rows and not self.sim_eval.get("file"):
                     try:
                         self.sim_eval = tc.evaluate_recording_in_simulator(file_rows[0]["file"])
@@ -670,7 +735,7 @@ class QtDashboard(QObject):
                 self.training_storage = tc.storage_text(summary)
             except Exception as exc:
                 self.training_note = f"읽지 못했어요: {exc}"
-            self.training_busy = ""
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -703,13 +768,16 @@ class QtDashboard(QObject):
     def evaluateAllRecordings(self, auto_exclude_failed=False):
         if self.training_busy:
             return
-        self.training_busy = "전체 녹화 품질 검사 중…"
-        self.trainingChanged.emit()
+        self._set_busy_task("전체 녹화 품질 전수검사", "녹화 폴더의 전체 파일 품질 검사를 준비하는 중…", 0.05)
 
         def work():
             from src import training_center as tc
             try:
-                res = tc.evaluate_all_recordings_quality(force=True, auto_exclude_failed=bool(auto_exclude_failed))
+                res = tc.evaluate_all_recordings_quality(
+                    force=True,
+                    auto_exclude_failed=bool(auto_exclude_failed),
+                    progress_cb=lambda p, msg: self._set_busy_task("전체 녹화 품질 전수검사", msg, p),
+                )
                 fails = sum(1 for r in res if r.get("status") == "fail")
                 warns = sum(1 for r in res if r.get("status") == "warning")
                 oks = sum(1 for r in res if r.get("status") == "pass")
@@ -717,7 +785,7 @@ class QtDashboard(QObject):
                 self.training_note = f"품질 전수검사 완료: 양호 {oks}개 · 주의 {warns}개 · 불량 {fails}개{excl_msg}"
             except Exception as exc:
                 self.training_note = f"품질 검사 실패: {exc}"
-            self.training_busy = ""
+            self._set_busy_task("")
             self.refreshTraining()
 
         import threading
@@ -742,6 +810,211 @@ class QtDashboard(QObject):
     @Property("QVariantList", notify=trainingChanged)
     def modelBackups(self):
         return self.model_backups
+
+    @Property("QVariantList", notify=trainingChanged)
+    def onnxModels(self):
+        return list(getattr(self, "onnx_models", None) or [])
+
+    @Property(str, notify=trainingChanged)
+    def selectedOnnxModelId(self):
+        return str(getattr(self, "selected_onnx_model_id", "composite:active") or "composite:active")
+
+    @Property("QVariantMap", notify=trainingChanged)
+    def selectedOnnxModel(self):
+        models = getattr(self, "onnx_models", None) or []
+        sel_id = self.selectedOnnxModelId
+        for m in models:
+            if m.get("id") == sel_id:
+                return dict(m)
+        return dict(models[0]) if models else {}
+
+    @Property("QVariantList", notify=trainingChanged)
+    def selectedOnnxGestureRates(self):
+        m = self.selectedOnnxModel
+        return list(m.get("gesture_rates") or [])
+
+    @Property("QVariantMap", notify=trainingChanged)
+    def spatialSprayData(self):
+        return dict(getattr(self, "spatial_spray", None) or {})
+
+    @Property("QVariantList", notify=trainingChanged)
+    def spatialSprayCells(self):
+        sp = getattr(self, "spatial_spray", None) or {}
+        return list(sp.get("cells") or [])
+
+    @Property("QVariantList", notify=trainingChanged)
+    def spatialSprayFilterOptions(self):
+        sp = getattr(self, "spatial_spray", None) or {}
+        return list(sp.get("filter_options") or [{"key": "all", "name": "전체 동작"}])
+
+    @Property(str, notify=trainingChanged)
+    def spatialSprayHeadline(self):
+        sp = getattr(self, "spatial_spray", None) or {}
+        return str(sp.get("headline") or "화면 영역별 동작 학습 분포 분석 중…")
+
+    @Property(str, notify=trainingChanged)
+    def sprayGestureFilter(self):
+        return str(getattr(self, "spray_gesture_filter", "all") or "all")
+
+    def _async_update_live_spray(self, gesture_filter="all"):
+        def work():
+            from src import training_center as tc
+            try:
+                if not getattr(self, "onnx_models", None):
+                    self.onnx_models = tc.list_available_onnx_models()
+                self.spatial_spray = tc.compute_model_spatial_spray(
+                    model_id=self.selectedOnnxModelId,
+                    gesture_filter=gesture_filter or "all",
+                )
+                self.trainingChanged.emit()
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot(str)
+    def selectOnnxModel(self, model_id):
+        target_id = str(model_id or "").strip()
+        if not target_id:
+            return
+        self.selected_onnx_model_id = target_id
+        from src import training_center as tc
+        try:
+            self.spatial_spray = tc.compute_model_spatial_spray(
+                model_id=self.selected_onnx_model_id,
+                gesture_filter=self.sprayGestureFilter,
+            )
+            sel = self.selectedOnnxModel
+            if sel:
+                self.training_note = f"시뮬레이터 분석 대상 ONNX 선택: {sel.get('title', target_id)}"
+        except Exception as exc:
+            self.training_note = f"ONNX 모델 분포 계산 실패: {exc}"
+        self.trainingChanged.emit()
+
+    @Slot(str)
+    def setSprayGestureFilter(self, gesture_key):
+        norm = str(gesture_key or "all").strip() or "all"
+        self.spray_gesture_filter = norm
+        from src import training_center as tc
+        try:
+            self.spatial_spray = tc.compute_model_spatial_spray(
+                model_id=self.selectedOnnxModelId,
+                gesture_filter=norm,
+            )
+        except Exception:
+            pass
+        self.trainingChanged.emit()
+
+    @Slot(str)
+    def activateOnnxModel(self, model_id=""):
+        if self.rec_mode != "off" or self.training_job.running or self.training_busy:
+            return
+        target_id = str(model_id or self.selectedOnnxModelId).strip()
+        if not target_id:
+            return
+        from src import training_center as tc
+        try:
+            res = tc.activate_onnx_model(target_id)
+            self.selected_onnx_model_id = str(res.get("id") or target_id)
+            self.model_version += 1
+            self.tcn_gate = True
+            self.training_note = str(res.get("message") or "선택한 ONNX 모델을 실사용 모델로 불러왔습니다.")
+            self.stateChanged.emit()
+            self.refreshTraining()
+        except Exception as exc:
+            self.training_note = f"ONNX 모델 불러오기 실패: {exc}"
+            self.trainingChanged.emit()
+
+    @Slot(str)
+    def trainSelectedOnnxModel(self, model_id=""):
+        if self.rec_mode != "off" or self.training_job.running or self.training_busy:
+            return
+        target_id = str(model_id or self.selectedOnnxModelId).strip()
+        sel = None
+        for m in getattr(self, "onnx_models", None) or []:
+            if m.get("id") == target_id:
+                sel = m
+                break
+        trainable_key = str((sel or {}).get("trainable_key") or "")
+        if trainable_key and trainable_key != "all":
+            self.trainSelectedGesture(trainable_key)
+        else:
+            self.startTraining()
+
+    @Property("QVariantMap", notify=trainingChanged)
+    def trainingImprovement(self):
+        return getattr(self, "training_improvement", None) or {}
+
+    @Property("QVariantList", notify=trainingChanged)
+    def trainingImprovementItems(self):
+        imp = getattr(self, "training_improvement", None) or {}
+        return list(imp.get("items") or [])
+
+    @Property(str, notify=trainingChanged)
+    def trainingImprovementHeadline(self):
+        imp = getattr(self, "training_improvement", None) or {}
+        return str(imp.get("headline") or "")
+
+    @Slot()
+    def dismissTrainingImprovement(self):
+        import json
+        from src.training_center import MODEL
+        imp_path = MODEL.parent / "last_training_improvement.json"
+        cur = dict(getattr(self, "training_improvement", None) or {})
+        cur["dismissed"] = True
+        try:
+            if imp_path.is_file():
+                doc = json.loads(imp_path.read_text(encoding="utf-8"))
+                if isinstance(doc, dict):
+                    doc["dismissed"] = True
+                    imp_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+            elif cur.get("available"):
+                imp_path.parent.mkdir(parents=True, exist_ok=True)
+                imp_path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        self.training_improvement = cur
+        self.trainingChanged.emit()
+
+    @Property("QVariantMap", notify=trainingChanged)
+    def gestureTestResults(self):
+        return getattr(self, "_gesture_test_results", None) or {}
+
+    @Slot(str)
+    def testGestureJudgment(self, key):
+        if self.training_busy:
+            return
+        from src.gesture_catalog import NAMES
+        gname = NAMES.get(key, key)
+        self._set_busy_task(
+            f"'{gname}' 동작 판정 검증 중",
+            f"최근 '{gname}' 녹화 데이터에서 규칙 및 AI 모델 판정률을 검증하고 있습니다…",
+            0.35,
+        )
+
+        def work():
+            from src import training_center as tc
+            try:
+                res = tc.evaluate_gesture_judgment(key)
+                store = dict(getattr(self, "_gesture_test_results", None) or {})
+                store[key] = {
+                    "summary": res.get("summary", ""),
+                    "detail": res.get("detail", ""),
+                    "latest_file": res.get("latest_file", ""),
+                    "ok": bool(res.get("ok")),
+                }
+                self._gesture_test_results = store
+                if isinstance(res.get("latest_sim"), dict):
+                    self._store_sim_result(res["latest_sim"])
+                self.training_note = str(res.get("summary") or "")
+            except Exception as exc:
+                self.training_note = f"판정 검증 실패: {exc}"
+            self._set_busy_task("")
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
 
     @Slot(str)
     def restoreModelBackup(self, backup_id):
@@ -905,19 +1178,29 @@ class QtDashboard(QObject):
 
     @Slot(str)
     def evaluateSimRecording(self, filename=""):
+        if self.training_busy:
+            return
         target = filename
         if not target and self.training_files:
             target = self.training_files[0].get("file", "")
         if not target:
             return
-        from src import training_center as tc
-        try:
-            self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=True)
-            self.aug_settings = tc.get_augmentation_settings()
-            self.training_note = self.sim_eval.get("headline", "데이터 평가 완료")
-        except Exception as exc:
-            self.training_note = f"데이터 평가 실패: {exc}"
-        self.trainingChanged.emit()
+        self._set_busy_task("녹화 데이터 정밀 평가 중", f"'{target}' 손 랜드마크 검출률·관절 이상치·화면 영역 평가 중…", 0.45)
+
+        def work():
+            from src import training_center as tc
+            try:
+                self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=True)
+                self._set_busy_task("녹화 데이터 정밀 평가 중", f"'{target}' 데이터 증강 및 품질 요약 반영 중…", 0.85)
+                self.aug_settings = tc.get_augmentation_settings()
+                self.training_note = self.sim_eval.get("headline", "데이터 평가 완료")
+            except Exception as exc:
+                self.training_note = f"데이터 평가 실패: {exc}"
+            self._set_busy_task("")
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
 
     @Slot(str, int, float, int)
     def calibrateSimRecording(self, filename="", max_interp_gap=3, max_joint_jump=0.38, min_do_frames=4):
@@ -930,8 +1213,11 @@ class QtDashboard(QObject):
             self.training_note = "보정할 녹화 파일이 없습니다."
             self.trainingChanged.emit()
             return
-        self.training_busy = f"'{target}' 데이터 보정(결측 보간·관절 이상치 스무딩) 중…"
-        self.trainingChanged.emit()
+        self._set_busy_task(
+            "녹화 데이터 자동 보정 중",
+            f"[1/3단계] '{target}' 결측 구간 보간 및 관절 이상치 스무딩 중…",
+            0.25,
+        )
 
         def work():
             from src import training_center as tc
@@ -942,12 +1228,24 @@ class QtDashboard(QObject):
                     max_joint_jump=float(max_joint_jump),
                     min_do_frames=int(min_do_frames),
                 )
+                self._set_busy_task(
+                    "녹화 데이터 자동 보정 중",
+                    f"[2/3단계] '{target}' 보정 후 데이터 품질 재평가 중…",
+                    0.60,
+                )
                 self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=False)
-                self._store_sim_result(tc.simulate_model_on_recording(target, use_cleaned=True))
+                self._set_busy_task(
+                    "녹화 데이터 자동 보정 중",
+                    f"[3/3단계] '{target}' 보정본 모델 시뮬레이션 재실행 중…",
+                    0.85,
+                )
+                self._store_sim_result(
+                    tc.simulate_model_on_recording(target, use_cleaned=True, model_id=self.selectedOnnxModelId)
+                )
                 self.training_note = res.get("message", "데이터 보정 완료")
             except Exception as exc:
                 self.training_note = f"데이터 보정 실패: {exc}"
-            self.training_busy = ""
+            self._set_busy_task("")
             self.refreshTraining()
 
         import threading
@@ -963,16 +1261,26 @@ class QtDashboard(QObject):
             target = self.training_files[0].get("file", "")
         if not target:
             return
-        from src import training_center as tc
-        try:
-            res = tc.reset_calibrated_recording(target)
-            self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=False)
-            self._store_sim_result(tc.simulate_model_on_recording(target, use_cleaned=False))
-            self.training_note = res.get("message", "보정 초기화 완료")
+        self._set_busy_task("데이터 보정본 초기화 중", f"[1/2단계] '{target}' 보정본 제거 및 원본 품질 복구 중…", 0.35)
+
+        def work():
+            from src import training_center as tc
+            try:
+                res = tc.reset_calibrated_recording(target)
+                self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=False)
+                self._set_busy_task("데이터 보정본 초기화 중", f"[2/2단계] '{target}' 원본 데이터로 시뮬레이션 재실행 중…", 0.75)
+                self._store_sim_result(
+                    tc.simulate_model_on_recording(target, use_cleaned=False, model_id=self.selectedOnnxModelId)
+                )
+                self.training_note = res.get("message", "보정 초기화 완료")
+            except Exception as exc:
+                self.training_note = f"보정 초기화 실패: {exc}"
+            self._set_busy_task("")
             self.refreshTraining()
-        except Exception as exc:
-            self.training_note = f"보정 초기화 실패: {exc}"
-            self.trainingChanged.emit()
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
 
     @Slot(bool, str, int)
     def setAugmentationConfig(self, enabled, strength, factor):
@@ -1002,8 +1310,11 @@ class QtDashboard(QObject):
         if not target and self.training_files:
             target = self.training_files[0].get("file", "")
         label_str = "선택된 전체 녹화" if target == "__all__" else f"'{target}'"
-        self.training_busy = f"{label_str} 데이터 증강 적용 중…"
-        self.trainingChanged.emit()
+        self._set_busy_task(
+            "오프라인 데이터 증강 생성 중",
+            f"[1/2단계] {label_str} 3D 회전·크기·시간축 증강 데이터 생성 중 ({factor}배)…",
+            0.35,
+        )
 
         def work():
             from src import training_center as tc
@@ -1013,6 +1324,11 @@ class QtDashboard(QObject):
                     enabled=bool(enabled),
                     strength=str(strength),
                     factor=int(factor),
+                )
+                self._set_busy_task(
+                    "오프라인 데이터 증강 생성 중",
+                    f"[2/2단계] {label_str} 증강 결과 검증 및 시뮬레이터 상태 갱신 중…",
+                    0.82,
                 )
                 self.aug_settings = res.get("settings", tc.get_augmentation_settings())
                 eval_target = self.sim_eval.get("file") or (
@@ -1025,8 +1341,7 @@ class QtDashboard(QObject):
                 self.training_note = res.get("message", "데이터 증강 적용 완료")
             except Exception as exc:
                 self.training_note = f"데이터 증강 실패: {exc}"
-            self.training_busy = ""
-            self.trainingChanged.emit()
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1044,20 +1359,37 @@ class QtDashboard(QObject):
             self.training_note = "시뮬레이션할 녹화 파일이 없습니다."
             self.trainingChanged.emit()
             return
-        self.training_busy = f"'{target}' 시뮬레이션 중…"
-        self.trainingChanged.emit()
+        self._set_busy_task(
+            "모델 시뮬레이션 실행 중",
+            f"[1/3단계] '{target}' 녹화 프레임 로드 및 선택된 ONNX 모델 추론 중…",
+            0.30,
+        )
 
         def work():
             from src import training_center as tc
             try:
-                res = tc.simulate_model_on_recording(target, use_cleaned=bool(use_cleaned))
+                res = tc.simulate_model_on_recording(
+                    target,
+                    use_cleaned=bool(use_cleaned),
+                    model_id=self.selectedOnnxModelId,
+                )
+                self._set_busy_task(
+                    "모델 시뮬레이션 실행 중",
+                    f"[2/3단계] '{target}' 타임라인·관절 스켈레톤 리플레이 데이터 구성 중…",
+                    0.75,
+                )
                 self._store_sim_result(res)
+                self._set_busy_task(
+                    "모델 시뮬레이션 실행 중",
+                    f"[3/3단계] '{target}' 품질 리포트 및 증강 정보 반영 중…",
+                    0.92,
+                )
                 self.sim_eval = res.get("quality") or tc.evaluate_recording_in_simulator(target)
                 self.aug_settings = tc.get_augmentation_settings()
                 self.training_note = res.get("summary", "시뮬레이션 완료")
             except Exception as exc:
                 self.training_note = f"시뮬레이션 실패: {exc}"
-            self.training_busy = ""
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1079,8 +1411,11 @@ class QtDashboard(QObject):
     def runDiagnostics(self):
         if self.training_busy:
             return
-        self.training_busy = "앱 및 데이터셋 자가 진단 중…"
-        self.trainingChanged.emit()
+        self._set_busy_task(
+            "앱 및 데이터셋 자가 진단 중",
+            "ONNX 모델 무결성·설정 스키마·MediaPipe 에셋·녹화 데이터셋 점검 중…",
+            0.45,
+        )
 
         def work():
             from src import training_center as tc
@@ -1089,7 +1424,7 @@ class QtDashboard(QObject):
                 self.training_note = self.diag_result.get("summary", "자가 진단 완료")
             except Exception as exc:
                 self.training_note = f"자가 진단 오류: {exc}"
-            self.training_busy = ""
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1136,10 +1471,111 @@ class QtDashboard(QObject):
             pass
         self.trainingChanged.emit()
 
+    @Property(bool, notify=trainingChanged)
+    def gpuAvailable(self):
+        cap = getattr(self, "_gpu_cap", None) or {}
+        return bool(cap.get("cuda_available", False))
+
+    @Property(bool, notify=trainingChanged)
+    def canInstallCudaTorch(self):
+        cap = getattr(self, "_gpu_cap", None) or {}
+        return bool(cap.get("can_install_cuda_torch", False))
+
+    @Property(str, notify=trainingChanged)
+    def gpuDeviceName(self):
+        cap = getattr(self, "_gpu_cap", None) or {}
+        return str(cap.get("device_name") or "")
+
+    @Property(str, notify=trainingChanged)
+    def trainingDevice(self):
+        pref = str(getattr(self, "training_device_pref", "auto") or "auto").strip().lower()
+        if pref in ("auto", "gpu", "cuda") and self.gpuAvailable:
+            return "gpu"
+        return "cpu"
+
+    @Property(str, notify=trainingChanged)
+    def gpuButtonLabel(self):
+        name = self.gpuDeviceName
+        if self.gpuAvailable:
+            short = name.replace("NVIDIA GeForce ", "").replace("NVIDIA ", "").strip()
+            return f"GPU 가속 ({short})" if short else "GPU 가속"
+        return "GPU 가속 (미지원)"
+
+    @Property(str, notify=trainingChanged)
+    def gpuStatusText(self):
+        cap = getattr(self, "_gpu_cap", None) or {}
+        status = str(cap.get("status_label") or "연산 장치 확인 중")
+        if self.gpuAvailable:
+            cur = "GPU 고속 학습 선택됨" if self.trainingDevice == "gpu" else "CPU 학습 선택됨"
+            return f"{status} · {cur}"
+        if self.canInstallCudaTorch:
+            return f"{status} · 우측 [GPU 가속 활성화]를 누르면 GPU 학습이 켜집니다"
+        return f"{status} · 자동으로 CPU 학습이 사용됩니다"
+
+    @Slot(str)
+    def setTrainingDevice(self, device):
+        raw = str(device or "auto").strip().lower()
+        if raw == "cuda":
+            raw = "gpu"
+        norm = raw if raw in ("auto", "gpu", "cpu") else "auto"
+        if norm == "gpu" and not self.gpuAvailable:
+            norm = "cpu"
+        self.training_device_pref = norm
+        prefs = getattr(self, "preferences", None)
+        if prefs is not None:
+            prefs.setValue("trainingDevice", norm)
+        try:
+            from src import training_center as tc
+            tc.set_training_device(norm)
+        except Exception:
+            pass
+        self.trainingChanged.emit()
+
+    @Slot()
+    def enableGpuAcceleration(self):
+        if self.training_busy or self.training_job.running:
+            return
+        self._set_busy_task(
+            "GPU 가속 환경 설치 및 활성화 중",
+            "[1/2단계] CUDA GPU용 PyTorch 패키지 다운로드 및 설치 중… (약 1분 소요)",
+            -1.0,
+        )
+        self.training_note = self.training_busy
+
+        def work():
+            from src import training_center as tc
+            try:
+                cap = tc.install_cuda_torch()
+                self._set_busy_task(
+                    "GPU 가속 환경 설치 및 활성화 중",
+                    "[2/2단계] GPU 장치 호환성 검증 및 학습 가속 설정 적용 중…",
+                    0.85,
+                )
+                self._gpu_cap = cap
+                if cap.get("cuda_available"):
+                    self.training_device_pref = "gpu"
+                    prefs = getattr(self, "preferences", None)
+                    if prefs is not None:
+                        prefs.setValue("trainingDevice", "gpu")
+                    tc.set_training_device("gpu")
+                    self.training_note = f"GPU 가속 활성화 완료: {cap.get('status_label')}"
+                else:
+                    self.training_note = f"설치 후에도 CUDA를 사용할 수 없습니다: {cap.get('status_label')}"
+            except Exception as exc:
+                self.training_note = f"GPU 가속 설치 실패: {exc}"
+            self._set_busy_task("")
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+
     @Slot()
     def startTraining(self):
         mode = getattr(self, "training_mode", None)
         kwargs = {"mode": mode} if mode in ("fast", "thorough") else {}
+        dev = getattr(self, "trainingDevice", None)
+        if dev in ("gpu", "cpu", "auto"):
+            kwargs["device"] = dev
         if self.training_job.start(**kwargs):
             self.training_note = ""
             self._training_was_running = True
@@ -1159,6 +1595,9 @@ class QtDashboard(QObject):
         kwargs = {"gestures": [key]}
         if mode in ("fast", "thorough"):
             kwargs["mode"] = mode
+        dev = getattr(self, "trainingDevice", None)
+        if dev in ("gpu", "cpu", "auto"):
+            kwargs["device"] = dev
         if self.training_job.start(**kwargs):
             self.training_note = task.name + " 선택 학습을 시작합니다."
             self._training_was_running = True
@@ -1173,18 +1612,19 @@ class QtDashboard(QObject):
     def exportModel(self):
         if self.training_busy:
             return
-        self.training_busy = "내보내는 중… (녹화 전체를 데이터셋으로 묶어요)"
-        self.trainingChanged.emit()
+        self._set_busy_task("모델 및 학습 데이터셋 패키지 내보내기", "[1/4단계] 현재 모델 및 메타데이터 확인 중…", 0.15)
 
         def work():
             from src import training_center as tc
             try:
-                out = tc.export_package()
+                out = tc.export_package(
+                    progress_cb=lambda p, msg: self._set_busy_task("모델 및 학습 데이터셋 패키지 내보내기", msg, p)
+                )
                 self.training_note = f"내보냈어요: exports/{out.name}.zip"
                 self._export_dir = str(out.parent)
             except Exception as exc:
                 self.training_note = f"내보내지 못했어요: {exc}"
-            self.training_busy = ""
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1282,9 +1722,8 @@ class QtDashboard(QObject):
                 self.hubIncludeModels,
             ):
                 return
-        self.training_busy = "원격 허브 저장소 연결 및 권한 확인 중…"
+        self._set_busy_task("원격 허브 연결 확인 중", "원격 허브 저장소 연결 및 액세스 권한 확인 중…", -1.0)
         self.hub_status_note = self.training_busy
-        self.trainingChanged.emit()
 
         def work():
             try:
@@ -1302,7 +1741,7 @@ class QtDashboard(QObject):
                 err = f"허브 연결 확인 실패: {hf_hub.redact_secrets(str(exc), [str(token or '')])}"
                 self.hub_status_note = err
                 self.training_note = err
-            self.training_busy = ""
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1325,9 +1764,12 @@ class QtDashboard(QObject):
                 return
         self.hub_config = hf_hub.load_hub_config()
         prov_ko = "GitHub" if self.hubProvider == "github" else "Hugging Face"
-        self.training_busy = f"{prov_ko} 허브({self.hubRepo})로 녹화·모델 업로드 중…"
+        self._set_busy_task(
+            f"{prov_ko} 원격 허브 업로드 중",
+            f"[1/2단계] {self.hubRepo} 저장소 인증 및 로컬 녹화·모델 탐색 중…",
+            0.25,
+        )
         self.hub_status_note = self.training_busy
-        self.trainingChanged.emit()
 
         def work():
             from src.training_center import MODEL, REC_DIR
@@ -1335,6 +1777,11 @@ class QtDashboard(QObject):
                 client, info = hf_hub.create_hub_client()
                 use_models = bool(self.hub_config.get("include_models", True))
                 models = [MODEL] if (use_models and MODEL.is_file() and MODEL.with_suffix(".json").is_file()) else []
+                self._set_busy_task(
+                    f"{prov_ko} 원격 허브 업로드 중",
+                    f"[2/2단계] {self.hubRepo} 저장소로 새 녹화 및 ONNX 모델 전송 중…",
+                    0.65,
+                )
                 res = hf_hub.push_to_hub(client, REC_DIR, models=models)
                 msg = (
                     f"허브 업로드 완료 ({info['provider']} · {info['repo']}): "
@@ -1346,7 +1793,7 @@ class QtDashboard(QObject):
                 err = f"허브 업로드 실패: {hf_hub.redact_secrets(str(exc), [str(token or '')])}"
                 self.hub_status_note = err
                 self.training_note = err
-            self.training_busy = ""
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1369,9 +1816,12 @@ class QtDashboard(QObject):
                 return
         self.hub_config = hf_hub.load_hub_config()
         prov_ko = "GitHub" if self.hubProvider == "github" else "Hugging Face"
-        self.training_busy = f"{prov_ko} 허브({self.hubRepo})에서 팀 데이터 내려받는 중…"
+        self._set_busy_task(
+            f"{prov_ko} 원격 허브 동기화 중",
+            f"[1/3단계] {self.hubRepo} 저장소에서 팀 녹화·모델 내려받는 중…",
+            0.25,
+        )
         self.hub_status_note = self.training_busy
-        self.trainingChanged.emit()
 
         def work():
             from src.training_center import REC_DIR
@@ -1380,14 +1830,23 @@ class QtDashboard(QObject):
                 use_models = bool(self.hub_config.get("include_models", True))
                 res = hf_hub.pull_from_hub(client, REC_DIR, include_models=use_models)
                 from src.training_center import run_post_recording_pipeline
-                for rec_file in sorted(REC_DIR.rglob("*.jsonl.gz")):
-                    if "cleaned" in rec_file.parts or "augmented" in rec_file.parts:
-                        continue
+                rec_files = [
+                    p
+                    for p in sorted(REC_DIR.rglob("*.jsonl.gz"))
+                    if "cleaned" not in p.parts and "augmented" not in p.parts
+                ]
+                total_f = len(rec_files)
+                for idx, rec_file in enumerate(rec_files, 1):
                     if rec_file.parent != REC_DIR and not (REC_DIR / rec_file.name).exists():
                         import shutil
                         shutil.copy2(rec_file, REC_DIR / rec_file.name)
                         rec_file = REC_DIR / rec_file.name
                     if not (REC_DIR / "cleaned" / rec_file.name).exists():
+                        self._set_busy_task(
+                            f"{prov_ko} 원격 허브 동기화 중",
+                            f"[2/3단계] 내려받은 녹화 품질검사·정제·증강 처리 중 ({idx}/{total_f}: {rec_file.name})…",
+                            0.30 + 0.60 * (idx / max(1, total_f)),
+                        )
                         run_post_recording_pipeline(
                             rec_file,
                             {"auto_quality_check": True, "auto_clean": True, "auto_offline_augment": True},
@@ -1398,12 +1857,14 @@ class QtDashboard(QObject):
                 )
                 self.hub_status_note = msg
                 self.training_note = msg
+                self._set_busy_task("")
                 self.refreshTraining()
+                return
             except Exception as exc:
                 err = f"허브 동기화 실패: {hf_hub.redact_secrets(str(exc), [str(token or '')])}"
                 self.hub_status_note = err
                 self.training_note = err
-            self.training_busy = ""
+            self._set_busy_task("")
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1429,6 +1890,7 @@ class QtDashboard(QObject):
         self.use_index_pointer = False
         self.rec_mode, self.rec_focus, self.rec_plan = "guided", key, copy.deepcopy(plan)
         self.rec_paused = False
+        self._async_update_live_spray(key if key else "all")
         self.stateChanged.emit()
 
     def _training_tick(self):
@@ -1439,7 +1901,12 @@ class QtDashboard(QObject):
             if s.get("error"):
                 self.training_note = s["error"]
             else:
-                self.training_note = "학습 끝! 새 모델의 성적을 보여 드려요."
+                imp = s.get("improvement")
+                if isinstance(imp, dict) and imp.get("available"):
+                    self.training_improvement = imp
+                    self.training_note = f"학습 완료! {imp.get('headline', '새 모델의 개선 효과를 확인하세요.')}"
+                else:
+                    self.training_note = "학습 끝! 새 모델의 성적을 보여 드려요."
                 self.model_version += 1
                 self.stateChanged.emit()
             self.refreshTraining()
@@ -1498,6 +1965,15 @@ class QtDashboard(QObject):
     def trainingRunning(self):
         return self.training_job.running
 
+    @Property(bool, notify=trainingChanged)
+    def trainingCanStart(self):
+        return bool(
+            not self.training_job.running
+            and not getattr(self, "training_busy", "")
+            and self.rec_mode == "off"
+            and len(getattr(self, "training_files", None) or ()) > 0
+        )
+
     @Property(str, notify=trainingChanged)
     def trainingStage(self):
         s = self.training_job.snapshot()
@@ -1519,6 +1995,70 @@ class QtDashboard(QObject):
     def trainingProgress(self):
         return float(self.training_job.snapshot().get("progress", 0.0))
 
+    @Property(bool, notify=trainingChanged)
+    def appWorking(self):
+        return bool(self.training_job.running or getattr(self, "training_busy", ""))
+
+    @Property(str, notify=trainingChanged)
+    def workTitle(self):
+        if self.training_job.running:
+            s = self.training_job.snapshot()
+            dev_tag = "GPU 가속" if self.trainingDevice == "gpu" else "CPU"
+            if s.get("target"):
+                from src.gesture_catalog import NAMES
+                tname = NAMES.get(s["target"], s["target"])
+                return f"AI 모델 선택 학습 진행 중 ({tname} · {dev_tag})"
+            return f"전체 동작 통합 AI 모델 학습 진행 중 ({dev_tag})"
+        if getattr(self, "training_busy", ""):
+            return str(getattr(self, "_task_title", "") or self.training_busy)
+        return ""
+
+    @Property(str, notify=trainingChanged)
+    def workDetail(self):
+        if self.training_job.running:
+            return self.trainingStage or "학습 프로세스 초기화 및 녹화 데이터 준비 중…"
+        if getattr(self, "training_busy", ""):
+            return str(getattr(self, "_task_step", "") or self.training_busy)
+        return ""
+
+    @Property(float, notify=trainingChanged)
+    def workProgress(self):
+        if self.training_job.running:
+            return float(self.training_job.snapshot().get("progress", 0.0))
+        if getattr(self, "training_busy", ""):
+            return float(getattr(self, "_task_progress", -1.0))
+        return 0.0
+
+    @Property(bool, notify=trainingChanged)
+    def workIndeterminate(self):
+        if self.training_job.running:
+            p = float(self.training_job.snapshot().get("progress", 0.0))
+            return p <= 0.015
+        if getattr(self, "training_busy", ""):
+            return float(getattr(self, "_task_progress", -1.0)) < 0.0
+        return False
+
+    @Property(str, notify=trainingChanged)
+    def workPercentText(self):
+        if not self.appWorking:
+            return ""
+        if self.workIndeterminate:
+            return "처리 중"
+        pct = int(round(max(0.0, min(1.0, self.workProgress)) * 100))
+        return f"{pct}%"
+
+    @Property(str, notify=trainingChanged)
+    def workElapsedText(self):
+        if self.training_job.running:
+            started = self.training_job.snapshot().get("started") or time.time()
+            sec = max(0, int(time.time() - float(started)))
+            return f"{sec}초 경과"
+        if getattr(self, "training_busy", ""):
+            started = getattr(self, "_task_started", 0.0) or time.time()
+            sec = max(0, int(time.time() - float(started)))
+            return f"{sec}초 경과"
+        return ""
+
     @Property("QVariantList", notify=trainingChanged)
     def trainingLosses(self):
         return list(self.training_job.snapshot().get("losses", []))[-60:]
@@ -1539,7 +2079,11 @@ class QtDashboard(QObject):
 
     @Slot()
     def recStart(self):
-        self.rec_advance += 1
+        if self.rec_mode == "free" and self.rec_paused:
+            self.rec_paused = False
+        else:
+            self.rec_advance += 1
+            self.rec_paused = False
         self.stateChanged.emit()
 
     @Slot()
@@ -1936,6 +2480,12 @@ class QtDashboard(QObject):
             if key == 27:
                 self.cancelPointerCalibration()
             return
+        if key == 32 and self.stage_name == "main" and self.rec_mode in ("guided", "free") and self.tracking_view is None:
+            if self.rec_mode == "guided" and self.recWaiting:
+                self.recStart()
+            else:
+                self.toggleRecordingPause()
+            return
         if self.stage_name == "main" or key == 81:
             self.commands.append(key)
 
@@ -2018,7 +2568,7 @@ class QtDashboard(QObject):
             "입력 꺼짐" if paused else "연습 모드" if self.dry_run else "입력 활성",
             "손 감지됨" if detected else "손 대기",
             "제어 시작을 누르면 손짓으로 조작할 수 있어요." if paused
-            else ACTIONS.get(action, "손짓 대기") if detected else "손을 카메라에 보여주세요.",
+            else ACTIONS.get(action, "포인터 이동") if detected else "손을 카메라에 보여주세요.",
             "제어 시작" if paused else "일시정지",
             f"{fps:.1f} fps  ·  추론 {detect_ms:.1f} ms" + (f"  ·  {status}" if status else ""),
         )

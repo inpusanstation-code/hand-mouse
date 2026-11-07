@@ -21,6 +21,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.finger_kinematics import CausalFingerTracker
 from src.gesture_catalog import NAMES
 from src.spatial_features import extract_spatial_features
 from src.spatial_mlp import (
@@ -28,6 +29,7 @@ from src.spatial_mlp import (
     STATIC_POSTURE_LABELS,
     SpatialMlpModel,
     blend_tcn_and_spatial_probs,
+    compose_spatial_mlp,
 )
 from src.tcn_features import FEATURE_VERSION, frame_features, windows
 
@@ -38,12 +40,14 @@ GATED = {"right_click": "thumb_ring", "left_click": "thumb_middle", "scroll_grab
          "task_switcher": "thumb_pinky", "show_desktop": "palm_side"}
 
 
-def load_spatial_mlp(spatial_path: Path = DEFAULT_SPATIAL_MODEL) -> Optional[SpatialMlpModel]:
-    """Load `models/spatial_mlp.json` if present and valid, else return None."""
+def load_spatial_mlp(spatial_path: Path = DEFAULT_SPATIAL_MODEL, *, compose_specialists: bool = True) -> Optional[SpatialMlpModel]:
+    """Load `models/spatial_mlp.json` composed with per-gesture specialist MLPs if present."""
     try:
         p = Path(spatial_path)
-        if p.is_file():
-            return SpatialMlpModel.load(p)
+        base = SpatialMlpModel.load(p) if p.is_file() else None
+        if not compose_specialists:
+            return base
+        return compose_spatial_mlp(p.parent / "gesture_tcn.onnx", base)
     except Exception:
         pass
     return None
@@ -52,12 +56,40 @@ def load_spatial_mlp(spatial_path: Path = DEFAULT_SPATIAL_MODEL) -> Optional[Spa
 def load_predictor(model_path: Path = DEFAULT_MODEL) -> Tuple[Callable[[np.ndarray], np.ndarray], Dict[str, Any]]:
     """(window -> class probabilities, model info). Raises if the model or onnxruntime is missing."""
     from src.gesture_models import load_single, compose_predictor
-    predict, info = load_single(model_path, FEATURE_VERSION)
-    predict, info = compose_predictor(model_path, predict, info)
+    p = Path(model_path)
+    sel_mode = "composite"
+    sel_id = "composite:active"
+    if p.resolve() == DEFAULT_MODEL.resolve():
+        sel_file = p.parent / "active_onnx_selection.json"
+        if sel_file.is_file():
+            try:
+                sel = json.loads(sel_file.read_text(encoding="utf-8"))
+                sel_mode = str(sel.get("mode") or "composite")
+                sel_id = str(sel.get("model_id") or "composite:active")
+                custom_onnx = sel.get("onnx_path")
+                if sel_mode == "single_onnx" and custom_onnx:
+                    cand = Path(custom_onnx)
+                    if not cand.is_absolute():
+                        cand = DEFAULT_MODEL.parents[1] / cand
+                    if cand.is_file() and cand.with_suffix(".json").is_file():
+                        p = cand
+                    else:
+                        sel_mode = "composite"
+            except Exception:
+                sel_mode = "composite"
+
+    predict, info = load_single(p, FEATURE_VERSION)
+    if sel_mode == "composite":
+        predict, info = compose_predictor(p, predict, info)
+    info = dict(info)
+    info["active_onnx_mode"] = sel_mode
+    info["active_onnx_id"] = sel_id
+    info["active_onnx_file"] = p.name
     spatial_candidate = Path(model_path).parent / "spatial_mlp.json"
-    if spatial_candidate.is_file():
-        info = dict(info)
+    bank_manifest = Path(model_path).parent / "gestures" / "manifest.json"
+    if sel_mode != "single_onnx" and (spatial_candidate.is_file() or bank_manifest.is_file()):
         info.setdefault("spatial_mlp_path", str(spatial_candidate))
+        info["compose_spatial_specialists"] = (sel_mode == "composite")
     return predict, info
 
 
@@ -83,8 +115,17 @@ class GestureGate:
         if spatial_model is None and cfg.get("spatial_mlp_enabled", True):
             sp_path = info.get("spatial_mlp_path")
             if sp_path:
-                spatial_model = load_spatial_mlp(Path(sp_path))
+                spatial_model = load_spatial_mlp(
+                    Path(sp_path),
+                    compose_specialists=bool(info.get("compose_spatial_specialists", True)),
+                )
+            elif isinstance(info.get("spatial_mlp"), dict) and info["spatial_mlp"].get("schema") == "manux-spatial-mlp/1":
+                try:
+                    spatial_model = SpatialMlpModel.from_dict(info["spatial_mlp"])
+                except Exception:
+                    spatial_model = None
         self.spatial_model: Optional[SpatialMlpModel] = spatial_model
+        self._finger_tracker = CausalFingerTracker()
         self._frames: Deque[Dict[str, Any]] = deque(maxlen=self.window + 1)
         self._probs: Deque[Tuple[float, np.ndarray]] = deque(maxlen=60)
         self._spatial_probs: Deque[Tuple[float, np.ndarray]] = deque(maxlen=60)
@@ -101,6 +142,7 @@ class GestureGate:
         self.last_note = ""
 
     def reset(self) -> None:
+        self._finger_tracker.reset()
         self._frames.clear()
         self._probs.clear()
         self._spatial_probs.clear()
@@ -115,10 +157,12 @@ class GestureGate:
     def step(self, now: float, hand: Any, aspect: float) -> Optional[np.ndarray]:
         lm = None
         if hand is None or not getattr(hand, "world", None):
+            self._finger_tracker.reset()
             self._frames.append({"t": now})
         else:
-            lm = [[p.x, p.y, p.z] for p in hand.landmarks]
-            self._frames.append({"t": now, "world": hand.world, "lm": lm})
+            raw_lm = [[p.x, p.y, p.z] for p in hand.landmarks]
+            lm, world = self._finger_tracker.step(now, raw_lm, hand.world)
+            self._frames.append({"t": now, "world": world, "lm": lm})
         feats = frame_features(list(self._frames), aspect)
         tcn_probs = np.asarray(self.predict(windows(feats, self.window)[-1:]), dtype=np.float64)
         self.last_tcn = tcn_probs
@@ -129,12 +173,14 @@ class GestureGate:
                 sp_probs = self.spatial_model.predict_proba(s_vec)
                 self.last_spatial = sp_probs
                 self._spatial_probs.append((now, sp_probs))
+                # If a finger was self-occluded on this frame, trust temporal TCN context more than single-frame MLP
+                eff_alpha = self.spatial_alpha * 0.45 if self._finger_tracker.occluded_fingers_last_frame > 0 else self.spatial_alpha
                 probs = blend_tcn_and_spatial_probs(
                     tcn_probs,
                     self.classes,
                     sp_probs,
                     self.spatial_model.classes,
-                    alpha=self.spatial_alpha,
+                    alpha=eff_alpha,
                     veto_threshold=self.spatial_veto_threshold,
                     boost_threshold=self.spatial_boost_threshold,
                 )
@@ -162,6 +208,9 @@ class GestureGate:
         if self.spatial_model is None or self.last_spatial is None:
             return False
         if name not in STATIC_POSTURE_LABELS or "none" not in self.spatial_model.classes:
+            return False
+        # Do not let a single self-occluded frame veto an active TCN temporal judgment
+        if self._finger_tracker.occluded_fingers_last_frame > 0:
             return False
         none_idx = self.spatial_model.classes.index("none")
         p_none = float(self.last_spatial[none_idx])

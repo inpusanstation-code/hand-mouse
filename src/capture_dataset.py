@@ -6,14 +6,49 @@ from pathlib import Path
 
 import numpy as np
 
+from src.finger_kinematics import reconstruct_hand_sequence
 from src.recorder import finished_recordings, read_session
 from src.recording_plan import label_condition_key
 from src.spatial_features import SPATIAL_FEATURES, SPATIAL_FEATURE_VERSION, extract_spatial_features
 from src.tcn_features import FEATURE_VERSION, FEATURES, frame_features, windows
 from src.gesture_catalog import CLASSES, BY_KEY
 
-_SESSION_CACHE_VERSION = f"v2-{FEATURE_VERSION}-{SPATIAL_FEATURE_VERSION}"
+_SESSION_CACHE_VERSION = f"v13-5finger-occ-rules-{FEATURE_VERSION}-{SPATIAL_FEATURE_VERSION}"
 _EXTRACT_MEM_CACHE: dict[tuple[str, int, int], dict] = {}
+
+
+def is_pinch_captured_on_screen(frame: dict, target: str | None) -> bool:
+    """Return True if the scheduled pinch gesture is visually captured on screen in 2D/3D."""
+    if target not in ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle"):
+        return True
+    lm = frame.get("lm")
+    if lm is None or len(lm) < 21:
+        return False
+    try:
+        pts = [(float(p[0]), float(p[1])) for p in lm[:21]]
+    except (TypeError, ValueError, IndexError):
+        return False
+
+    def d2(i: int, j: int) -> float:
+        dx = pts[i][0] - pts[j][0]
+        dy = pts[i][1] - pts[j][1]
+        return float((dx * dx + dy * dy) ** 0.5)
+
+    hs = max(d2(0, 5), d2(0, 9), d2(0, 17), 1.4 * d2(5, 17))
+    if target == "thumb_index":
+        return min(d2(4, 8), d2(4, 7), d2(3, 8)) <= max(0.065, 0.36 * hs)
+    if target == "thumb_middle":
+        return min(d2(4, 12), d2(4, 11), d2(3, 12)) <= max(0.065, 0.36 * hs)
+    if target == "thumb_ring":
+        return min(d2(4, 16), d2(4, 15), d2(3, 16)) <= max(0.065, 0.36 * hs)
+    if target == "thumb_pinky":
+        return min(d2(4, 20), d2(4, 19), d2(3, 20)) <= max(0.068, 0.37 * hs)
+    if target == "thumb_index_middle":
+        di = min(d2(4, 8), d2(4, 7), d2(3, 8))
+        dm = min(d2(4, 12), d2(4, 11), d2(3, 12))
+        thr = max(0.070, 0.38 * hs)
+        return di <= thr and dm <= thr
+    return True
 
 
 def resolve_cleaned_path(path: Path | str, *, use_cleaned: bool = True) -> Path:
@@ -103,7 +138,60 @@ def frame_durations(frames):
 def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: bool = False) -> dict:
     if not meta.get("complete"):
         raise ValueError(f"Unfinished recording: {path.name}")
+    if not meta.get("occlusion_calibrated") and len(frames) >= 3:
+        frames, num_cal = reconstruct_hand_sequence(frames, in_place=False)
+        meta = dict(meta)
+        meta["occlusion_calibrated"] = True
+        meta["occlusion_calibrated_frames"] = int(num_cal)
     n = len(frames)
+    if n >= 600 and meta.get("mode") == "guided":
+        from types import SimpleNamespace
+        from src.capture_rules import CaptureRules
+        from src.gesture_engine import GestureEngine
+
+        frames = list(frames)
+        eng = GestureEngine()
+        eng.frame_aspect = float(meta.get("frame_aspect", 0.5625))
+        cap_rules = CaptureRules(eng.config)
+        prev_rep_tok = None
+        for idx_f, f in enumerate(frames):
+            t_f = float(f.get("t", 0.0))
+            lab_f = f.get("label") or {}
+            rep_tok = (lab_f.get("task"), lab_f.get("set"), lab_f.get("rep"), lab_f.get("phase") == "do")
+            if rep_tok != prev_rep_tok:
+                prev_rep_tok = rep_tok
+                eng._desktop_armed = True
+                eng._desktop_since = None
+                eng._last_trigger_times.clear()
+                eng._last_curled_at = -1e9
+                eng._last_halffist_at = -1e9
+                eng._index_released_at = -1e9
+                eng._scroll_released_at = -1e9
+                eng._pinky_fired_at = -1e9
+                eng._desktop_fired_at = -1e9
+                eng._side_released_at = -1e9
+                eng._side_armed = {"index": True, "ring": True, "pinky": True}
+                eng._click_fresh = {"middle": True, "ring": True, "pinky": True}
+                eng._secondary_since.clear()
+                eng._secondary_off.clear()
+                eng._index_pinched = False
+                eng._middle_hold_pinched = False
+            lm_f = f.get("lm") if usable(f) else None
+            if isinstance(lm_f, np.ndarray):
+                lm_f = lm_f.tolist()
+            res_f = eng.process(lm_f, t_f)
+            hand_ns = SimpleNamespace(landmarks=lm_f) if lm_f is not None else None
+            obs_targets = cap_rules.observe(t_f, hand_ns, res_f, lab_f)
+            old_rule = f.get("rule")
+            if isinstance(old_rule, dict) or lm_f is not None:
+                merged_rule = dict(old_rule) if isinstance(old_rule, dict) else {"evaluated": True}
+                old_targets = list(merged_rule.get("targets") or [])
+                merged_rule["targets"] = list(dict.fromkeys(old_targets + obs_targets))
+                if merged_rule.get("action") in (None, "none", "move_cursor") and res_f.action not in (None, "none"):
+                    merged_rule["action"] = res_f.action
+                    merged_rule["gesture"] = res_f.active_gesture
+                merged_rule["evaluated"] = True
+                frames[idx_f] = {**f, "rule": merged_rule}
     features = np.zeros((n, FEATURES), np.float32)
     spatial_features = np.zeros((n, SPATIAL_FEATURES), np.float32)
     segments = np.full(n, -1, np.int64)
@@ -156,6 +244,66 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
             motion = {"left": -vx, "right": vx, "down": vy}[task.direction]
             if motion < 0.03:
                 valid_targets[i] = None
+
+    # For real-length human recordings, trim reaction latency at phase transitions
+    # and filter 'rest' frames where the user was still holding or releasing the gesture.
+    if n >= 300:
+        idx = 0
+        while idx < n:
+            ph = (frames[idx].get("label") or {}).get("phase")
+            j = idx
+            while j + 1 < n and (frames[j + 1].get("label") or {}).get("phase") == ph:
+                j += 1
+            t_start = float(frames[idx].get("t", 0.0))
+            t_end = float(frames[j].get("t", 0.0))
+            dur = t_end - t_start
+            prev_ph = (frames[idx - 1].get("label") or {}).get("phase") if idx > 0 else "waiting"
+            if ph == "do" and dur >= 1.2 and (j - idx + 1) >= 25:
+                lab0 = frames[idx].get("label") or {}
+                task0 = BY_KEY.get(lab0.get("task"))
+                if not (task0 and task0.direction):
+                    if prev_ph in ("prep", "rest") or (prev_ph in ("waiting", "paused") and dur >= 3.0):
+                        max_trim = idx + max(1, (j - idx + 1) // 4)
+                        for k in range(idx, min(j + 1, max_trim)):
+                            if float(frames[k].get("t", 0.0)) - t_start < 0.30:
+                                valid_targets[k] = None
+                            else:
+                                break
+            elif ph == "rest" and prev_ph == "do" and dur >= 0.8:
+                for k in range(idx, j + 1):
+                    if float(frames[k].get("t", 0.0)) - t_start < 0.45:
+                        valid_targets[k] = None
+                    else:
+                        break
+            idx = j + 1
+
+        # Filter guided pinch 'do' frames by whether the scheduled pinch is actually captured on screen
+        if n >= 600:
+            for i in range(n):
+                tgt_i = valid_targets[i]
+                if tgt_i in ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle"):
+                    lab_i = frames[i].get("label") or {}
+                    if lab_i.get("phase") == "do" and not is_pinch_captured_on_screen(frames[i], tgt_i):
+                        valid_targets[i] = None
+
+        do_vecs = [
+            spatial_features[i]
+            for i in range(n)
+            if valid_targets[i] not in (None, "none")
+            and (frames[i].get("label") or {}).get("phase") == "do"
+            and np.any(spatial_features[i] != 0.0)
+        ]
+        if len(do_vecs) >= 20:
+            do_arr = np.asarray(do_vecs, dtype=np.float32)
+            do_mean = do_arr.mean(axis=0)
+            do_med = float(np.median(np.linalg.norm(do_arr - do_mean, axis=1)))
+            cutoff = max(do_med * 1.35, 4.5)
+            for i in range(n):
+                if valid_targets[i] == "none" and (frames[i].get("label") or {}).get("phase") == "rest":
+                    if np.any(spatial_features[i] != 0.0):
+                        dist = float(np.linalg.norm(spatial_features[i] - do_mean))
+                        if dist <= cutoff:
+                            valid_targets[i] = None
 
     stored_frames = (
         [{"t": f.get("t", 0.0), "label": f.get("label"), "rule": f.get("rule")} for f in frames]
@@ -234,6 +382,13 @@ def load_sessions(paths, window=15, *, include_windows=True, classes=None, use_c
                 extracted.append(_extract_record(Path(p), meta, frames, slim_frames=False))
     keys = sorted({k for r in extracted for k in r["cond_keys"]} - {"unassigned"})
     groups = {key: i for i, key in enumerate(keys)}
+    free_none_count = sum(
+        1
+        for r in extracted
+        for f, t in zip(r["frames"], r["valid_targets"])
+        if t == "none" and (f.get("label") or {}).get("phase") != "rest"
+    )
+    drop_all_rest = free_none_count >= 100
     sessions = []
     for r in extracted:
         features = r["features"]
@@ -243,7 +398,19 @@ def load_sessions(paths, window=15, *, include_windows=True, classes=None, use_c
             for seg_start, seg_end in r["seg_ranges"]:
                 x[seg_start:seg_end] = windows(features[seg_start:seg_end], window)
         y = np.array(
-            [class_to_idx.get(t, -1) if t is not None else -1 for t in r["valid_targets"]],
+            [
+                -1
+                if (
+                    t is None
+                    or (
+                        drop_all_rest
+                        and t == "none"
+                        and (f.get("label") or {}).get("phase") == "rest"
+                    )
+                )
+                else class_to_idx.get(t, -1)
+                for f, t in zip(r["frames"], r["valid_targets"])
+            ],
             dtype=np.int64,
         )
         cond = np.array([groups.get(k, -1) for k in r["cond_keys"]], dtype=np.int64)

@@ -13,6 +13,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+where nvidia-smi >nul 2>nul
+if not errorlevel 1 (
+  echo NVIDIA GPU detected. Installing CUDA-enabled PyTorch for GPU training acceleration...
+  uv pip install --python ".venv\Scripts\python.exe" --reinstall-package torch torch --index-url https://download.pytorch.org/whl/cu132 --cache-dir .local/uv-cache
+)
 ".venv\Scripts\python.exe" tcn_app.py --check
 if errorlevel 1 (
   pause

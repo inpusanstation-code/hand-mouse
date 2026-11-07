@@ -20,13 +20,13 @@ class Task:
 
 # Keep the original first three tasks/labels compatible with existing recordings.
 TASKS = (
-    Task("thumb_ring", "엄지+약지 (우클릭)", "엄지와 약지 끝을 붙여 유지하세요. 쉬기 때 떼세요", action="right_click"),
-    Task("thumb_index", "엄지+검지 (스크롤)", "엄지와 검지로 집어 위아래로 끌어보세요. 쉬기 때 놓으세요", action="scroll_grab"),
+    Task("thumb_ring", "엄지+약지 (우클릭)", "엄지와 약지 끝을 붙인 채 천천히 조금씩 움직이며 유지하세요", action="right_click"),
+    Task("thumb_index", "엄지+검지 (스크롤)", "엄지와 검지를 붙인 채 위아래로 천천히 끌어보세요", action="scroll_grab"),
     Task("none", "아무 동작 아님 (반주먹 이동)", "반주먹으로 커서를 움직이듯 손을 이리저리 움직이세요", True, "이동·중립"),
-    Task("thumb_middle", "엄지+중지 (좌클릭)", "엄지와 중지 끝을 붙여 유지하세요. 쉬기 때 떼세요", action="left_click"),
-    Task("thumb_middle_drag", "엄지+중지 유지 (드래그)", "엄지와 중지를 붙인 채 1초 유지하고 손을 옮기세요. 쉬기 때 놓으세요", target="thumb_middle", action="drag_hold"),
-    Task("thumb_index_middle", "엄지+검지+중지 (드래그)", "엄지·검지·중지 끝을 동시에 붙이고 손을 옮기세요. 쉬기 때 놓으세요", action="drag_hold"),
-    Task("thumb_pinky", "엄지+새끼 (창 선택)", "엄지와 새끼손가락 끝을 붙여 유지하세요. 쉬기 때 떼세요", category="창·모드", action="task_switcher"),
+    Task("thumb_middle", "엄지+중지 (좌클릭)", "엄지와 중지 끝을 붙인 채 천천히 조금씩 움직이며 유지하세요", action="left_click"),
+    Task("thumb_middle_drag", "엄지+중지 유지 (드래그)", "엄지와 중지를 붙인 채 손을 여러 방향으로 천천히 옮기세요", target="thumb_middle", action="drag_hold"),
+    Task("thumb_index_middle", "엄지+검지+중지 (드래그)", "엄지·검지·중지 끝을 동시에 붙인 채 손을 천천히 옮기세요", action="drag_hold"),
+    Task("thumb_pinky", "엄지+새끼 (창 선택)", "엄지와 새끼손가락 끝을 붙인 채 천천히 조금씩 움직이며 유지하세요", category="창·모드", action="task_switcher"),
     Task("palm_side", "엄지 접고 손 가로 (바탕화면)", "엄지만 접고 네 손가락을 펴서 옆으로 향하게 유지하세요", category="창·모드", action="show_desktop"),
     Task("v_sign", "V 손 모양 (제어 켜기·끄기)", "검지·중지만 V로 펴고 나머지는 접어 가만히 유지하세요", category="창·모드"),
     Task("rock_sign", "검지·새끼 펴기 (창 닫기)", "검지·새끼만 펴고 중지·약지를 접어 유지하세요. 실제 창은 닫히지 않아요", category="창·모드"),

@@ -201,3 +201,40 @@ def test_runtime_persists_plan_and_ignores_enable_during_guided_capture(tmp_path
     meta, frames, _ = read_session(file)
     assert meta["capture_plan"]["conditions"][0]["name"] == "먼 곳"
     assert all(f["label"]["target"] == "idle" for f in frames)
+
+
+def test_continuous_capture_plan_has_zero_prep_and_rest_by_default():
+    default_row = plans.condition()
+    assert default_row["prep"] == 0.0 and default_row["rest"] == 0.0 and default_row["reps"] == 1
+    g = GuidedSession(tasks=tasks_for("thumb_middle"), plan=plan(default_row))
+    g.advance(0.0)
+    assert g.label(0.05)["phase"] == "do" and g.label(0.05)["target"] == "thumb_middle"
+    assert "남은 시간" in g.view(1.0)["sub"]
+
+
+def test_orientation_guide_explains_left_and_right_tilt_clearly(tmp_path):
+    from src.recording_plan_editor import RecordingPlanEditor
+
+    assert "10~11시" in plans.orientation_guide("왼쪽으로 기울임")
+    assert "1~2시" in plans.orientation_guide("오른쪽으로 기울임")
+    left_row = plans.condition(name="좌측 회전", orientation="왼쪽으로 기울임")
+    assert "10~11시" in plans.description(left_row)
+
+    # RecordingPlanEditor exposes orientationGuide for QML dialog
+    editor = RecordingPlanEditor(tmp_path / "plans.json")
+    editor.open("thumb_middle")
+    editor.setField("orientation", "오른쪽으로 기울임")
+    assert "1~2시" in editor.orientationGuide
+    editor.setField("orientation", "왼쪽으로 기울임")
+    assert "10~11시" in editor.orientationGuide
+
+    # GuidedSession view includes the orientation guide in prompt and condition_detail
+    g = GuidedSession(tasks=tasks_for("thumb_middle"), plan=plan(left_row))
+    wait_view = g.view(0.0)
+    assert "10~11시" in wait_view["prompt"]
+    assert "10~11시" in wait_view["condition_detail"]
+    g.advance(0.0)
+    run_view = g.view(0.5)
+    assert "10~11시" in run_view["condition_detail"]
+
+

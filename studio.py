@@ -26,7 +26,7 @@ MENU = [
     ("1", "앱 실행 (연결된 카메라)", "마우스 조작 + 학습 데이터 녹화 + 학습 센터 + 손짓 확인(TCN)"),
     ("2", "앱 실행 (휴대폰 브라우저 카메라)", "휴대폰으로 QR 접속해서 카메라로 씀"),
     ("3", "학습 센터 리포트", "동작별 데이터 양·인식률·오작동과 '어떤 동작을 더 녹화할지' 추천"),
-    ("4", "TCN 학습하기", "recordings/ 의 녹화로 학습 (자세별 평가 포함, CPU로 몇 분)"),
+    ("4", "TCN 학습하기", "recordings/ 의 녹화로 학습 (GPU 가속 가능 여부 자동 감지 · GPU/CPU 선택)"),
     ("5", "모델 내보내기", "다른 앱에 넣을 수 있는 묶음 만들기 (exports/)"),
     ("6", "허브 설정 및 상태 확인", "저장소 주소(Hugging Face / GitHub)·보안 토큰(DPAPI 암호화) 설정 및 현황 확인"),
     ("7", "허브에 업로드 (push)", "검증된 새 녹화(.jsonl.gz)와 TCN 모델을 설정된 원격 허브에 업로드"),
@@ -96,7 +96,20 @@ def main() -> int:
         elif choice == "3":
             run(["scripts/training_report.py"], "녹화 데이터와 최근 학습 결과를 동작별로 요약")
         elif choice == "4":
-            run(["scripts/train_tcn.py", "--folds"], "자세 하나씩 빼고 평가한 뒤 전체로 최종 학습, models/gesture_tcn.onnx 저장")
+            from src.training_center import detect_gpu_training_capability, set_training_device
+            cap = detect_gpu_training_capability()
+            print(f"\n  [연산 장치 감지] {cap['status_label']}")
+            dev_flag = "cpu"
+            if cap.get("cuda_available"):
+                d_in = input(f"  학습 연산 장치 선택 (1=GPU 가속 [{cap.get('device_name')}], 2=CPU, 엔터=1): ").strip()
+                dev_flag = "cpu" if d_in == "2" else "gpu"
+            else:
+                print("  → 현재 PC에서 CUDA GPU를 사용할 수 없어 CPU 학습으로 진행합니다.")
+            set_training_device(dev_flag)
+            run(
+                ["scripts/train_tcn.py", "--folds", "--device", dev_flag],
+                f"{dev_flag.upper()}로 자세별 교차평가 및 최종 학습 후 models/gesture_tcn.onnx 저장",
+            )
         elif choice == "5":
             run(["scripts/export_model.py"], "exports/ 에 모델·특징 코드·사용 예시·설명서를 묶어 zip으로")
         elif choice == "6":

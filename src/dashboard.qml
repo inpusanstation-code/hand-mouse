@@ -20,6 +20,7 @@ ApplicationWindow {
         }
     }
     readonly property color navy: "#112331"
+    readonly property color ink: "#112331"
     readonly property color muted: "#526575"
     readonly property color mint: "#46E5BD"
     readonly property color primaryBlue: "#1D4ED8"
@@ -35,6 +36,7 @@ ApplicationWindow {
     // accent = 선택/활성화된 상태(연두/민트색 #46E5BD), primary = 주요 실행 버튼(진파랑 #1D4ED8), 기본 = 중립 실행 버튼
     component ActionButton: Button {
         id: button
+        focusPolicy: Qt.NoFocus
         property bool accent: false
         property bool primary: false
         property bool danger: false
@@ -64,6 +66,7 @@ ApplicationWindow {
     }
     component CompactButton: Button {
         id: cbutton
+        focusPolicy: Qt.NoFocus
         property bool accent: false
         property bool primary: false
         property bool danger: false
@@ -286,6 +289,219 @@ ApplicationWindow {
         }
     }
 
+    component BusySpinner: Item {
+        id: spinnerRoot
+        property bool active: false
+        property color strokeColor: "#1D4ED8"
+        implicitWidth: 20
+        implicitHeight: 20
+        visible: active
+        Canvas {
+            id: spinnerCanvas
+            anchors.fill: parent
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var cx = width / 2, cy = height / 2
+                var r = Math.min(width, height) / 2 - 2.5
+                ctx.lineWidth = 2.6
+                ctx.lineCap = "round"
+                ctx.strokeStyle = "#CBD5E1"
+                ctx.beginPath()
+                ctx.arc(cx, cy, r, 0, Math.PI * 2)
+                ctx.stroke()
+                ctx.strokeStyle = spinnerRoot.strokeColor
+                ctx.beginPath()
+                ctx.arc(cx, cy, r, -Math.PI / 2, Math.PI * 0.85)
+                ctx.stroke()
+            }
+            RotationAnimator on rotation {
+                from: 0
+                to: 360
+                duration: 850
+                loops: Animation.Infinite
+                running: spinnerRoot.active && spinnerRoot.visible
+            }
+        }
+    }
+
+    component WorkProgressBanner: Rectangle {
+        id: workBanner
+        property bool showOpenCenterButton: false
+        property bool showStopButton: false
+        property bool showStatusWhenIdle: false
+        readonly property bool hasIdleStatus: showStatusWhenIdle && !dashboard.appWorking && (dashboard.trainingStage !== "" || dashboard.trainingNote !== "")
+        visible: dashboard.appWorking || hasIdleStatus
+        Layout.fillWidth: true
+        implicitHeight: bannerCol.implicitHeight + 20
+        radius: 10
+        color: dashboard.appWorking ? (dashboard.trainingRunning ? "#EFF6FF" : "#ECFEFF") : "#F8FAFC"
+        border.color: dashboard.appWorking ? (dashboard.trainingRunning ? "#60A5FA" : "#22D3EE") : "#CBD5E1"
+        border.width: dashboard.appWorking ? 1.5 : 1
+
+        ColumnLayout {
+            id: bannerCol
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 6
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+
+                BusySpinner {
+                    active: dashboard.appWorking && workBanner.visible
+                    strokeColor: dashboard.trainingRunning ? "#1D4ED8" : "#0891B2"
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    spacing: 2
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        TextLabel {
+                            text: dashboard.appWorking
+                                ? (dashboard.workTitle !== "" ? dashboard.workTitle : "작업 진행 중…")
+                                : (dashboard.trainingStage !== "" ? dashboard.trainingStage : dashboard.trainingNote)
+                            font.pixelSize: 13
+                            font.bold: true
+                            color: dashboard.appWorking ? (dashboard.trainingRunning ? "#1E3A8A" : "#0F172A") : window.navy
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            elide: Text.ElideRight
+                        }
+                        Rectangle {
+                            visible: dashboard.appWorking && dashboard.workElapsedText !== ""
+                            radius: 9
+                            color: dashboard.trainingRunning ? "#DBEAFE" : "#CFFAFE"
+                            implicitWidth: elapsedLbl.implicitWidth + 14
+                            implicitHeight: 20
+                            TextLabel {
+                                id: elapsedLbl
+                                anchors.centerIn: parent
+                                text: dashboard.workElapsedText
+                                font.pixelSize: 11
+                                font.bold: true
+                                color: dashboard.trainingRunning ? "#1E40AF" : "#155E75"
+                            }
+                        }
+                        Rectangle {
+                            visible: dashboard.appWorking && dashboard.workPercentText !== ""
+                            radius: 9
+                            color: dashboard.trainingRunning ? "#1D4ED8" : "#0891B2"
+                            implicitWidth: pctLbl.implicitWidth + 14
+                            implicitHeight: 20
+                            TextLabel {
+                                id: pctLbl
+                                anchors.centerIn: parent
+                                text: dashboard.workPercentText
+                                font.pixelSize: 11
+                                font.bold: true
+                                color: "white"
+                            }
+                        }
+                    }
+
+                    TextLabel {
+                        visible: dashboard.appWorking ? (dashboard.workDetail !== "") : (dashboard.trainingStage !== "" && dashboard.trainingNote !== "")
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        text: dashboard.appWorking
+                            ? (dashboard.trainingNote !== "" && dashboard.trainingNote !== dashboard.workDetail && dashboard.workDetail.indexOf(dashboard.trainingNote) === -1
+                                ? (dashboard.workDetail + " · " + dashboard.trainingNote)
+                                : dashboard.workDetail)
+                            : dashboard.trainingNote
+                        font.pixelSize: 12
+                        color: "#334155"
+                        wrapMode: Text.Wrap
+                    }
+                }
+
+                Canvas {
+                    id: bannerLossChart
+                    visible: dashboard.appWorking && dashboard.trainingLosses.length > 1
+                    Layout.preferredWidth: 150
+                    Layout.preferredHeight: 30
+                    property var losses: dashboard.trainingLosses
+                    onLossesChanged: requestPaint()
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.reset()
+                        var v = losses
+                        if (!v || v.length < 2) return
+                        var hi = Math.max.apply(null, v), lo = Math.min.apply(null, v)
+                        var span = Math.max(1e-6, hi - lo)
+                        ctx.strokeStyle = "#16846E"
+                        ctx.lineWidth = 2
+                        ctx.beginPath()
+                        for (var i = 0; i < v.length; i++) {
+                            var x = i / (v.length - 1) * (width - 4) + 2
+                            var y = 3 + (1 - (v[i] - lo) / span) * (height - 6)
+                            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+                        }
+                        ctx.stroke()
+                    }
+                }
+
+                CompactButton {
+                    visible: workBanner.showOpenCenterButton && !trainingCenter.visible
+                    text: "학습 센터 열기"
+                    primary: true
+                    onClicked: trainingCenter.open()
+                }
+
+                CompactButton {
+                    visible: workBanner.showStopButton && dashboard.trainingRunning
+                    text: "학습 멈춤"
+                    danger: true
+                    onClicked: dashboard.stopTraining()
+                }
+            }
+
+            Rectangle {
+                id: barTrack
+                visible: dashboard.appWorking
+                Layout.fillWidth: true
+                height: 8
+                radius: 4
+                color: dashboard.trainingRunning ? "#DBEAFE" : "#CFFAFE"
+                clip: true
+
+                Rectangle {
+                    id: determinateFill
+                    visible: !dashboard.workIndeterminate
+                    width: parent.width * Math.max(0.03, Math.min(1.0, dashboard.workProgress))
+                    height: parent.height
+                    radius: 4
+                    color: dashboard.trainingRunning ? "#2563EB" : "#06B6D4"
+                    Behavior on width {
+                        NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+                    }
+                }
+
+                Rectangle {
+                    id: indeterminateFill
+                    visible: dashboard.workIndeterminate
+                    width: Math.max(80, parent.width * 0.32)
+                    height: parent.height
+                    radius: 4
+                    color: dashboard.trainingRunning ? "#3B82F6" : "#06B6D4"
+                    property real slidePhase: 0.0
+                    x: (parent.width - width) * slidePhase
+                    SequentialAnimation on slidePhase {
+                        loops: Animation.Infinite
+                        running: workBanner.visible && dashboard.appWorking && dashboard.workIndeterminate
+                        NumberAnimation { from: 0.0; to: 1.0; duration: 900; easing.type: Easing.InOutQuad }
+                        NumberAnimation { from: 1.0; to: 0.0; duration: 900; easing.type: Easing.InOutQuad }
+                    }
+                }
+            }
+        }
+    }
+
     ColumnLayout {
         visible: dashboard.stage === "main"
         anchors.fill: parent
@@ -302,7 +518,13 @@ ApplicationWindow {
                 TextLabel { text: dashboard.appName; font.pixelSize: 26; font.bold: true }
                 TextLabel { text: "INPUT STUDIO"; font.pixelSize: 11; font.letterSpacing: 1.4; color: window.muted }
                 Item { Layout.fillWidth: true }
-                ActionButton { text: "학습 센터"; onClicked: trainingCenter.open() }
+                ActionButton {
+                    text: dashboard.appWorking
+                        ? ("학습 센터 · " + dashboard.workPercentText)
+                        : "학습 센터"
+                    accent: dashboard.appWorking
+                    onClicked: trainingCenter.open()
+                }
                 ActionButton {
                     text: dashboard.chosenHand ? dashboard.chosenHand + " · 다시 설정" : "사용할 손 설정"
                     onClicked: dashboard.beginHandSetup()
@@ -320,6 +542,20 @@ ApplicationWindow {
                     }
                 }
                 ActionButton { text: dashboard.controlLabel; accent: true; onClicked: dashboard.command(32) }
+            }
+        }
+        Item {
+            visible: dashboard.appWorking
+            Layout.fillWidth: true
+            Layout.leftMargin: 20
+            Layout.rightMargin: 20
+            Layout.topMargin: 12
+            implicitHeight: mainWorkBanner.implicitHeight
+            WorkProgressBanner {
+                id: mainWorkBanner
+                anchors.fill: parent
+                showOpenCenterButton: true
+                showStopButton: true
             }
         }
         RowLayout {
@@ -585,22 +821,86 @@ ApplicationWindow {
                             fillMode: Image.PreserveAspectFit
                         }
                         Item {
-                            visible: dashboard.recMode === "guided" && dashboard.recCondition !== ""
+                            visible: dashboard.recMode !== "off"
                             x: (parent.width - capturePreview.paintedWidth) / 2
                             y: (parent.height - capturePreview.paintedHeight) / 2
                             width: capturePreview.paintedWidth
                             height: capturePreview.paintedHeight
-                            Repeater {
-                                model: ["왼쪽 위", "위", "오른쪽 위", "왼쪽", "중앙", "오른쪽", "왼쪽 아래", "아래", "오른쪽 아래"]
-                                delegate: Rectangle {
-                                    required property int index
-                                    required property string modelData
-                                    x: (index % 3) * width; y: Math.floor(index / 3) * height
-                                    width: parent.width / 3; height: parent.height / 3
-                                    color: modelData === dashboard.recPosition ? "#2046E5BD" : "transparent"
-                                    border.width: modelData === dashboard.recPosition ? 3 : 1
-                                    border.color: modelData === dashboard.recPosition ? "#46E5BD" : "#60FFFFFF"
-                                    Label { visible: modelData === dashboard.recPosition; text: "위치 안내 · " + modelData; color: "white"; padding: 8; font.bold: true }
+
+                            Canvas {
+                                id: liveRecSprayCanvas
+                                anchors.fill: parent
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    var w = width
+                                    var h = height
+                                    ctx.clearRect(0, 0, w, h)
+                                    var cells = dashboard.spatialSprayCells || []
+                                    var baseR = Math.max(24, Math.min(w, h) * 0.13)
+                                    for (var i = 0; i < cells.length; i++) {
+                                        var cell = cells[i]
+                                        var d = cell.density || 0
+                                        if (d <= 0.01) continue
+                                        var cx = cell.x * w
+                                        var cy = cell.y * h
+                                        var rad = baseR * (0.65 + 0.65 * Math.sqrt(d))
+                                        var q = (cell.quality !== undefined) ? cell.quality : 0.85
+                                        var rCol = q >= 0.72 ? 40 : (q >= 0.45 ? 242 : 229)
+                                        var gCol = q >= 0.72 ? 229 : (q >= 0.45 ? 181 : 72)
+                                        var bCol = q >= 0.72 ? 175 : (q >= 0.45 ? 68 : 77)
+                                        var alpha = Math.min(0.42, 0.08 + d * 0.34)
+                                        var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad)
+                                        grad.addColorStop(0.0, "rgba(" + rCol + "," + gCol + "," + bCol + "," + alpha.toFixed(3) + ")")
+                                        grad.addColorStop(0.55, "rgba(" + rCol + "," + gCol + "," + bCol + "," + (alpha * 0.45).toFixed(3) + ")")
+                                        grad.addColorStop(1.0, "rgba(" + rCol + "," + gCol + "," + bCol + ",0.0)")
+                                        ctx.fillStyle = grad
+                                        ctx.beginPath()
+                                        ctx.arc(cx, cy, rad, 0, Math.PI * 2)
+                                        ctx.fill()
+
+                                        // Spray stipple dots for visual concentration texture
+                                        var dots = Math.min(18, Math.max(3, Math.round(d * 18)))
+                                        ctx.fillStyle = "rgba(" + rCol + "," + gCol + "," + bCol + "," + Math.min(0.65, 0.18 + d * 0.45).toFixed(3) + ")"
+                                        for (var k = 0; k < dots; k++) {
+                                            var ang = ((cell.gx * 31 + cell.gy * 17 + k * 53) % 360) * (Math.PI / 180.0)
+                                            var dist = (((cell.gx * 13 + cell.gy * 29 + k * 37) % 100) / 100.0) * (rad * 0.72)
+                                            var dx = cx + Math.cos(ang) * dist
+                                            var dy = cy + Math.sin(ang) * dist
+                                            ctx.fillRect(dx - 1, dy - 1, 2.2, 2.2)
+                                        }
+                                    }
+                                }
+                                Connections {
+                                    target: dashboard
+                                    function onTrainingChanged() { liveRecSprayCanvas.requestPaint() }
+                                    function onStateChanged() { liveRecSprayCanvas.requestPaint() }
+                                }
+                            }
+
+                            Rectangle {
+                                anchors.top: parent.top
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.margins: 10
+                                implicitHeight: sprayGuideRow.implicitHeight + 12
+                                radius: 8
+                                color: "#B80D1B26"
+                                border.color: "#8046E5BD"
+                                RowLayout {
+                                    id: sprayGuideRow
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    spacing: 8
+                                    Rectangle { width: 10; height: 10; radius: 5; color: "#46E5BD" }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: "전체 화면 대상 녹화 · 초록 스프레이 음영 = AI 모델이 이미 학습된 영역 (음영이 옅거나 빈 영역 위주로 손을 자유롭게 움직이며 녹화하세요 · Space 키로 시작/일시정지)"
+                                        color: "#EEFCF8"
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        wrapMode: Text.Wrap
+                                    }
                                 }
                             }
                         }
@@ -653,7 +953,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 visible: dashboard.recPrompt !== ""
                                 text: dashboard.recPrompt
-                                font.pixelSize: 22
+                                font.pixelSize: 16
                                 font.bold: true
                                 wrapMode: Text.Wrap
                             }
@@ -678,8 +978,14 @@ ApplicationWindow {
                                 wrapMode: Text.Wrap
                             }
                         }
-                        ActionButton { visible: dashboard.recWaiting; text: "시작"; primary: true; onClicked: dashboard.recStart() }
-                        ActionButton { visible: dashboard.recMode === "guided" && !dashboard.recWaiting; text: dashboard.recPaused ? "계속" : "일시정지"; accent: dashboard.recPaused; onClicked: dashboard.toggleRecordingPause() }
+                        ActionButton { visible: dashboard.recWaiting; text: "시작 (Space)"; primary: true; onClicked: dashboard.recStart() }
+                        ActionButton {
+                            visible: (dashboard.recMode === "guided" && !dashboard.recWaiting) || dashboard.recMode === "free"
+                            text: dashboard.recPaused ? "녹화 시작/계속 (Space)" : "일시정지 (Space)"
+                            accent: dashboard.recPaused
+                            primary: dashboard.recPaused && dashboard.recMode === "free"
+                            onClicked: dashboard.toggleRecordingPause()
+                        }
                         ActionButton { visible: dashboard.recMode !== "off"; text: "녹화 끝 (저장)"; primary: true; onClicked: dashboard.setRecMode("off") }
                         ActionButton { visible: dashboard.recMode !== "off"; text: "녹화 취소 (버리기)"; danger: true; onClicked: dashboard.discardRecording() }
                     }
@@ -783,6 +1089,7 @@ ApplicationWindow {
         id: trainingCenter
         property string centerTab: "gestures"
         property string selectedSimFile: ""
+        property bool showImprovementReport: false
         anchors.centerIn: parent
         width: Math.min(1250, window.width - 20)
         height: Math.min(836, window.height - 20)
@@ -845,14 +1152,10 @@ ApplicationWindow {
                     text: "원격 허브 · " + dashboard.hubSummaryLabel
                 }
                 Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
-                TextLabel {
-                    visible: dashboard.trainingBusy !== ""
-                    text: dashboard.trainingBusy
-                    font.pixelSize: 12
-                    color: window.muted
-                    Layout.maximumWidth: 240
-                    elide: Text.ElideRight
-                }
+            }
+            WorkProgressBanner {
+                showStopButton: true
+                showStatusWhenIdle: true
             }
             Rectangle {
                 visible: dashboard.trainingStorageWarn
@@ -916,6 +1219,177 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 8
+                // Before-vs-After Training Improvement Report Toggle & Collapsible Card
+                RowLayout {
+                    visible: Boolean(dashboard.trainingImprovement.available) && dashboard.trainingImprovementItems.length > 0
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Rectangle {
+                        radius: 8
+                        color: dashboard.trainingImprovement.overall_status === "warn" ? "#FFF5E5" : "#EEFBF6"
+                        border.color: dashboard.trainingImprovement.overall_status === "warn" ? "#F2B544" : "#3BC49A"
+                        implicitWidth: impToggleRow.implicitWidth + 20
+                        implicitHeight: 32
+                        RowLayout {
+                            id: impToggleRow
+                            anchors.centerIn: parent
+                            spacing: 8
+                            Rectangle {
+                                width: 8; height: 8; radius: 4
+                                color: dashboard.trainingImprovement.overall_status === "warn" ? "#D97706" : "#15805C"
+                            }
+                            TextLabel {
+                                text: (dashboard.trainingImprovement.has_before_model ? "전후 비교 리포트" : "학습 성과 리포트")
+                                    + (trainingCenter.showImprovementReport ? " 접기 ▲" : " 보기 ▼")
+                                font.pixelSize: 12
+                                font.bold: true
+                                color: dashboard.trainingImprovement.overall_status === "warn" ? "#8A4B00" : "#0F5E43"
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: trainingCenter.showImprovementReport = !trainingCenter.showImprovementReport
+                        }
+                    }
+                    TextLabel {
+                        visible: !trainingCenter.showImprovementReport && !Boolean(dashboard.trainingImprovement.dismissed)
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
+                        text: dashboard.trainingImprovementHeadline
+                        font.pixelSize: 12
+                        color: dashboard.trainingImprovement.overall_status === "warn" ? "#8A4B00" : "#12352A"
+                    }
+                    Item {
+                        visible: trainingCenter.showImprovementReport || Boolean(dashboard.trainingImprovement.dismissed)
+                        Layout.fillWidth: true
+                    }
+                }
+                Rectangle {
+                    visible: trainingCenter.showImprovementReport && Boolean(dashboard.trainingImprovement.available) && dashboard.trainingImprovementItems.length > 0
+                    Layout.fillWidth: true
+                    implicitHeight: impCol.implicitHeight + 20
+                    radius: 10
+                    color: dashboard.trainingImprovement.overall_status === "warn" ? "#FFF5E5" : "#EEFBF6"
+                    border.color: dashboard.trainingImprovement.overall_status === "warn" ? "#F2B544" : "#3BC49A"
+                    ColumnLayout {
+                        id: impCol
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 6
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle {
+                                radius: 5
+                                color: dashboard.trainingImprovement.overall_status === "warn" ? "#F2B544" : "#15805C"
+                                implicitWidth: impTagLbl.implicitWidth + 12
+                                implicitHeight: 22
+                                TextLabel {
+                                    id: impTagLbl
+                                    anchors.centerIn: parent
+                                    text: dashboard.trainingImprovement.has_before_model ? "전후 비교 리포트" : "학습 성과 리포트"
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                    color: "#FFFFFF"
+                                }
+                            }
+                            TextLabel {
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                text: dashboard.trainingImprovementHeadline
+                                font.pixelSize: 13
+                                font.bold: true
+                                color: "#12352A"
+                                wrapMode: Text.Wrap
+                            }
+                            CompactButton {
+                                visible: Boolean(dashboard.trainingImprovement.can_rollback) && String(dashboard.trainingImprovement.backup_id || "") !== ""
+                                text: "직전 모델로 되돌리기"
+                                danger: Number(dashboard.trainingImprovement.regressed_count || 0) > 0
+                                enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
+                                onClicked: dashboard.restoreModelBackup(String(dashboard.trainingImprovement.backup_id))
+                            }
+                            CompactButton {
+                                text: "닫기"
+                                onClicked: {
+                                    trainingCenter.showImprovementReport = false
+                                    dashboard.dismissTrainingImprovement()
+                                }
+                            }
+                        }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Repeater {
+                                model: dashboard.trainingImprovementItems
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    radius: 7
+                                    color: "#FFFFFF"
+                                    border.color: modelData.status === "improved" || modelData.status === "new"
+                                        ? "#6AD6B3"
+                                        : (modelData.status === "regressed" ? "#F2B544" : window.line)
+                                    implicitWidth: String(modelData.diagnosis_summary || "") !== ""
+                                        ? Math.max(260, trainScroll.availableWidth - 24)
+                                        : Math.min(trainScroll.availableWidth - 24, impItemCol.implicitWidth + 16)
+                                    implicitHeight: impItemCol.implicitHeight + 12
+                                    ColumnLayout {
+                                        id: impItemCol
+                                        anchors.fill: parent
+                                        anchors.margins: 6
+                                        spacing: 4
+                                        RowLayout {
+                                            id: impItemRow
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            TextLabel {
+                                                text: modelData.name
+                                                font.pixelSize: 12
+                                                font.bold: true
+                                            }
+                                            Rectangle {
+                                                radius: 4
+                                                color: modelData.status === "improved" || modelData.status === "new"
+                                                    ? "#DDF7EE"
+                                                    : (modelData.status === "regressed" ? "#FFF0D4" : "#EEF2F5")
+                                                implicitWidth: impBadgeTxt.implicitWidth + 10
+                                                implicitHeight: 19
+                                                TextLabel {
+                                                    id: impBadgeTxt
+                                                    anchors.centerIn: parent
+                                                    text: modelData.badge
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: modelData.status === "improved" || modelData.status === "new"
+                                                        ? "#0F6E4F"
+                                                        : (modelData.status === "regressed" ? "#945800" : window.muted)
+                                                }
+                                            }
+                                            TextLabel {
+                                                text: modelData.detail
+                                                font.pixelSize: 11
+                                                color: window.muted
+                                                Layout.fillWidth: true
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+                                        TextLabel {
+                                            visible: String(modelData.diagnosis_summary || "") !== ""
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            text: "💡 " + String(modelData.diagnosis_summary || "")
+                                            font.pixelSize: 11
+                                            color: modelData.status === "regressed" ? "#8A4B00" : "#155E4B"
+                                            wrapMode: Text.Wrap
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 TextLabel {
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
@@ -970,6 +1444,28 @@ ApplicationWindow {
                                             Layout.fillWidth: true
                                             spacing: 8
                                             TextLabel { text: row.modelData.name; font.pixelSize: 16; font.bold: true; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.Wrap }
+                                            Rectangle {
+                                                visible: String(row.modelData.delta_badge || "") !== ""
+                                                radius: 6
+                                                color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
+                                                    ? "#DDF7EE"
+                                                    : (row.modelData.delta_status === "regressed" ? "#FFF0D4" : "#EEF2F5")
+                                                border.color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
+                                                    ? "#6AD6B3"
+                                                    : (row.modelData.delta_status === "regressed" ? "#F2B544" : window.line)
+                                                implicitWidth: rowDeltaTxt.implicitWidth + 12
+                                                implicitHeight: 22
+                                                TextLabel {
+                                                    id: rowDeltaTxt
+                                                    anchors.centerIn: parent
+                                                    text: String(row.modelData.delta_badge || "")
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
+                                                        ? "#0F6E4F"
+                                                        : (row.modelData.delta_status === "regressed" ? "#945800" : window.muted)
+                                                }
+                                            }
                                             Chip {
                                                 visible: Boolean(row.modelData.is_disabled)
                                                 warn: true
@@ -1004,6 +1500,35 @@ ApplicationWindow {
                                         }
                                         TextLabel { text: row.modelData.model_text; font.pixelSize: 11; color: window.muted }
                                         TextLabel {
+                                            visible: String(row.modelData.delta_detail || "") !== ""
+                                            text: "개선 평가: " + String(row.modelData.delta_detail || "")
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
+                                                ? "#0F6E4F"
+                                                : (row.modelData.delta_status === "regressed" ? "#945800" : window.muted)
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            wrapMode: Text.Wrap
+                                        }
+                                        Rectangle {
+                                            visible: String(row.modelData.diagnosis_summary || "") !== ""
+                                            Layout.fillWidth: true
+                                            radius: 6
+                                            color: row.modelData.delta_status === "regressed" ? "#FFF7E6" : "#EFFAF5"
+                                            border.color: row.modelData.delta_status === "regressed" ? "#F2C97D" : "#A7E3CB"
+                                            implicitHeight: rowDiagTxt.implicitHeight + 10
+                                            TextLabel {
+                                                id: rowDiagTxt
+                                                anchors.fill: parent
+                                                anchors.margins: 5
+                                                text: "💡 " + String(row.modelData.diagnosis_summary || "")
+                                                font.pixelSize: 11
+                                                color: row.modelData.delta_status === "regressed" ? "#7A4300" : "#135D47"
+                                                wrapMode: Text.Wrap
+                                            }
+                                        }
+                                        TextLabel {
                                             visible: row.modelData.label === "thumb_middle"
                                             text: "좌클릭과 중지 유지 드래그가 같은 모델을 공유합니다."
                                             font.pixelSize: 11
@@ -1017,6 +1542,42 @@ ApplicationWindow {
                                             color: row.modelData.level === "need" ? "#8A5A00" : window.muted
                                             wrapMode: Text.Wrap
                                         }
+                                        Rectangle {
+                                            visible: Boolean(dashboard.gestureTestResults[row.modelData.key])
+                                            Layout.fillWidth: true
+                                            radius: 6
+                                            color: "#EEF8F6"
+                                            border.color: "#7BD6BD"
+                                            implicitHeight: testResCol.implicitHeight + 10
+                                            ColumnLayout {
+                                                id: testResCol
+                                                anchors.fill: parent
+                                                anchors.margins: 5
+                                                spacing: 2
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    Layout.minimumWidth: 0
+                                                    text: dashboard.gestureTestResults[row.modelData.key]
+                                                        ? String(dashboard.gestureTestResults[row.modelData.key].summary || "")
+                                                        : ""
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: "#0D5944"
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                TextLabel {
+                                                    visible: Boolean(dashboard.gestureTestResults[row.modelData.key] && dashboard.gestureTestResults[row.modelData.key].detail)
+                                                    Layout.fillWidth: true
+                                                    Layout.minimumWidth: 0
+                                                    text: dashboard.gestureTestResults[row.modelData.key]
+                                                        ? String(dashboard.gestureTestResults[row.modelData.key].detail || "")
+                                                        : ""
+                                                    font.pixelSize: 11
+                                                    color: window.muted
+                                                    wrapMode: Text.Wrap
+                                                }
+                                            }
+                                        }
                                     }
                                     ColumnLayout {
                                         spacing: 6
@@ -1026,6 +1587,26 @@ ApplicationWindow {
                                             primary: true
                                             enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
                                             onClicked: dashboard.trainSelectedGesture(row.modelData.key)
+                                        }
+                                        ActionButton {
+                                            text: "판정 검증"
+                                            visible: Boolean(row.modelData.can_train && String(row.modelData.latest_file || "") !== "")
+                                            enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
+                                            onClicked: dashboard.testGestureJudgment(row.modelData.key)
+                                        }
+                                        ActionButton {
+                                            text: "시뮬레이터 재생"
+                                            visible: String(row.modelData.latest_file || "") !== ""
+                                            enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                                            onClicked: {
+                                                var targetFile = String(row.modelData.latest_file || "")
+                                                if (targetFile !== "") {
+                                                    trainingCenter.selectedSimFile = targetFile
+                                                    trainingCenter.centerTab = "simulator"
+                                                    dashboard.evaluateSimRecording(targetFile)
+                                                    dashboard.runSimulation(targetFile, true)
+                                                }
+                                            }
                                         }
                                         ActionButton {
                                             text: "학습 초기화"
@@ -1213,6 +1794,7 @@ ApplicationWindow {
                 property bool expandSkeleton: false
                 property bool showArmPose: true
                 property bool fullScreenCoordMode: true
+                property bool showSpatialSpray: true
 
                 readonly property int totalFrames: dashboard.simPlaybackCount
                 property var curFrame: null
@@ -1235,6 +1817,14 @@ ApplicationWindow {
                 onExpandSkeletonChanged: skeletonCanvas.requestPaint()
                 onShowArmPoseChanged: skeletonCanvas.requestPaint()
                 onFullScreenCoordModeChanged: skeletonCanvas.requestPaint()
+                onShowSpatialSprayChanged: skeletonCanvas.requestPaint()
+
+                Connections {
+                    target: dashboard
+                    function onTrainingChanged() {
+                        skeletonCanvas.requestPaint()
+                    }
+                }
 
                 function currentSimFilename() {
                     if (trainingCenter.selectedSimFile !== "")
@@ -1337,6 +1927,92 @@ ApplicationWindow {
                     }
                 }
 
+                // ONNX Model Selector + Load/Use + Train + Spatial Spray Filter Bar
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: onnxSelectRow.implicitHeight + 14
+                    radius: 10
+                    color: "#EEF8F6"
+                    border.color: "#8CE0CA"
+                    RowLayout {
+                        id: onnxSelectRow
+                        anchors.fill: parent
+                        anchors.margins: 7
+                        spacing: 8
+                        TextLabel { text: "ONNX 모델 선택:"; font.bold: true; font.pixelSize: 13; color: "#0B4F40" }
+                        ComboBox {
+                            id: onnxModelCombo
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 200
+                            implicitHeight: 32
+                            model: dashboard.onnxModels
+                            textRole: "combo_label"
+                            currentIndex: {
+                                var list = dashboard.onnxModels || []
+                                var selId = dashboard.selectedOnnxModelId
+                                for (var i = 0; i < list.length; i++) {
+                                    if (list[i].id === selId) return i
+                                }
+                                return list.length > 0 ? 0 : -1
+                            }
+                            onActivated: function(idx) {
+                                var list = dashboard.onnxModels || []
+                                if (idx >= 0 && idx < list.length) {
+                                    var mid = list[idx].id
+                                    dashboard.selectOnnxModel(mid)
+                                    var f = simTabRoot.currentSimFilename()
+                                    if (f !== "") {
+                                        dashboard.runSimulation(f, true)
+                                    }
+                                }
+                            }
+                        }
+                        Chip {
+                            warn: !(dashboard.selectedOnnxModel && dashboard.selectedOnnxModel.active)
+                            text: (dashboard.selectedOnnxModel && dashboard.selectedOnnxModel.active)
+                                ? "현재 실사용 적용됨"
+                                : "시뮬레이터 미리보기 중"
+                        }
+                        CompactButton {
+                            text: "이 ONNX 불러와 실사용"
+                            primary: !(dashboard.selectedOnnxModel && dashboard.selectedOnnxModel.active)
+                            accent: Boolean(dashboard.selectedOnnxModel && dashboard.selectedOnnxModel.active)
+                            enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.recMode === "off"
+                            onClicked: dashboard.activateOnnxModel(dashboard.selectedOnnxModelId)
+                        }
+                        CompactButton {
+                            text: (dashboard.selectedOnnxModel && dashboard.selectedOnnxModel.trainable_key && dashboard.selectedOnnxModel.trainable_key !== "all")
+                                ? "이 동작 ONNX 재학습"
+                                : "통합 ONNX 재학습"
+                            primary: true
+                            enabled: dashboard.trainingBusy === "" && !dashboard.trainingRunning && dashboard.recMode === "off" && Boolean(dashboard.trainingCanStart)
+                            onClicked: dashboard.trainSelectedOnnxModel(dashboard.selectedOnnxModelId)
+                        }
+                        TextLabel { text: "스프레이 동작 필터:"; font.bold: true; font.pixelSize: 12; color: "#0B4F40" }
+                        ComboBox {
+                            id: sprayFilterCombo
+                            Layout.preferredWidth: 165
+                            implicitHeight: 30
+                            model: dashboard.spatialSprayFilterOptions
+                            textRole: "name"
+                            currentIndex: {
+                                var opts = dashboard.spatialSprayFilterOptions || []
+                                var cur = dashboard.sprayGestureFilter
+                                for (var i = 0; i < opts.length; i++) {
+                                    if (opts[i].key === cur) return i
+                                }
+                                return 0
+                            }
+                            onActivated: function(idx) {
+                                var opts = dashboard.spatialSprayFilterOptions || []
+                                if (idx >= 0 && idx < opts.length) {
+                                    dashboard.setSprayGestureFilter(opts[idx].key)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 3) 팔·어깨(Pose) + 21관절 손 스켈레톤 & 카메라 화면 영역(3x3) 시각화 재생기 (화면 확대 지원)
                 Rectangle {
                     Layout.fillWidth: true
@@ -1376,7 +2052,45 @@ ApplicationWindow {
                                     var drawW = Math.max(40, w - padX * 2)
                                     var drawH = Math.max(40, h - padY * 2)
 
-                                    // 3x3 Camera Screen Region Grid (explicitly shows which part of the screen is recorded)
+                                    // 0-A. 2D Spatial Spray / Concentration Shading Overlay (shows where on screen the model is trained & how well it recognizes)
+                                    if (simTabRoot.showSpatialSpray && simTabRoot.fullScreenCoordMode) {
+                                        var sprayCells = dashboard.spatialSprayCells || []
+                                        var baseRad = Math.max(18, Math.min(drawW, drawH) * 0.14)
+                                        for (var scIdx = 0; scIdx < sprayCells.length; scIdx++) {
+                                            var sc = sprayCells[scIdx]
+                                            var dens = sc.density || 0
+                                            if (dens <= 0.01) continue
+                                            var scx = padX + sc.x * drawW
+                                            var scy = padY + sc.y * drawH
+                                            var sRad = baseRad * (0.62 + 0.68 * Math.sqrt(dens))
+                                            var qual = (sc.quality !== undefined) ? sc.quality : 0.85
+                                            var sr = qual >= 0.72 ? 46 : (qual >= 0.45 ? 242 : 229)
+                                            var sg = qual >= 0.72 ? 229 : (qual >= 0.45 ? 181 : 72)
+                                            var sb = qual >= 0.72 ? 180 : (qual >= 0.45 ? 68 : 77)
+                                            var sAlpha = Math.min(0.48, 0.09 + dens * 0.38)
+                                            var sGrad = ctx.createRadialGradient(scx, scy, 0, scx, scy, sRad)
+                                            sGrad.addColorStop(0.0, "rgba(" + sr + "," + sg + "," + sb + "," + sAlpha.toFixed(3) + ")")
+                                            sGrad.addColorStop(0.55, "rgba(" + sr + "," + sg + "," + sb + "," + (sAlpha * 0.45).toFixed(3) + ")")
+                                            sGrad.addColorStop(1.0, "rgba(" + sr + "," + sg + "," + sb + ",0.0)")
+                                            ctx.fillStyle = sGrad
+                                            ctx.beginPath()
+                                            ctx.arc(scx, scy, sRad, 0, Math.PI * 2)
+                                            ctx.fill()
+
+                                            // Spray stipple particles showing concentration & distribution
+                                            var nDots = Math.min(20, Math.max(3, Math.round(dens * 20)))
+                                            ctx.fillStyle = "rgba(" + sr + "," + sg + "," + sb + "," + Math.min(0.78, 0.22 + dens * 0.52).toFixed(3) + ")"
+                                            for (var dk = 0; dk < nDots; dk++) {
+                                                var dAng = ((sc.gx * 37 + sc.gy * 19 + dk * 53) % 360) * (Math.PI / 180.0)
+                                                var dDist = (((sc.gx * 13 + sc.gy * 29 + dk * 41) % 100) / 100.0) * (sRad * 0.74)
+                                                var dpx = scx + Math.cos(dAng) * dDist
+                                                var dpy = scy + Math.sin(dAng) * dDist
+                                                ctx.fillRect(dpx - 1, dpy - 1, 2.0, 2.0)
+                                            }
+                                        }
+                                    }
+
+                                    // 3x3 Camera Screen Region Grid (subtle reference grid over the full screen)
                                     var zoneLabels = [
                                         ["왼쪽 위", "위", "오른쪽 위"],
                                         ["왼쪽", "중앙", "오른쪽"],
@@ -1391,7 +2105,7 @@ ApplicationWindow {
                                             var zh = drawH / 3.0
                                             var zName = zoneLabels[r][c]
                                             if (simTabRoot.fullScreenCoordMode && activeZone === zName) {
-                                                ctx.fillStyle = "rgba(70, 229, 189, 0.11)"
+                                                ctx.fillStyle = "rgba(70, 229, 189, 0.09)"
                                                 ctx.fillRect(zx, zy, zw, zh)
                                             }
                                             ctx.strokeStyle = "rgba(255, 255, 255, 0.08)"
@@ -1409,14 +2123,14 @@ ApplicationWindow {
                                     var hasHand = Boolean(f && f.hand_present && f.lm && f.lm.length >= 21)
                                     var arm = (f && f.active_arm) ? f.active_arm : null
                                     if (!hasHand && !arm) {
-                                        ctx.fillStyle = "rgba(255, 255, 255, 0.72)"
-                                        ctx.font = "bold 12px 'Malgun Gothic'"
+                                        ctx.fillStyle = "rgba(255, 255, 255, 0.82)"
+                                        ctx.font = "bold 11px 'Malgun Gothic'"
                                         ctx.textAlign = "center"
                                         if (simTabRoot.totalFrames > 0) {
-                                            ctx.fillText("이 프레임에 감지된 손/팔 스켈레톤 없음", w / 2, h / 2)
+                                            ctx.fillText("이 프레임에 감지된 손/팔 스켈레톤 없음 (배경 = 학습 스프레이 음영)", w / 2, h - 10)
                                         } else {
-                                            ctx.fillText("[시뮬레이션 실행]을 누르면 팔·어깨 + 손 스켈레톤과", w / 2, h / 2 - 9)
-                                            ctx.fillText("카메라 화면 위치(3x3)가 이곳에 재생됩니다", w / 2, h / 2 + 11)
+                                            ctx.fillText("배경 스프레이 음영 = 현재 모델이 학습된 화면 위치 분포·인식 품질", w / 2, h - 22)
+                                            ctx.fillText("[시뮬레이션 실행]을 누르면 팔·어깨 + 손 스켈레톤이 함께 재생됩니다", w / 2, h - 8)
                                         }
                                         return
                                     }
@@ -1762,12 +2476,17 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
+                                    text: simTabRoot.showSpatialSpray ? "스프레이 분포 켜짐" : "스프레이 분포 꺼짐"
+                                    accent: simTabRoot.showSpatialSpray
+                                    onClicked: simTabRoot.showSpatialSpray = !simTabRoot.showSpatialSpray
+                                }
+                                CompactButton {
                                     text: simTabRoot.showArmPose ? "팔·어깨 켜짐" : "팔·어깨 꺼짐"
                                     accent: simTabRoot.showArmPose
                                     onClicked: simTabRoot.showArmPose = !simTabRoot.showArmPose
                                 }
                                 CompactButton {
-                                    text: simTabRoot.fullScreenCoordMode ? "화면위치(3x3)" : "손 확대"
+                                    text: simTabRoot.fullScreenCoordMode ? "전체화면 좌표" : "손 확대"
                                     accent: simTabRoot.fullScreenCoordMode
                                     onClicked: simTabRoot.fullScreenCoordMode = !simTabRoot.fullScreenCoordMode
                                 }
@@ -1799,7 +2518,8 @@ ApplicationWindow {
                                         TextLabel {
                                             text: simTabRoot.curFrame
                                                 ? (simTabRoot.curFrame.target_name
-                                                    + (simTabRoot.curFrame.phase === "do" ? " [수행]" : " [중립]")
+                                                    + (simTabRoot.curFrame.phase === "do" ? " [수행]"
+                                                        : ((simTabRoot.curFrame.phase === "waiting" || simTabRoot.curFrame.phase === "paused" || simTabRoot.curFrame.target === "idle") ? " [세트 대기]" : " [중립]"))
                                                     + (simTabRoot.curFrame.screen_zone ? (" · " + simTabRoot.curFrame.screen_zone) : ""))
                                                 : "-"
                                             font.bold: true
@@ -1909,9 +2629,11 @@ ApplicationWindow {
                                                         width: parent.width
                                                         height: Math.max(3, parent.height * Math.min(1.0, modelData.prob))
                                                         radius: 1
-                                                        color: modelData.target !== "none"
-                                                            ? (modelData.confirmed ? "#16846E" : "#F2B544")
-                                                            : (modelData.confirmed ? "#E5484D" : "#CBD5E0")
+                                                        color: modelData.target === "idle"
+                                                            ? "#CBD5E1"
+                                                            : (modelData.target !== "none"
+                                                                ? (modelData.confirmed ? "#16846E" : "#F2B544")
+                                                                : (modelData.confirmed ? "#E5484D" : "#CBD5E0"))
                                                     }
                                                 }
                                             }
@@ -2053,6 +2775,112 @@ ApplicationWindow {
                     ColumnLayout {
                         width: simScroll.availableWidth
                         spacing: 8
+
+                        // Selected ONNX Model Per-Gesture Recognition Rates & Spatial Spray Distribution Card
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: onnxProfileCol.implicitHeight + 16
+                            radius: 10
+                            color: "#F7FAFB"
+                            border.color: window.line
+                            ColumnLayout {
+                                id: onnxProfileCol
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 6
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    TextLabel {
+                                        text: "모델별 포착 동작 인식률 · 화면 영역 학습 분포(스프레이): "
+                                            + (dashboard.selectedOnnxModel.title || "통합 하이브리드 모델")
+                                        font.bold: true
+                                        font.pixelSize: 13
+                                    }
+                                    Chip {
+                                        text: "전체 인식률 " + Math.round(((dashboard.selectedOnnxModel.overall_rate || 0) * 100)) + "%"
+                                    }
+                                    Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                    RowLayout {
+                                        spacing: 6
+                                        Rectangle { width: 10; height: 10; radius: 5; color: "#2EE5B4" }
+                                        TextLabel { text: "높은 인식·학습 밀집"; font.pixelSize: 10; color: window.muted }
+                                        Rectangle { width: 10; height: 10; radius: 5; color: "#F2B544" }
+                                        TextLabel { text: "보통/중간"; font.pixelSize: 10; color: window.muted }
+                                        Rectangle { width: 10; height: 10; radius: 5; color: "#E5484D" }
+                                        TextLabel { text: "인식 부족"; font.pixelSize: 10; color: window.muted }
+                                    }
+                                }
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    text: dashboard.spatialSprayHeadline
+                                        + (dashboard.selectedOnnxModel.description ? ("   |   " + dashboard.selectedOnnxModel.description) : "")
+                                    font.pixelSize: 11
+                                    color: window.muted
+                                    wrapMode: Text.Wrap
+                                }
+                                Flow {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Repeater {
+                                        model: dashboard.selectedOnnxGestureRates
+                                        delegate: Rectangle {
+                                            id: gRateChip
+                                            required property var modelData
+                                            width: 222
+                                            height: 44
+                                            radius: 8
+                                            color: dashboard.sprayGestureFilter === gRateChip.modelData.key ? "#E6F8F3" : "white"
+                                            border.color: dashboard.sprayGestureFilter === gRateChip.modelData.key ? "#16846E" : window.line
+                                            border.width: dashboard.sprayGestureFilter === gRateChip.modelData.key ? 2 : 1
+                                            ColumnLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 6
+                                                spacing: 3
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 4
+                                                    TextLabel {
+                                                        text: gRateChip.modelData.name
+                                                        font.bold: true
+                                                        font.pixelSize: 11
+                                                        Layout.fillWidth: true
+                                                        elide: Text.ElideRight
+                                                    }
+                                                    TextLabel {
+                                                        text: Math.round((gRateChip.modelData.rate || 0) * 100) + "% (" + (gRateChip.modelData.hits || 0) + "/" + (gRateChip.modelData.reps || 0) + ")"
+                                                        font.bold: true
+                                                        font.pixelSize: 11
+                                                        color: (gRateChip.modelData.rate || 0) >= 0.72 ? "#0F6E5B" : ((gRateChip.modelData.rate || 0) >= 0.45 ? "#B45309" : "#C62828")
+                                                    }
+                                                }
+                                                Rectangle {
+                                                    Layout.fillWidth: true
+                                                    height: 6
+                                                    radius: 3
+                                                    color: "#E2E8F0"
+                                                    Rectangle {
+                                                        width: parent.width * Math.max(0.0, Math.min(1.0, gRateChip.modelData.rate || 0))
+                                                        height: parent.height
+                                                        radius: 3
+                                                        color: (gRateChip.modelData.rate || 0) >= 0.72 ? "#16846E" : ((gRateChip.modelData.rate || 0) >= 0.45 ? "#F2B544" : "#E5484D")
+                                                    }
+                                                }
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var nextKey = (dashboard.sprayGestureFilter === gRateChip.modelData.key) ? "all" : gRateChip.modelData.key
+                                                    dashboard.setSprayGestureFilter(nextKey)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // Explicit Recording Target Intent & Screen Region Coverage Banner
                         Rectangle {
@@ -2614,68 +3442,58 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
-                ColumnLayout {
+                TextLabel {
+                    text: "연산 장치"
+                    font.bold: true
+                    font.pixelSize: 12
+                }
+                CompactButton {
+                    text: dashboard.gpuButtonLabel
+                    accent: dashboard.gpuAvailable && dashboard.trainingDevice === "gpu"
+                    enabled: dashboard.gpuAvailable && !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                    onClicked: dashboard.setTrainingDevice("gpu")
+                }
+                CompactButton {
+                    text: "CPU 학습"
+                    accent: !dashboard.gpuAvailable || dashboard.trainingDevice === "cpu"
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                    onClicked: dashboard.setTrainingDevice("cpu")
+                }
+                CompactButton {
+                    visible: dashboard.canInstallCudaTorch
+                    text: "GPU 가속 활성화 (CUDA 설치)"
+                    accent: true
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                    onClicked: dashboard.enableGpuAcceleration()
+                }
+                TextLabel {
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
-                    spacing: 3
-                    TextLabel {
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 0
-                        text: dashboard.trainingStage !== "" ? dashboard.trainingStage
-                              : (dashboard.trainingMode === "thorough"
-                                 ? "학습: 전체 자세를 하나씩 빼고 교차평가한 뒤 최종 모델을 만들어요 (전체 폴드, 오래 걸림)"
-                                 : "학습: 대표 자세 1개로 빠르게 평가(일부 자세 평가)한 뒤 최종 모델을 만들어요 (권장)")
-                        font.pixelSize: 12; wrapMode: Text.Wrap
-                    }
-                    Rectangle {
-                        visible: dashboard.trainingRunning || dashboard.trainingProgress > 0
-                        Layout.fillWidth: true
-                        height: 6; radius: 3; color: "#E3E9EE"
-                        Rectangle {
-                            width: parent.width * Math.max(0, Math.min(1, dashboard.trainingProgress))
-                            height: parent.height; radius: 3; color: "#45E0B4"
-                        }
-                    }
-                    Canvas {
-                        id: lossChart
-                        visible: dashboard.trainingLosses.length > 1
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 34
-                        property var losses: dashboard.trainingLosses
-                        onLossesChanged: requestPaint()
-                        onPaint: {
-                            var ctx = getContext("2d")
-                            ctx.reset()
-                            var v = losses
-                            if (!v || v.length < 2) return
-                            var hi = Math.max.apply(null, v), lo = Math.min.apply(null, v)
-                            var span = Math.max(1e-6, hi - lo)
-                            ctx.strokeStyle = "#16846E"
-                            ctx.lineWidth = 2
-                            ctx.beginPath()
-                            for (var i = 0; i < v.length; i++) {
-                                var x = i / (v.length - 1) * (width - 4) + 2
-                                var y = 3 + (1 - (v[i] - lo) / span) * (height - 6)
-                                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
-                            }
-                            ctx.stroke()
-                        }
-                    }
-                    TextLabel {
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 0
-                        visible: dashboard.trainingNote !== ""
-                        text: dashboard.trainingNote
-                        font.pixelSize: 11; color: window.muted; wrapMode: Text.Wrap
-                    }
+                    elide: Text.ElideRight
+                    text: dashboard.gpuStatusText
+                    font.pixelSize: 11
+                    color: dashboard.gpuAvailable ? "#1B7F5A" : window.muted
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                TextLabel {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    elide: Text.ElideRight
+                    text: dashboard.trainingMode === "thorough"
+                        ? "전체 통합 학습 시: 전체 자세 교차평가 후 최종 통합 모델을 생성합니다"
+                        : "전체 통합 학습 시: 대표 자세 빠른 평가 후 최종 통합 모델을 생성합니다 (권장)"
+                    font.pixelSize: 11
+                    color: window.muted
                 }
                 ActionButton {
-                    text: dashboard.trainingRunning ? "학습 멈춤" : "전체 통합 학습"
+                    text: "전체 통합 학습 (" + (dashboard.trainingDevice === "gpu" ? "GPU" : "CPU") + ")"
                     leftPadding: 13; rightPadding: 13
-                    primary: !dashboard.trainingRunning
-                    danger: dashboard.trainingRunning
-                    enabled: dashboard.trainingBusy === "" && !dashboard.recActive
-                    onClicked: dashboard.trainingRunning ? dashboard.stopTraining() : dashboard.startTraining()
+                    primary: true
+                    enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
+                    onClicked: dashboard.startTraining()
                 }
                 ActionButton {
                     text: "내보내기"
@@ -3007,8 +3825,11 @@ ApplicationWindow {
                 }
             }
 
+            WorkProgressBanner {
+            }
+
             Rectangle {
-                visible: dashboard.hubStatusNote !== "" || dashboard.trainingBusy !== ""
+                visible: dashboard.hubStatusNote !== "" && !dashboard.appWorking
                 Layout.fillWidth: true
                 implicitHeight: statusNoteText.implicitHeight + 16
                 radius: 8
@@ -3018,7 +3839,7 @@ ApplicationWindow {
                     id: statusNoteText
                     anchors.fill: parent
                     anchors.margins: 8
-                    text: dashboard.trainingBusy !== "" ? dashboard.trainingBusy : dashboard.hubStatusNote
+                    text: dashboard.hubStatusNote
                     font.pixelSize: 12
                     color: dashboard.hubStatusNote.indexOf("실패") >= 0 || dashboard.hubStatusNote.indexOf("오류") >= 0 ? "#C62828" : window.navy
                     wrapMode: Text.Wrap

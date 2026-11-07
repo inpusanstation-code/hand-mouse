@@ -70,21 +70,38 @@ def run(args, training):
                 pc, camera = public_source(session["meta"])
                 sources.append({"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                 "pc": pc, "camera": {"note": camera}, "frames": len(session["frames"])})
+            from src.spatial_mlp import (
+                SpatialMlpModel,
+                blend_tcn_and_spatial_probs,
+                ensure_session_spatial_features,
+                pick_spatial_from_sessions,
+                train_binary_spatial_specialist,
+                train_spatial_mlp,
+            )
             staged = {}
+            staged_spatial: dict[str, SpatialMlpModel] = {}
             for index, label in enumerate(labels, 1):
                 training.emit("gesture_start", target=label, index=index, count=len(labels))
                 selected = binary_sessions(sessions, label)
                 eval_selected = selected[: len(paths)]
                 classes = ["none", label]
                 conds = sorted({int(c) for s in eval_selected for c, y in zip(s["cond"], s["y"]) if c >= 0 and y >= 0})
-                xa, ya = training.pick(selected, conds)
+                xa, ya, ca = training.pick_with_conds(selected, conds)
                 xa_eval, ya_eval = training.pick(eval_selected, conds)
                 held = training.resolve_held_out_conds(conds, opts)
-                training.emit("loaded", windows=len(ya), folds=len(held), per_class=dict(Counter(ya_eval.tolist())))
+                training.emit(
+                    "loaded",
+                    windows=len(ya),
+                    folds=len(held),
+                    per_class=dict(Counter(ya_eval.tolist())),
+                    device=opts["effective_device"],
+                    device_name=opts["device_name"],
+                )
                 results = []
                 evaluated_folds: list[int] = []
                 for fold, test in enumerate(held, 1):
-                    x, y = training.pick(selected, [c for c in conds if c != test])
+                    train_conds = [c for c in conds if c != test]
+                    x, y = training.pick(selected, train_conds)
                     if test not in conds or not len(y) or len(set(y)) != 2:
                         training.emit("note", text=f"{label}: 조건 {test} 제외 평가는 학습 자료 부족으로 보류합니다.")
                         continue
@@ -96,9 +113,30 @@ def run(args, training):
                         opts["epochs"],
                         classes=classes,
                         window_stride=opts["window_stride"],
+                        device=opts["effective_device"],
                     )
+                    sp_fold_spec = None
+                    try:
+                        xs_fold, ys_fold = pick_spatial_from_sessions(sessions, train_conds)
+                        if len(ys_fold) >= 2 and (ys_fold == CLASSES.index(label)).any():
+                            training.emit("substage", text=f"선택 동작 평가 {fold}/{len(held)} · Spatial MLP 보조 모델 학습 중…")
+                            sp_fold_spec, _ = train_binary_spatial_specialist(
+                                xs_fold,
+                                ys_fold,
+                                classes=CLASSES,
+                                target_label=label,
+                                independent=True,
+                                device=opts["effective_device"],
+                            )
+                    except Exception:
+                        sp_fold_spec = None
                     for session in eval_selected:
                         prob = training.predict(model, session["x"])
+                        if sp_fold_spec is not None:
+                            s_feats = ensure_session_spatial_features(session)
+                            if len(s_feats) == len(prob):
+                                sp_prob = sp_fold_spec.predict_proba(s_feats)
+                                prob = blend_tcn_and_spatial_probs(prob, classes, sp_prob, sp_fold_spec.classes)
                         negative = (session["y"] == 0) & (session["cond"] == test)
                         results.append({"test_posture": test, "rules": training.evaluate(session, [test]),
                                         "tcn": training.evaluate(session, [test], prob, args.thr, args.k),
@@ -114,6 +152,45 @@ def run(args, training):
                     losses=losses,
                     classes=classes,
                     window_stride=opts["window_stride"],
+                    device=opts["effective_device"],
+                )
+                # Train dedicated per-gesture binary Spatial MLP (`["none", label]`) for this gesture
+                sp_spec = None
+                sp_spec_doc = None
+                try:
+                    xs_all_sp, ys_all_sp = pick_spatial_from_sessions(sessions, conds)
+                    if len(ys_all_sp) >= 2 and (ys_all_sp == CLASSES.index(label)).any():
+                        training.emit("substage", text="선택 동작 Spatial MLP (0-lag 보조 모델) 학습 및 ONNX 저장 중…")
+                        sp_spec, _ = train_binary_spatial_specialist(
+                            xs_all_sp,
+                            ys_all_sp,
+                            classes=CLASSES,
+                            target_label=label,
+                            independent=True,
+                            device=opts["effective_device"],
+                        )
+                        staged_spatial[label] = sp_spec
+                        sp_spec_doc = sp_spec.to_dict()
+                except Exception:
+                    sp_spec = None
+                    sp_spec_doc = None
+                model, final_results, boost_info = training.adaptive_boost_postures(
+                    model,
+                    xa,
+                    ya,
+                    ca,
+                    eval_selected,
+                    conds,
+                    results,
+                    classes=classes,
+                    thr=args.thr,
+                    k=args.k,
+                    epochs=opts["epochs"],
+                    window_stride=opts["window_stride"],
+                    device=opts["effective_device"],
+                    sp_model=sp_spec,
+                    losses=losses,
+                    condition_groups=sessions[0]["condition_groups"],
                 )
                 pred = training.predict(model, xa_eval).argmax(1)
                 accuracy = {name: round(float((pred[ya_eval == i] == i).mean()), 3) for i, name in enumerate(classes)}
@@ -127,9 +204,13 @@ def run(args, training):
                     "condition_groups": sessions[0]["condition_groups"],
                     "negative_classes": [name for i, name in enumerate(CLASSES)
                                          if name != label and (all_y == i).any()],
-                    "held_out_results": results, "loss_curve": losses,
-                    "per_gesture": training.per_gesture(results, per_class, accuracy, classes),
-                    "per_task": training.per_gesture(results, per_class, accuracy, classes, by_task=True),
+                    "held_out_results": results,
+                    "final_results": final_results,
+                    "adaptive_boost": boost_info,
+                    "loss_curve": losses,
+                    "per_gesture": training.per_gesture(results, per_class, accuracy, classes, final_results=final_results, adaptive_boost=boost_info),
+                    "per_task": training.per_gesture(results, per_class, accuracy, classes, by_task=True, final_results=final_results, adaptive_boost=boost_info),
+                    "spatial_mlp": sp_spec_doc,
                 }
                 if not args.no_export:
                     path = folder / f"{label}-{uuid4().hex}.onnx"
@@ -144,8 +225,12 @@ def run(args, training):
                                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                 training.emit("gesture_done", target=label)
             if not args.no_export:
+                before_rep = None
+                backup_folder = None
                 try:
-                    backup_current_model(
+                    from src.training_center import evaluate_training_improvement, model_report
+                    before_rep = model_report(args.output_dir / "gesture_tcn.onnx")
+                    backup_folder = backup_current_model(
                         model=args.output_dir / "gesture_tcn.onnx",
                         backup_dir=args.output_dir / "backups",
                         reason="before-selected-train",
@@ -153,22 +238,40 @@ def run(args, training):
                 except Exception:
                     pass
                 publish_bank(folder, staged)
-                # Also refresh 0-lag 96-dim Spatial MLP (spatial_mlp.json) across all available classes
+                # Update only the selected gestures' specialist MLPs in spatial_mlp.json (preserving unselected gestures)
                 try:
-                    from src.spatial_mlp import pick_spatial_from_sessions, train_spatial_mlp
-                    present_idx = sorted({int(y) for y in all_y if y >= 0})
-                    sp_classes = [CLASSES[i] for i in present_idx]
-                    if "none" in sp_classes and len(sp_classes) >= 2:
-                        remapped = []
-                        for s in sessions:
-                            y_remap = np.full_like(s["y"], -1)
-                            for ci, cname in enumerate(sp_classes):
-                                y_remap[s["y"] == CLASSES.index(cname)] = ci
-                            remapped.append({**s, "y": y_remap})
-                        xs_sp, ys_sp = pick_spatial_from_sessions(remapped)
-                        if len(ys_sp) >= 2:
-                            sp_model, _ = train_spatial_mlp(xs_sp, ys_sp, classes=sp_classes)
-                            sp_model.save(args.output_dir / "spatial_mlp.json")
+                    sp_out_path = args.output_dir / "spatial_mlp.json"
+                    if sp_out_path.is_file() and staged_spatial:
+                        sp_existing = SpatialMlpModel.load(sp_out_path)
+                        merged_specs = dict(sp_existing.specialists)
+                        merged_specs.update(staged_spatial)
+                        sp_updated = SpatialMlpModel(
+                            sp_existing.w1,
+                            sp_existing.b1,
+                            sp_existing.w2,
+                            sp_existing.b2,
+                            classes=sp_existing.base_classes,
+                            feature_version=sp_existing.feature_version,
+                            metadata=sp_existing.metadata,
+                            specialists=merged_specs,
+                        )
+                        sp_updated.save(sp_out_path)
+                    else:
+                        present_idx = sorted({int(y) for y in all_y if y >= 0})
+                        sp_classes = [CLASSES[i] for i in present_idx]
+                        if "none" in sp_classes and len(sp_classes) >= 2:
+                            remapped = []
+                            for s in sessions:
+                                y_remap = np.full_like(s["y"], -1)
+                                for ci, cname in enumerate(sp_classes):
+                                    y_remap[s["y"] == CLASSES.index(cname)] = ci
+                                remapped.append({**s, "y": y_remap})
+                            xs_sp, ys_sp = pick_spatial_from_sessions(remapped)
+                            if len(ys_sp) >= 2:
+                                sp_model, _ = train_spatial_mlp(xs_sp, ys_sp, classes=sp_classes, device=opts["effective_device"])
+                                for lbl_k, spec_v in staged_spatial.items():
+                                    sp_model.specialists[lbl_k] = spec_v
+                                sp_model.save(sp_out_path)
                 except Exception:
                     pass
                 main_card = args.output_dir / "gesture_tcn.json"
@@ -181,6 +284,20 @@ def run(args, training):
                             main_card.write_text(json.dumps(mc, ensure_ascii=False, indent=2), encoding="utf-8")
                     except Exception:
                         pass
+                try:
+                    from src.training_center import evaluate_training_improvement, model_report
+                    after_rep = model_report(args.output_dir / "gesture_tcn.onnx")
+                    bak_id = f"backup:{backup_folder.name}" if backup_folder is not None else None
+                    evaluate_training_improvement(
+                        after_report=after_rep,
+                        before_report=before_rep,
+                        target_keys=args.gestures,
+                        backup_id=bak_id,
+                        model=args.output_dir / "gesture_tcn.onnx",
+                        backup_dir=args.output_dir / "backups",
+                    )
+                except Exception:
+                    pass
             training.emit("done", targets=labels, published=not args.no_export)
         return 0
     except (ValueError, OSError, RuntimeError, ImportError) as error:

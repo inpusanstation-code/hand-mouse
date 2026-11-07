@@ -51,6 +51,20 @@ class RecordingPlanEditor(QObject):
     def selected(self):
         return dict(self.plan["conditions"][self.index])
 
+    @Property(str, notify=changed)
+    def orientationGuide(self):
+        row = self.plan["conditions"][self.index] if 0 <= self.index < len(self.plan["conditions"]) else {}
+        orient = str(row.get("orientation", ""))
+        posture = str(row.get("posture", ""))
+        o_txt = plans.orientation_guide(orient)
+        p_txt = plans.posture_guide(posture)
+        parts = []
+        if o_txt:
+            parts.append(f"손 방향 [{orient}]: {o_txt}")
+        if p_txt and posture != "바로 앉기":
+            parts.append(f"몸/팔 위치 [{posture}]: {p_txt}")
+        return " · ".join(parts)
+
     @Property(int, notify=changed)
     def selectedIndex(self):
         return self.index

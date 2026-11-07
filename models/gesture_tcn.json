@@ -14,7 +14,15 @@
   "threshold": 0.7,
   "frames_in_a_row": 3,
   "epochs": 25,
-  "trained": "2026-11-06 02:37:09",
+  "training_mode": "fast",
+  "folds": [
+    2
+  ],
+  "window_stride": 2,
+  "offline_augment_factor": 0,
+  "training_device": "cuda",
+  "training_device_name": "NVIDIA GeForce RTX 3060",
+  "trained": "2026-11-07 23:08:09",
   "data": [
     {
       "file": "20261105-030947-guided.jsonl.gz",
@@ -223,6 +231,102 @@
         "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC)"
       },
       "frames": 5207
+    },
+    {
+      "file": "20261106-025047-12f4b792-home-pc-guided.jsonl.gz",
+      "pc": "home-pc",
+      "camera": {
+        "source": "0",
+        "mode": [
+          1280,
+          720,
+          30.0
+        ],
+        "mirror": true,
+        "phone_web": false,
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC)"
+      },
+      "frames": 630
+    },
+    {
+      "file": "20261106-105800-f901519c-home-pc-guided.jsonl.gz",
+      "pc": "home-pc",
+      "camera": {
+        "source": "0",
+        "mode": [
+          1280,
+          720,
+          30.0
+        ],
+        "mirror": true,
+        "phone_web": false,
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC)"
+      },
+      "frames": 5257
+    },
+    {
+      "file": "20261106-121946-c8394343-home-pc-guided.jsonl.gz",
+      "pc": "home-pc",
+      "camera": {
+        "source": "0",
+        "mode": [
+          1280,
+          720,
+          30.0
+        ],
+        "mirror": true,
+        "phone_web": false,
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC)"
+      },
+      "frames": 5257
+    },
+    {
+      "file": "20261106-161459-260acca2-home-pc-guided.jsonl.gz",
+      "pc": "home-pc",
+      "camera": {
+        "source": "0",
+        "mode": [
+          1280,
+          720,
+          30.0
+        ],
+        "mirror": true,
+        "phone_web": false,
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC)"
+      },
+      "frames": 4717
+    },
+    {
+      "file": "20261107-202832-8bc3df5c-home-pc-guided.jsonl.gz",
+      "pc": "home-pc",
+      "camera": {
+        "source": "0",
+        "mode": [
+          1280,
+          720,
+          30.0
+        ],
+        "mirror": true,
+        "phone_web": false,
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC)"
+      },
+      "frames": 1745
+    },
+    {
+      "file": "20261107-214618-32881cd5-home-pc-guided.jsonl.gz",
+      "pc": "home-pc",
+      "camera": {
+        "source": "0",
+        "mode": [
+          1280,
+          720,
+          30.0
+        ],
+        "mirror": true,
+        "phone_web": false,
+        "note": "폰 카메라 (카메라 번호 0으로 연결, 집 PC)"
+      },
+      "frames": 1935
     }
   ],
   "held_out_results": [
@@ -231,11 +335,11 @@
       "rules": {
         "reps": {
           "thumb_ring": [
-            6,
+            5,
             15
           ],
           "thumb_index": [
-            5,
+            4,
             15
           ]
         },
@@ -257,7 +361,7 @@
       "tcn": {
         "reps": {
           "thumb_ring": [
-            10,
+            9,
             15
           ],
           "thumb_index": [
@@ -271,13 +375,13 @@
           "thumb_middle": 0,
           "thumb_pinky": 0,
           "palm_side": 0,
-          "thumbs_up": 1
+          "thumbs_up": 0
         },
         "confused": 1,
         "free_by_task": {
           "none": {
             "minutes": 2.8960499999999616,
-            "misfires": 1
+            "misfires": 0
           }
         }
       },
@@ -312,7 +416,7 @@
       "tcn": {
         "reps": {
           "thumb_ring": [
-            15,
+            14,
             15
           ],
           "thumb_index": [
@@ -321,18 +425,18 @@
           ]
         },
         "misfires": {
-          "thumb_index": 3,
-          "thumb_ring": 1,
+          "thumb_index": 10,
+          "thumb_ring": 2,
           "thumb_middle": 0,
-          "thumb_pinky": 0,
+          "thumb_pinky": 12,
           "palm_side": 0,
-          "thumbs_up": 5
+          "thumbs_up": 1
         },
-        "confused": 1,
+        "confused": 0,
         "free_by_task": {
           "none": {
             "minutes": 2.9625333333332544,
-            "misfires": 9
+            "misfires": 25
           }
         }
       },
@@ -399,7 +503,7 @@
           "palm_side": 0,
           "thumbs_up": 0
         },
-        "confused": 1,
+        "confused": 0,
         "free_by_task": {}
       },
       "free_minutes": 0.0
@@ -420,7 +524,7 @@
       "tcn": {
         "reps": {
           "thumb_index": [
-            8,
+            7,
             15
           ]
         },
@@ -432,7 +536,145 @@
           "palm_side": 0,
           "thumbs_up": 0
         },
-        "confused": 4,
+        "confused": 2,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {},
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {},
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {},
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {},
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {},
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {},
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {},
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {},
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {},
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {},
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {},
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {},
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
         "free_by_task": {}
       },
       "free_minutes": 0.0
@@ -622,109 +864,2604 @@
       "free_minutes": 0.0
     }
   ],
+  "final_results": [
+    {
+      "posture": 0,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            6,
+            14
+          ],
+          "thumb_index": [
+            9,
+            15
+          ]
+        },
+        "misfires": {
+          "left_click": 4,
+          "drag_hold": 2,
+          "right_click": 5,
+          "task_switcher": 2,
+          "scroll_grab": 2
+        },
+        "confused": 2,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9279166666666514,
+            "misfires": 15
+          }
+        }
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            14,
+            14
+          ],
+          "thumb_index": [
+            14,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 2,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 1,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9279166666666514,
+            "misfires": 2
+          }
+        }
+      },
+      "free_minutes": 2.93
+    },
+    {
+      "posture": 0,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            9,
+            15
+          ],
+          "thumb_index": [
+            11,
+            15
+          ]
+        },
+        "misfires": {
+          "task_switcher": 1,
+          "left_click": 2,
+          "right_click": 2,
+          "scroll_grab": 3
+        },
+        "confused": 2,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9673833333332538,
+            "misfires": 8
+          }
+        }
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            15,
+            15
+          ],
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 1,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9673833333332538,
+            "misfires": 1
+          }
+        }
+      },
+      "free_minutes": 2.97
+    },
+    {
+      "posture": 0,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            10,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 0,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            9,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 8,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 0,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            0,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 11,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 1,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            6,
+            15
+          ],
+          "thumb_index": [
+            10,
+            15
+          ]
+        },
+        "misfires": {
+          "right_click": 4,
+          "left_click": 12,
+          "scroll_grab": 3,
+          "task_switcher": 1
+        },
+        "confused": 8,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.934433333333297,
+            "misfires": 20
+          }
+        }
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            14,
+            15
+          ],
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.934433333333297,
+            "misfires": 0
+          }
+        }
+      },
+      "free_minutes": 2.93
+    },
+    {
+      "posture": 1,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            13,
+            15
+          ],
+          "thumb_index": [
+            14,
+            15
+          ]
+        },
+        "misfires": {
+          "right_click": 2,
+          "scroll_grab": 2,
+          "left_click": 1
+        },
+        "confused": 1,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9610833333332893,
+            "misfires": 5
+          }
+        }
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            15,
+            15
+          ],
+          "thumb_index": [
+            14,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9610833333332893,
+            "misfires": 0
+          }
+        }
+      },
+      "free_minutes": 2.96
+    },
+    {
+      "posture": 1,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            7,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 1,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            13,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 9,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 1,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            4,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 8,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            5,
+            15
+          ],
+          "thumb_index": [
+            4,
+            15
+          ]
+        },
+        "misfires": {
+          "right_click": 3,
+          "left_click": 5,
+          "drag_hold": 4,
+          "scroll_grab": 2,
+          "task_switcher": 1
+        },
+        "confused": 1,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.8960499999999616,
+            "misfires": 15
+          }
+        }
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            14,
+            15
+          ],
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.8960499999999616,
+            "misfires": 0
+          }
+        }
+      },
+      "free_minutes": 2.9
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {
+          "thumb_ring": [
+            10,
+            15
+          ],
+          "thumb_index": [
+            7,
+            15
+          ]
+        },
+        "misfires": {
+          "scroll_grab": 11,
+          "left_click": 14,
+          "drag_hold": 4
+        },
+        "confused": 3,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9625333333332544,
+            "misfires": 29
+          }
+        }
+      },
+      "tcn": {
+        "reps": {
+          "thumb_ring": [
+            15,
+            15
+          ],
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 1,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {
+          "none": {
+            "minutes": 2.9625333333332544,
+            "misfires": 1
+          }
+        }
+      },
+      "free_minutes": 2.96
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            1,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 4,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            11,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 2,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            9,
+            15
+          ]
+        },
+        "misfires": {},
+        "confused": 3,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            15,
+            15
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 3,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 9,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 4,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            0,
+            1
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 9,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            2,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 4,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_middle_drag": [
+            2,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 2,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle_drag": [
+            9,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 2,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 4,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumbs_up": [
+            4,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumbs_up": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            3,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            0,
+            3
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            2,
+            3
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumbs_up": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumbs_up": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 5,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 6,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 6,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumb_middle_drag": [
+            7,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 3,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle_drag": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            2,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 4,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 7,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumbs_up": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumbs_up": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            3,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 9,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumbs_up": [
+            2,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumbs_up": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 7,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            0,
+            1
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 3,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumb_middle_drag": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 2,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle_drag": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            9,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            3,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 6,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumbs_up": [
+            3,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumbs_up": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumb_index": [
+            4,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_index": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumbs_up": [
+            5,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumbs_up": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "palm_side": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "palm_side": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 8,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            0,
+            1
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 9,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 3,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 10,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 4,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 11,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 4,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 12,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            1,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 13,
+      "rules": {
+        "reps": {
+          "thumb_middle": [
+            0,
+            1
+          ]
+        },
+        "misfires": {},
+        "confused": 1,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_middle": [
+            1,
+            1
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    },
+    {
+      "posture": 14,
+      "rules": {
+        "reps": {
+          "thumb_pinky": [
+            0,
+            10
+          ]
+        },
+        "misfires": {},
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "tcn": {
+        "reps": {
+          "thumb_pinky": [
+            10,
+            10
+          ]
+        },
+        "misfires": {
+          "thumb_index": 0,
+          "thumb_ring": 0,
+          "thumb_middle": 0,
+          "thumb_pinky": 0,
+          "palm_side": 0,
+          "thumbs_up": 0
+        },
+        "confused": 0,
+        "free_by_task": {}
+      },
+      "free_minutes": 0.0
+    }
+  ],
+  "adaptive_boost": {
+    "triggered": true,
+    "rounds": 3,
+    "target_postures": [
+      0,
+      2,
+      6,
+      8,
+      12
+    ],
+    "heterogeneous_postures": [
+      2
+    ],
+    "posture_details": [
+      {
+        "posture": 0,
+        "name": "legacy-0",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 0.99,
+        "after_tcn_rate": 0.99,
+        "before_final_rate": 0.981,
+        "after_final_rate": 0.99,
+        "final_recognised": 103,
+        "final_total": 104,
+        "before_confidence": 0.88,
+        "after_confidence": 0.939,
+        "heterogeneous": false,
+        "boosted": true
+      },
+      {
+        "posture": 1,
+        "name": "legacy-1",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 0.981,
+        "after_tcn_rate": 0.981,
+        "before_final_rate": 0.981,
+        "after_final_rate": 0.981,
+        "final_recognised": 103,
+        "final_total": 105,
+        "before_confidence": 0.907,
+        "after_confidence": 0.935,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 2,
+        "name": "legacy-2",
+        "zero_shot_recognised": 87,
+        "zero_shot_total": 105,
+        "zero_shot_rate": 0.829,
+        "before_tcn_rate": 0.971,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 0.971,
+        "after_final_rate": 0.99,
+        "final_recognised": 104,
+        "final_total": 105,
+        "before_confidence": 0.889,
+        "after_confidence": 0.948,
+        "heterogeneous": true,
+        "boosted": true
+      },
+      {
+        "posture": 3,
+        "name": "손끝 아래 · 아래",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 10,
+        "final_total": 10,
+        "before_confidence": 0.951,
+        "after_confidence": 0.955,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 4,
+        "name": "전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향)",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 1,
+        "final_total": 1,
+        "before_confidence": 0.97,
+        "after_confidence": 0.992,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 5,
+        "name": "화면 중앙",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 0.982,
+        "after_tcn_rate": 0.982,
+        "before_final_rate": 0.982,
+        "after_final_rate": 0.982,
+        "final_recognised": 112,
+        "final_total": 114,
+        "before_confidence": 0.953,
+        "after_confidence": 0.956,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 6,
+        "name": "전체 화면 · 손바닥 정면 (기본)",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 1,
+        "final_total": 1,
+        "before_confidence": 0.865,
+        "after_confidence": 0.952,
+        "heterogeneous": false,
+        "boosted": true
+      },
+      {
+        "posture": 7,
+        "name": "손목 왼쪽 회전 (10시) · 좌측",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 111,
+        "final_total": 111,
+        "before_confidence": 0.956,
+        "after_confidence": 0.98,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 8,
+        "name": "손목 오른쪽 회전 (2시) · 우측",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 0.964,
+        "after_tcn_rate": 0.991,
+        "before_final_rate": 0.964,
+        "after_final_rate": 0.991,
+        "final_recognised": 110,
+        "final_total": 111,
+        "before_confidence": 0.933,
+        "after_confidence": 0.976,
+        "heterogeneous": false,
+        "boosted": true
+      },
+      {
+        "posture": 9,
+        "name": "자세 #10",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 10,
+        "final_total": 10,
+        "before_confidence": 0.993,
+        "after_confidence": 0.994,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 10,
+        "name": "조명 변화 · 자유 이동",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 10,
+        "final_total": 10,
+        "before_confidence": 0.97,
+        "after_confidence": 0.949,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 11,
+        "name": "손등 · 위",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 10,
+        "final_total": 10,
+        "before_confidence": 0.923,
+        "after_confidence": 0.896,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 12,
+        "name": "가까이 · 왼쪽 위",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 10,
+        "final_total": 10,
+        "before_confidence": 0.897,
+        "after_confidence": 0.975,
+        "heterogeneous": false,
+        "boosted": true
+      },
+      {
+        "posture": 13,
+        "name": "전체 화면 · 손목 왼쪽 살짝 회전 (10시 방향)",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 1,
+        "final_total": 1,
+        "before_confidence": 0.914,
+        "after_confidence": 0.964,
+        "heterogeneous": false,
+        "boosted": false
+      },
+      {
+        "posture": 14,
+        "name": "멀리 · 오른쪽 아래",
+        "zero_shot_recognised": 0,
+        "zero_shot_total": 0,
+        "zero_shot_rate": null,
+        "before_tcn_rate": 1.0,
+        "after_tcn_rate": 1.0,
+        "before_final_rate": 1.0,
+        "after_final_rate": 1.0,
+        "final_recognised": 10,
+        "final_total": 10,
+        "before_confidence": 0.961,
+        "after_confidence": 0.959,
+        "heterogeneous": false,
+        "boosted": false
+      }
+    ]
+  },
   "condition_groups": [
     "legacy-0",
     "legacy-1",
     "legacy-2",
     "pose-2ad3a76aa08cfcc7",
+    "pose-2cdb465cf164790c",
     "pose-481ac8122c20d57b",
+    "pose-8f9c623584942d35",
     "pose-92e7af1903dfa03b",
     "pose-997c280c1cf7279d",
     "pose-a71da4b247af51c0",
     "pose-ad8a0a30d0c786cc",
     "pose-b65c32c9911d1033",
     "pose-bb6d3f1d0d0e7f08",
+    "pose-cdb888f2b85dcc9c",
     "pose-fc4174532d5cbfc5"
   ],
   "loss_curve": [
-    1.6115,
-    1.0058,
-    0.7495,
-    0.6467,
-    0.5965,
-    0.5589,
-    0.5306,
-    0.5143,
-    0.4985,
-    0.4842,
-    0.4697,
-    0.454,
-    0.4471,
-    0.4404,
-    0.4346,
-    0.4222,
-    0.4191,
-    0.4136,
-    0.4097,
-    0.4064,
-    0.4052,
-    0.4021,
-    0.3946,
-    0.3907,
-    0.3896
+    1.8821,
+    1.7043,
+    1.4223,
+    1.1796,
+    0.9782,
+    0.8188,
+    0.7152,
+    0.6406,
+    0.5871,
+    0.5418,
+    0.4894,
+    0.4449,
+    0.4045,
+    0.3724,
+    0.3422,
+    0.3146,
+    0.2933,
+    0.2825,
+    0.2652,
+    0.2466,
+    0.2289,
+    0.2356,
+    0.2396,
+    0.2105,
+    0.2085,
+    0.355,
+    0.2865,
+    0.2601,
+    0.2449,
+    0.2484,
+    0.2387,
+    0.2338,
+    0.2346,
+    0.2303,
+    0.2266,
+    0.3405,
+    0.2819,
+    0.2491,
+    0.2353,
+    0.2282,
+    0.2233,
+    0.2156,
+    0.2157,
+    0.2165,
+    0.2065,
+    0.3449,
+    0.2626,
+    0.2284,
+    0.2105,
+    0.2187,
+    0.21,
+    0.2035,
+    0.1957,
+    0.1937,
+    0.1919
   ],
   "train_accuracy": {
-    "none": 0.639,
-    "thumb_index": 0.962,
-    "thumb_ring": 0.913,
-    "thumb_middle": 0.976,
-    "thumb_pinky": 0.987,
-    "palm_side": 1.0,
-    "thumbs_up": 0.996
+    "none": 0.968,
+    "thumb_index": 0.968,
+    "thumb_ring": 0.96,
+    "thumb_middle": 0.978,
+    "thumb_pinky": 0.98,
+    "palm_side": 0.986,
+    "thumbs_up": 0.989
   },
   "per_gesture": {
     "none": {
-      "windows": 60363,
-      "train_accuracy": 0.639,
+      "windows": 31576,
+      "train_accuracy": 0.968,
       "free_minutes": 5.86,
-      "misfires": 10,
+      "misfires": 25,
       "rules_misfires": 44,
-      "misfires_per_min": 1.71,
+      "misfires_per_min": 4.27,
       "rules_misfires_per_min": 7.51
     },
     "thumb_index": {
-      "windows": 12505,
-      "train_accuracy": 0.962,
-      "recognised": 65,
+      "windows": 10252,
+      "train_accuracy": 0.968,
+      "zero_shot_recognised": 64,
+      "zero_shot_total": 75,
+      "zero_shot_rate": 0.853,
+      "final_recognised": 255,
+      "final_total": 258,
+      "final_rate": 0.988,
+      "adaptive_boosted": true,
+      "recognised": 75,
       "total": 75,
-      "rate": 0.867,
-      "rules_rate": 0.44
+      "rate": 1.0,
+      "rules_rate": 0.427
     },
     "thumb_ring": {
-      "windows": 4235,
-      "train_accuracy": 0.913,
-      "recognised": 25,
+      "windows": 3401,
+      "train_accuracy": 0.96,
+      "zero_shot_recognised": 23,
+      "zero_shot_total": 30,
+      "zero_shot_rate": 0.767,
+      "final_recognised": 87,
+      "final_total": 89,
+      "final_rate": 0.978,
+      "adaptive_boosted": true,
+      "recognised": 29,
       "total": 30,
-      "rate": 0.833,
-      "rules_rate": 0.533
+      "rate": 0.967,
+      "rules_rate": 0.5
     },
     "thumb_middle": {
-      "windows": 7272,
-      "train_accuracy": 0.976,
+      "windows": 8909,
+      "train_accuracy": 0.978,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 125,
+      "final_total": 126,
+      "final_rate": 0.992,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "thumb_pinky": {
-      "windows": 5576,
-      "train_accuracy": 0.987,
+      "windows": 4751,
+      "train_accuracy": 0.98,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 90,
+      "final_total": 90,
+      "final_rate": 1.0,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "palm_side": {
-      "windows": 1812,
-      "train_accuracy": 1.0,
+      "windows": 4475,
+      "train_accuracy": 0.986,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 89,
+      "final_total": 90,
+      "final_rate": 0.989,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "thumbs_up": {
-      "windows": 1781,
-      "train_accuracy": 0.996,
+      "windows": 3008,
+      "train_accuracy": 0.989,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 60,
+      "final_total": 60,
+      "final_rate": 1.0,
       "recognised": 0,
       "total": 0,
       "rate": null,
@@ -733,73 +3470,117 @@
   },
   "per_task": {
     "thumb_ring": {
-      "windows": 4235,
-      "train_accuracy": 0.913,
-      "recognised": 25,
+      "windows": 3401,
+      "train_accuracy": 0.96,
+      "zero_shot_recognised": 23,
+      "zero_shot_total": 30,
+      "zero_shot_rate": 0.767,
+      "final_recognised": 87,
+      "final_total": 89,
+      "final_rate": 0.978,
+      "adaptive_boosted": true,
+      "recognised": 29,
       "total": 30,
-      "rate": 0.833,
-      "rules_rate": 0.533
+      "rate": 0.967,
+      "rules_rate": 0.5
     },
     "thumb_index": {
-      "windows": 12505,
-      "train_accuracy": 0.962,
-      "recognised": 65,
+      "windows": 10252,
+      "train_accuracy": 0.968,
+      "zero_shot_recognised": 64,
+      "zero_shot_total": 75,
+      "zero_shot_rate": 0.853,
+      "final_recognised": 255,
+      "final_total": 258,
+      "final_rate": 0.988,
+      "adaptive_boosted": true,
+      "recognised": 75,
       "total": 75,
-      "rate": 0.867,
-      "rules_rate": 0.44
+      "rate": 1.0,
+      "rules_rate": 0.427
     },
     "none": {
-      "windows": 60363,
-      "train_accuracy": 0.639,
+      "windows": 31576,
+      "train_accuracy": 0.968,
       "free_minutes": 5.86,
-      "misfires": 10,
+      "misfires": 25,
       "rules_misfires": 44,
-      "misfires_per_min": 1.71,
+      "misfires_per_min": 4.27,
       "rules_misfires_per_min": 7.51
     },
     "thumb_middle": {
-      "windows": 7272,
-      "train_accuracy": 0.976,
+      "windows": 8909,
+      "train_accuracy": 0.978,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 96,
+      "final_total": 96,
+      "final_rate": 1.0,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "thumb_middle_drag": {
-      "windows": 7272,
-      "train_accuracy": 0.976,
+      "windows": 8909,
+      "train_accuracy": 0.978,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 29,
+      "final_total": 30,
+      "final_rate": 0.967,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "thumb_pinky": {
-      "windows": 5576,
-      "train_accuracy": 0.987,
+      "windows": 4751,
+      "train_accuracy": 0.98,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 90,
+      "final_total": 90,
+      "final_rate": 1.0,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "palm_side": {
-      "windows": 1812,
-      "train_accuracy": 1.0,
+      "windows": 4475,
+      "train_accuracy": 0.986,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 89,
+      "final_total": 90,
+      "final_rate": 0.989,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "thumbs_up": {
-      "windows": 1781,
-      "train_accuracy": 0.996,
+      "windows": 3008,
+      "train_accuracy": 0.989,
+      "zero_shot_recognised": 0,
+      "zero_shot_total": 0,
+      "zero_shot_rate": null,
+      "final_recognised": 60,
+      "final_total": 60,
+      "final_rate": 1.0,
       "recognised": 0,
       "total": 0,
       "rate": null,
       "rules_rate": null
     },
     "open_move": {
-      "windows": 60363,
-      "train_accuracy": 0.639,
+      "windows": 31576,
+      "train_accuracy": 0.968,
       "free_minutes": 0,
       "misfires": 0,
       "rules_misfires": 0,
@@ -807,8 +3588,8 @@
       "rules_misfires_per_min": null
     },
     "fist_move": {
-      "windows": 60363,
-      "train_accuracy": 0.639,
+      "windows": 31576,
+      "train_accuracy": 0.968,
       "free_minutes": 0,
       "misfires": 0,
       "rules_misfires": 0,
@@ -816,7 +3597,60 @@
       "rules_misfires_per_min": null
     }
   },
-  "disabled_gestures": [
-    "thumb_middle"
-  ]
+  "spatial_mlp": {
+    "file": "spatial_mlp.json",
+    "feature_version": "spatial-mlp-v1",
+    "feat_dim": 96,
+    "hidden_units": 64,
+    "train_accuracy": 97.14,
+    "test_accuracy": 96.86,
+    "total_samples": 66372,
+    "elapsed_ms": 14243.2,
+    "per_class": {
+      "none": {
+        "total": 31576,
+        "correct": 30577,
+        "accuracy": 96.8
+      },
+      "thumb_index": {
+        "total": 10252,
+        "correct": 9849,
+        "accuracy": 96.1
+      },
+      "thumb_ring": {
+        "total": 3401,
+        "correct": 3029,
+        "accuracy": 89.1
+      },
+      "thumb_middle": {
+        "total": 8909,
+        "correct": 8818,
+        "accuracy": 99.0
+      },
+      "thumb_pinky": {
+        "total": 4751,
+        "correct": 4724,
+        "accuracy": 99.4
+      },
+      "palm_side": {
+        "total": 4475,
+        "correct": 4450,
+        "accuracy": 99.4
+      },
+      "thumbs_up": {
+        "total": 3008,
+        "correct": 2991,
+        "accuracy": 99.4
+      }
+    },
+    "specialists": [
+      "palm_side",
+      "thumb_index",
+      "thumb_middle",
+      "thumb_pinky",
+      "thumb_ring",
+      "thumbs_up"
+    ],
+    "trained_at": "2026-11-07 23:07:37"
+  }
 }
