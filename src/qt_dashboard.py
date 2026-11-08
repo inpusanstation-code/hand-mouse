@@ -129,6 +129,8 @@ class QtDashboard(QObject):
         self.sim_result = {}                                    # latest simulator run result (lightweight header)
         self._sim_playback_frames = []                          # per-frame skeleton & event data kept in Python
         self.sim_eval = {}                                      # latest simulator data quality & calibration evaluation
+        self.selected_sim_file = ""                             # currently selected simulator target recording file
+        self._pending_sim_request = None                        # queued (filename, use_cleaned) if requested while busy
         self.aug_settings = get_augmentation_settings()         # augmentation enabled / strength / factor settings
         saved_train_mode = self.preferences.value("trainingMode", "", type=str)
         self.training_mode = saved_train_mode if saved_train_mode in ("fast", "thorough") else get_training_mode()
@@ -596,6 +598,11 @@ class QtDashboard(QObject):
             self._task_started = 0.0
             self.training_busy = ""
         self.trainingChanged.emit()
+        if not title and getattr(self, "_pending_sim_request", None):
+            req_file, req_cleaned = self._pending_sim_request
+            self._pending_sim_request = None
+            if req_file:
+                self.runSimulation(req_file, req_cleaned)
 
     @Slot()
     def openTraining(self):
@@ -726,11 +733,30 @@ class QtDashboard(QObject):
                 self._set_busy_task("녹화 데이터 및 모델 성적 분석 중", "[4/4단계] 연산 장치(GPU/CPU) 및 시뮬레이터 상태 갱신 중…", 0.92)
                 self.aug_settings = tc.get_augmentation_settings()
                 self._gpu_cap = tc.detect_gpu_training_capability()
-                if file_rows and not self.sim_eval.get("file"):
-                    try:
-                        self.sim_eval = tc.evaluate_recording_in_simulator(file_rows[0]["file"])
-                    except Exception:
-                        pass
+                valid_files = {r["file"] for r in file_rows if r.get("file")}
+                if not getattr(self, "selected_sim_file", "") or self.selected_sim_file not in valid_files:
+                    prev_file = self.sim_result.get("file") or self.sim_eval.get("file") or ""
+                    self.selected_sim_file = (
+                        prev_file if prev_file in valid_files else (file_rows[0]["file"] if file_rows else "")
+                    )
+                if self.selected_sim_file:
+                    if self.sim_eval.get("file") != self.selected_sim_file:
+                        try:
+                            self.sim_eval = tc.evaluate_recording_in_simulator(self.selected_sim_file)
+                        except Exception:
+                            pass
+                    if self.sim_result.get("file") != self.selected_sim_file:
+                        try:
+                            sim_res = tc.simulate_model_on_recording(
+                                self.selected_sim_file,
+                                use_cleaned=True,
+                                model_id=self.selected_onnx_model_id,
+                            )
+                            self._store_sim_result(sim_res)
+                            if sim_res.get("quality"):
+                                self.sim_eval = sim_res["quality"]
+                        except Exception:
+                            pass
                 self._training_summary = summary
                 self.training_storage = tc.storage_text(summary)
             except Exception as exc:
@@ -1036,6 +1062,24 @@ class QtDashboard(QObject):
         self._sim_playback_frames = pb
         slim = {k: v for k, v in res.items() if k != "playback_frames"}
         self.sim_result = slim
+        if slim.get("file"):
+            self.selected_sim_file = str(slim["file"])
+
+    @Property(str, notify=trainingChanged)
+    def selectedSimFile(self):
+        return str(
+            getattr(self, "selected_sim_file", "")
+            or self.sim_result.get("file")
+            or self.sim_eval.get("file")
+            or (self.training_files[0].get("file", "") if self.training_files else "")
+        )
+
+    @Slot(str)
+    def setSelectedSimFile(self, filename):
+        target = str(filename or "").strip()
+        if target and target != getattr(self, "selected_sim_file", ""):
+            self.selected_sim_file = target
+            self.trainingChanged.emit()
 
     @Property("QVariantMap", notify=trainingChanged)
     def simulationResult(self):
@@ -1178,12 +1222,17 @@ class QtDashboard(QObject):
 
     @Slot(str)
     def evaluateSimRecording(self, filename=""):
-        if self.training_busy:
-            return
-        target = filename
+        target = str(filename or "").strip()
+        if not target and getattr(self, "selected_sim_file", ""):
+            target = self.selected_sim_file
         if not target and self.training_files:
             target = self.training_files[0].get("file", "")
         if not target:
+            return
+        self.selected_sim_file = target
+        if self.training_busy:
+            self._pending_sim_request = (target, True)
+            self.trainingChanged.emit()
             return
         self._set_busy_task("녹화 데이터 정밀 평가 중", f"'{target}' 손 랜드마크 검출률·관절 이상치·화면 영역 평가 중…", 0.45)
 
@@ -1191,7 +1240,15 @@ class QtDashboard(QObject):
             from src import training_center as tc
             try:
                 self.sim_eval = tc.evaluate_recording_in_simulator(target, force_recheck=True)
-                self._set_busy_task("녹화 데이터 정밀 평가 중", f"'{target}' 데이터 증강 및 품질 요약 반영 중…", 0.85)
+                if self.sim_result.get("file") != target:
+                    self._set_busy_task("녹화 데이터 정밀 평가 중", f"'{target}' 시뮬레이터 프레임 및 모델 예측 동기화 중…", 0.70)
+                    sim_res = tc.simulate_model_on_recording(
+                        target,
+                        use_cleaned=True,
+                        model_id=self.selectedOnnxModelId,
+                    )
+                    self._store_sim_result(sim_res)
+                self._set_busy_task("녹화 데이터 정밀 평가 중", f"'{target}' 데이터 증강 및 품질 요약 반영 중…", 0.88)
                 self.aug_settings = tc.get_augmentation_settings()
                 self.training_note = self.sim_eval.get("headline", "데이터 평가 완료")
             except Exception as exc:
@@ -1350,13 +1407,18 @@ class QtDashboard(QObject):
     @Slot(str)
     @Slot(str, bool)
     def runSimulation(self, filename="", use_cleaned=True):
-        if self.training_busy:
-            return
-        target = filename
+        target = str(filename or "").strip()
+        if not target and getattr(self, "selected_sim_file", ""):
+            target = self.selected_sim_file
         if not target and self.training_files:
             target = self.training_files[0].get("file", "")
         if not target:
             self.training_note = "시뮬레이션할 녹화 파일이 없습니다."
+            self.trainingChanged.emit()
+            return
+        self.selected_sim_file = target
+        if self.training_busy:
+            self._pending_sim_request = (target, bool(use_cleaned))
             self.trainingChanged.emit()
             return
         self._set_busy_task(
@@ -1937,6 +1999,349 @@ class QtDashboard(QObject):
             self.training_filter = category
             self.trainingChanged.emit()
 
+    # ------------------------------------------------------------------ Shortcut Bindings, Composite Gestures & Temporal Motions
+    @Property("QVariantList", notify=trainingChanged)
+    def sidebarGestureMappings(self):
+        from src.action_bindings import format_action_badge, get_action_registry
+        from src.gesture_catalog import BY_KEY, DISPLAY_KEYS
+
+        reg = get_action_registry()
+        items = [
+            {"key": "move_cursor", "gesture": "반주먹 / 손 이동", "badge": "포인터 이동", "track": "static"},
+        ]
+        for k in DISPLAY_KEYS:
+            t = BY_KEY.get(k)
+            if t is None or t.free or k == "thumb_middle_drag":
+                continue
+            b = reg.get_binding(k)
+            if not b.get("enabled", True):
+                continue
+            short_name = t.name.split("(")[0].strip() if "(" in t.name else t.name
+            if short_name.startswith("모션 · "):
+                short_name = short_name.replace("모션 · ", "", 1).strip()
+            raw_badge = format_action_badge(str(b.get("action_type", "")), str(b.get("action_value", "")), None)
+            if raw_badge.startswith("단축키: "):
+                raw_badge = raw_badge.replace("단축키: ", "", 1)
+            if raw_badge.startswith("마우스 "):
+                raw_badge = raw_badge.replace("마우스 ", "", 1)
+            ov_list = b.get("app_overrides") or []
+            if ov_list:
+                raw_badge = f"{raw_badge} (+앱{len(ov_list)})"
+            items.append(
+                {
+                    "key": k,
+                    "gesture": short_name,
+                    "badge": raw_badge,
+                    "track": t.track,
+                }
+            )
+        for c_key, c_def in reg.composite_gestures.items():
+            if not c_def.get("enabled", True):
+                continue
+            b = reg.get_binding(c_key)
+            raw_badge = format_action_badge(str(b.get("action_type", "")), str(b.get("action_value", "")), None)
+            if raw_badge.startswith("단축키: "):
+                raw_badge = raw_badge.replace("단축키: ", "", 1)
+            items.append(
+                {
+                    "key": c_key,
+                    "gesture": str(c_def.get("name", c_key)),
+                    "badge": raw_badge,
+                    "track": "composite",
+                }
+            )
+        return items
+
+    @Property("QVariantList", notify=trainingChanged)
+    def actionBindingRows(self):
+        return [r for r in self.training_rows if r.get("can_train", False)]
+
+    @Property("QVariantList", notify=trainingChanged)
+    def compositeGestureRows(self):
+        from src.action_bindings import POSTURE_NAMES_KO, TRIGGER_NAMES_KO, get_action_registry
+
+        reg = get_action_registry()
+        out = []
+        for k, c in reg.composite_gestures.items():
+            b = reg.get_binding(k)
+            bp = str(c.get("base_posture", "thumb_index"))
+            tr = str(c.get("trigger_type", "swipe_left"))
+            out.append(
+                {
+                    "key": k,
+                    "name": str(c.get("name", k)),
+                    "base_posture": bp,
+                    "base_posture_ko": POSTURE_NAMES_KO.get(bp, bp),
+                    "trigger_type": tr,
+                    "trigger_type_ko": TRIGGER_NAMES_KO.get(tr, tr),
+                    "min_distance": float(c.get("min_distance", 0.08)),
+                    "min_speed": float(c.get("min_speed", 0.22)),
+                    "hold_seconds": float(c.get("hold_seconds", 0.55)),
+                    "action_type": str(b.get("action_type", "hotkey")),
+                    "action_value": str(b.get("action_value", "")),
+                    "badge": str(b.get("badge", "")),
+                    "detail": str(b.get("detail", "")),
+                    "enabled": bool(b.get("enabled", True)),
+                    "app_overrides": list(b.get("app_overrides") or []),
+                }
+            )
+        return out
+
+    @Property("QVariantList", notify=trainingChanged)
+    def motionTrackRows(self):
+        return [r for r in self.training_rows if r.get("track") == "motion"]
+
+    @Property("QVariantList", notify=trainingChanged)
+    def staticTrackRows(self):
+        return [r for r in self.training_rows if r.get("track") == "static"]
+
+    @Property("QVariantList", constant=True)
+    def hotkeyPresets(self):
+        from src.action_bindings import WINDOWS_HOTKEY_PRESETS
+        return list(WINDOWS_HOTKEY_PRESETS)
+
+    @Property("QVariantList", constant=True)
+    def youtubeKeyPresets(self):
+        from src.action_bindings import YOUTUBE_KEY_PRESETS
+        return [{"value": k, "label": v["label"], "badge": v["badge"]} for k, v in YOUTUBE_KEY_PRESETS.items()]
+
+    @Property("QVariantList", constant=True)
+    def mouseActionPresets(self):
+        from src.action_bindings import MOUSE_ACTION_LABELS
+        return [{"value": k, "label": v["label"], "badge": v["badge"]} for k, v in MOUSE_ACTION_LABELS.items()]
+
+    @Property("QVariantList", constant=True)
+    def posturePresets(self):
+        from src.action_bindings import POSTURE_NAMES_KO
+        return [{"value": k, "label": v} for k, v in POSTURE_NAMES_KO.items()]
+
+    @Property("QVariantList", constant=True)
+    def directionPresets(self):
+        from src.action_bindings import DIRECTION_NAMES_KO
+        return [{"value": k, "label": v} for k, v in DIRECTION_NAMES_KO.items()]
+
+    @Property("QVariantList", constant=True)
+    def compositeTriggerPresets(self):
+        from src.action_bindings import TRIGGER_NAMES_KO
+        return [{"value": k, "label": v} for k, v in TRIGGER_NAMES_KO.items()]
+
+    @Slot(str, str, str, bool, result=bool)
+    def saveGestureBinding(self, gesture_key, action_type, action_value, enabled=True):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            saved = reg.set_binding(
+                str(gesture_key or ""),
+                str(action_type or "mouse_action"),
+                str(action_value or "none"),
+                enabled=bool(enabled),
+            )
+            self.training_note = f"단축키/동작 매핑 저장됨: [{gesture_key}] → {saved.get('badge')}"
+            self.refreshTraining()
+            self.stateChanged.emit()
+            return True
+        except Exception as exc:
+            self.training_note = f"매핑 저장 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, result=bool)
+    def resetGestureBinding(self, gesture_key):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            saved = reg.reset_binding(str(gesture_key or ""))
+            self.training_note = f"기본 매핑으로 복원됨: [{gesture_key}] → {saved.get('badge')}"
+            self.refreshTraining()
+            self.stateChanged.emit()
+            return True
+        except Exception as exc:
+            self.training_note = f"매핑 초기화 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, str, str, str, result=bool)
+    def addAppOverrideSlot(self, gesture_key, app_match, action_type, action_value):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            saved = reg.add_app_override(
+                str(gesture_key or ""),
+                str(app_match or ""),
+                str(action_type or "hotkey"),
+                str(action_value or ""),
+            )
+            self.training_note = f"프로그램 전용 단축키 등록됨 ({app_match}): {saved.get('badge')}"
+            self.refreshTraining()
+            return True
+        except Exception as exc:
+            self.training_note = f"앱 전용 단축키 등록 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, str, result=bool)
+    def removeAppOverrideSlot(self, gesture_key, app_match):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            reg.remove_app_override(str(gesture_key or ""), str(app_match or ""))
+            self.training_note = f"프로그램 전용 단축키 삭제됨 ({app_match})"
+            self.refreshTraining()
+            return True
+        except Exception as exc:
+            self.training_note = f"앱 전용 단축키 삭제 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, str, str, str, str, float, float, result=bool)
+    def registerCompositeGestureSlot(
+        self,
+        name,
+        base_posture,
+        trigger_type,
+        action_type,
+        action_value,
+        min_distance=0.08,
+        hold_seconds=0.55,
+    ):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            comp = reg.register_composite_gesture(
+                key="",
+                name=str(name or ""),
+                base_posture=str(base_posture or "thumb_index"),
+                trigger_type=str(trigger_type or "swipe_left"),
+                action_type=str(action_type or "hotkey"),
+                action_value=str(action_value or "ctrl+tab"),
+                min_distance=float(min_distance),
+                hold_seconds=float(hold_seconds),
+            )
+            self.training_note = f"새 복합 손동작 등록 완료: {comp['name']} ({comp['key']})"
+            self.refreshTraining()
+            self.stateChanged.emit()
+            return True
+        except Exception as exc:
+            self.training_note = f"복합 손동작 등록 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, result=bool)
+    def deleteCompositeGestureSlot(self, key):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            ok = reg.delete_composite_gesture(str(key or ""))
+            self.training_note = f"복합 손동작 삭제됨 ({key})" if ok else f"삭제할 복합 동작을 찾지 못했습니다 ({key})"
+            self.refreshTraining()
+            self.stateChanged.emit()
+            return bool(ok)
+        except Exception as exc:
+            self.training_note = f"복합 손동작 삭제 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, str, str, str, str, str, float, float, result=bool)
+    def registerMotionGestureSlot(
+        self,
+        key,
+        name,
+        posture,
+        direction,
+        action_type,
+        action_value,
+        min_distance=0.14,
+        min_speed=0.25,
+    ):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            m_def = reg.register_motion_gesture(
+                key=str(key or ""),
+                name=str(name or ""),
+                posture=str(posture or "open_hand"),
+                direction=str(direction or "right"),
+                action_type=str(action_type or "hotkey"),
+                action_value=str(action_value or "alt+right"),
+                min_distance=float(min_distance),
+                min_speed=float(min_speed),
+            )
+            self.training_note = (
+                f"새 시계열 모션 동작 등록 완료: [{m_def['name']}] · "
+                f"[이 모션 녹화] 후 [시계열 모션 궤적 학습]을 실행하세요."
+            )
+            self.refreshTraining()
+            self.stateChanged.emit()
+            return True
+        except Exception as exc:
+            self.training_note = f"시계열 모션 등록 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, result=bool)
+    def deleteMotionGestureSlot(self, key):
+        from src.action_bindings import get_action_registry
+        try:
+            reg = get_action_registry()
+            ok = reg.delete_motion_gesture(str(key or ""))
+            self.training_note = f"사용자 시계열 모션 삭제됨 ({key})" if ok else "기본 내장 모션은 삭제할 수 없습니다 (비활성화 또는 매핑 변경 가능)"
+            self.refreshTraining()
+            self.stateChanged.emit()
+            return bool(ok)
+        except Exception as exc:
+            self.training_note = f"시계열 모션 삭제 실패: {exc}"
+            self.trainingChanged.emit()
+            return False
+
+    @Slot(str, result=bool)
+    def trainMotionTemplatesSlot(self, target_key=""):
+        """Dedicated Time-Series Motion Learning: trains 16-step trajectory & velocity templates (+ TCN if requested)."""
+        if self.training_busy or self.training_job.running:
+            return False
+        from src.motion_mode import train_motion_templates_from_recordings
+        from src.training_center import REC_DIR
+
+        clean_key = str(target_key or "").strip()
+        targets = [clean_key] if clean_key else None
+        try:
+            res = train_motion_templates_from_recordings(rec_dir=REC_DIR, target_keys=targets)
+            cnt = int(res.get("trained_count", 0))
+            if clean_key:
+                from src.gesture_catalog import BY_KEY
+                task_obj = BY_KEY.get(clean_key)
+                t_name = task_obj.name if task_obj else clean_key
+                if cnt > 0:
+                    # Also trigger binary TCN specialist training for this motion if recordings exist
+                    self.trainSelectedGesture(clean_key)
+                    t_info = (res.get("templates") or {}).get(clean_key, {})
+                    tr_pct = float(t_info.get("trajectory_recognition_rate", 0.0)) * 100.0
+                    ret_pct = float(t_info.get("return_suppression_rate", 1.0)) * 100.0
+                    self.training_note = (
+                        f"시계열 모션 궤적 템플릿 학습 완료 ({t_info.get('name', t_name)}): "
+                        f"궤적 일치 {tr_pct:.0f}% · 역방향 복귀 오발화 차단 {ret_pct:.0f}% (+ 시계열 TCN 병행 학습 중)"
+                    )
+                    if not self.training_job.running:
+                        self.refreshTraining()
+                    else:
+                        self.trainingChanged.emit()
+                else:
+                    self.training_note = (
+                        f"'{t_name}' 동작의 시계열 모션 녹화 데이터가 아직 없습니다 (현재 0회). "
+                        f"먼저 [이 동작 집중 녹화] 버튼으로 모션 스트로크를 녹화한 뒤 학습하세요."
+                    )
+                    self.trainingChanged.emit()
+            else:
+                if cnt > 0:
+                    self.training_note = f"전체 시계열 모션 {cnt}개 동작의 16-step 궤적·속도 프로파일 템플릿 학습 완료!"
+                else:
+                    self.training_note = "학습할 시계열 모션 녹화 데이터가 아직 없습니다. 먼저 모션 동작을 녹화하세요."
+                self.refreshTraining()
+            return cnt > 0
+        except Exception as exc:
+            self.training_note = f"시계열 모션 학습 오류: {exc}"
+            self.trainingChanged.emit()
+            return False
+
     @Property(str, notify=trainingChanged)
     def trainingData(self):
         return self.training_info[0]
@@ -2071,6 +2476,28 @@ class QtDashboard(QObject):
     def tcnAvailable(self):
         from src.gesture_gate import DEFAULT_MODEL
         return DEFAULT_MODEL.exists()
+
+    @Property(str, notify=stateChanged)
+    def gateCalibratedConfidenceText(self):
+        gs = getattr(self, "gate_status", None)
+        if not isinstance(gs, dict):
+            return "보정 확신도: 대기 중 (T=0.81)"
+        conf_pct = int(round(float(gs.get("calibrated_confidence", 0.0)) * 100.0))
+        top_ko = gs.get("top_gesture_ko") or gs.get("top_gesture") or "없음"
+        temp = float(gs.get("temperature", 0.81))
+        q_score = float(gs.get("quality_score", 1.0))
+        return f"보정 확신도 {conf_pct}% (T={temp:.2f}) · 동작: {top_ko} · 품질 {q_score:.2f}"
+
+    @Property(str, notify=stateChanged)
+    def gateRejectionReasonText(self):
+        gs = getattr(self, "gate_status", None)
+        if not isinstance(gs, dict):
+            return "거절/보류 사유: 없음"
+        reason_ko = gs.get("rejection_reason_ko") or "정상 (승인)"
+        q_w = int(gs.get("quality_withheld", 0))
+        ood_v = int(gs.get("ood_vetoed", 0))
+        sp_v = int(gs.get("spatial_vetoed", 0))
+        return f"판정 사유: {reason_ko}  (누적 보류 · 품질 {q_w} / OOD {ood_v} / 중립억제 {sp_v})"
 
     @Slot(bool)
     def setTcnGate(self, on):
@@ -2294,6 +2721,10 @@ class QtDashboard(QObject):
             if badge != self.motion_badge:
                 self.motion_badge = badge
                 self.stateChanged.emit()
+        gate_status = getattr(snap, "gate_status", None)
+        if gate_status != getattr(self, "gate_status", None):
+            self.gate_status = gate_status
+            self.stateChanged.emit()
         if snap.failures is not None:
             self.set_failures(*snap.failures)
         if snap.recent_line:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from src.data_quality import compute_sequence_quality_scores
 from src.finger_kinematics import reconstruct_hand_sequence
 from src.recorder import finished_recordings, read_session
 from src.recording_plan import label_condition_key
@@ -13,8 +14,136 @@ from src.spatial_features import SPATIAL_FEATURES, SPATIAL_FEATURE_VERSION, extr
 from src.tcn_features import FEATURE_VERSION, FEATURES, frame_features, windows
 from src.gesture_catalog import CLASSES, BY_KEY
 
-_SESSION_CACHE_VERSION = f"v13-5finger-occ-rules-{FEATURE_VERSION}-{SPATIAL_FEATURE_VERSION}"
+_SESSION_CACHE_VERSION = f"v16-interference-context-guided-{FEATURE_VERSION}-{SPATIAL_FEATURE_VERSION}"
 _EXTRACT_MEM_CACHE: dict[tuple[str, int, int], dict] = {}
+_PINCH_SF_COLS = {
+    "thumb_index": 68,
+    "thumb_middle": 69,
+    "thumb_ring": 70,
+    "thumb_pinky": 71,
+}
+
+
+def _frame_has_interfering_signal(
+    frame: dict,
+    tgt: str,
+    s_vec: np.ndarray,
+    d_target: float | None = None,
+) -> bool:
+    """Return True if competing finger proximity or raw detector interference co-occurs with `tgt`."""
+    rule = frame.get("rule") or {}
+    if rule.get("interfering_targets"):
+        return True
+    raw_g = str(rule.get("raw_gesture") or rule.get("gesture") or "")
+    if raw_g not in ("", "none", tgt, f"{tgt}_pinch"):
+        return True
+    other_cols = [c for t_k, c in _PINCH_SF_COLS.items() if t_k != tgt]
+    if not other_cols or not np.any(s_vec != 0.0):
+        return False
+    min_other = min(float(s_vec[c]) for c in other_cols)
+    if d_target is not None:
+        return min_other <= d_target + 0.08 or min_other <= 0.42
+    return min_other <= 0.42
+
+
+def refine_guided_transition_labels(
+    frames: list[dict],
+    valid_targets: list[str | None],
+    spatial_features: np.ndarray,
+    sample_weights: np.ndarray,
+) -> dict[str, int]:
+    """Refine guided `do` start/end transition frames while preserving interfering signals as ground-truth context.
+
+    - Preserves original scheduled label in `frame['label']['raw_target']`.
+    - Sets `frame['label']['refined_target']` to `'transition'` only at the immediate 1-2 frame start/end
+      boundary of `do` when the hand has clearly not yet entered or has already exited the posture.
+    - Never discards `do` frames that contain interfering finger signals; instead keeps `valid_targets[k] = tgt`
+      and boosts `sample_weights[k]` so the model learns that in this posture/context, even with interfering
+      signals present, the frame must be judged as the ground-truth scheduled target `tgt` (and as a hard
+      negative `0` for competing gesture models).
+    """
+    n = len(frames)
+    stats = {
+        "raw_do_positive_frames": 0,
+        "refined_do_positive_frames": 0,
+        "relabeled_transition_frames": 0,
+        "downweighted_ambiguous_frames": 0,
+        "interference_context_boosted_frames": 0,
+    }
+    if n < 300:
+        return stats
+
+    idx = 0
+    while idx < n:
+        lab0 = frames[idx].get("label") or {}
+        ph = lab0.get("phase")
+        j = idx
+        while j + 1 < n and (frames[j + 1].get("label") or {}).get("phase") == ph:
+            j += 1
+
+        if ph == "do":
+            tgt = lab0.get("target")
+            valid_k = [
+                k
+                for k in range(idx, j + 1)
+                if valid_targets[k] == tgt
+                and tgt not in (None, "none", "idle")
+                and np.any(spatial_features[k] != 0.0)
+            ]
+            stats["raw_do_positive_frames"] += len(valid_k)
+            if tgt in _PINCH_SF_COLS and len(valid_k) >= 6:
+                col = _PINCH_SF_COLS[tgt]
+                dists = np.array([float(spatial_features[k, col]) for k in valid_k], dtype=np.float64)
+                d_min = float(np.min(dists))
+                d_p25 = float(np.percentile(dists, 25))
+                thr_contact = max(d_min * 2.10, d_p25 * 1.85, 0.72)
+                best_set = set(np.argsort(dists)[: max(5, len(valid_k) // 2)])
+                for pos_idx, k in enumerate(valid_k):
+                    d_k = dists[pos_idx]
+                    is_tail = (pos_idx < 2) or (pos_idx >= len(valid_k) - 2)
+                    if pos_idx not in best_set and is_tail and d_k > thr_contact:
+                        valid_targets[k] = None
+                        sample_weights[k] = 0.0
+                        stats["relabeled_transition_frames"] += 1
+                        lbl_k = dict(frames[k].get("label") or {})
+                        lbl_k.setdefault("raw_target", tgt)
+                        lbl_k["refined_target"] = "transition"
+                        frames[k] = {**frames[k], "label": lbl_k}
+                        continue
+                    if _frame_has_interfering_signal(frames[k], tgt, spatial_features[k], d_target=d_k):
+                        sample_weights[k] = min(1.45, float(sample_weights[k]) * 1.25)
+                        stats["interference_context_boosted_frames"] += 1
+                    elif pos_idx in best_set:
+                        sample_weights[k] = min(1.25, float(sample_weights[k]) * 1.15)
+            elif len(valid_k) >= 6:
+                vecs = spatial_features[valid_k]
+                med_vec = np.median(vecs, axis=0)
+                devs = np.linalg.norm(vecs - med_vec, axis=1)
+                med_dev = max(float(np.median(devs)), 0.35)
+                best_set = set(np.argsort(devs)[: max(6, len(valid_k) // 2)])
+                for pos_idx, k in enumerate(valid_k):
+                    is_tail = (pos_idx < 2) or (pos_idx >= len(valid_k) - 2)
+                    if (
+                        tgt in ("palm_side", "thumbs_up")
+                        and pos_idx not in best_set
+                        and is_tail
+                        and float(devs[pos_idx]) > med_dev * 1.85
+                    ):
+                        valid_targets[k] = None
+                        sample_weights[k] = 0.0
+                        stats["relabeled_transition_frames"] += 1
+                        lbl_k = dict(frames[k].get("label") or {})
+                        lbl_k.setdefault("raw_target", tgt)
+                        lbl_k["refined_target"] = "transition"
+                        frames[k] = {**frames[k], "label": lbl_k}
+                        continue
+                    if _frame_has_interfering_signal(frames[k], str(tgt), spatial_features[k]):
+                        sample_weights[k] = min(1.45, float(sample_weights[k]) * 1.25)
+                        stats["interference_context_boosted_frames"] += 1
+            stats["refined_do_positive_frames"] += sum(1 for k in valid_k if valid_targets[k] == tgt)
+        idx = j + 1
+
+    return stats
 
 
 def is_pinch_captured_on_screen(frame: dict, target: str | None) -> bool:
@@ -36,17 +165,17 @@ def is_pinch_captured_on_screen(frame: dict, target: str | None) -> bool:
 
     hs = max(d2(0, 5), d2(0, 9), d2(0, 17), 1.4 * d2(5, 17))
     if target == "thumb_index":
-        return min(d2(4, 8), d2(4, 7), d2(3, 8)) <= max(0.065, 0.36 * hs)
+        return min(d2(4, 8), d2(4, 7), d2(3, 8)) <= max(0.075, 0.42 * hs)
     if target == "thumb_middle":
-        return min(d2(4, 12), d2(4, 11), d2(3, 12)) <= max(0.065, 0.36 * hs)
+        return min(d2(4, 12), d2(4, 11), d2(3, 12)) <= max(0.075, 0.42 * hs)
     if target == "thumb_ring":
-        return min(d2(4, 16), d2(4, 15), d2(3, 16)) <= max(0.065, 0.36 * hs)
+        return min(d2(4, 16), d2(4, 15), d2(3, 16)) <= max(0.075, 0.42 * hs)
     if target == "thumb_pinky":
-        return min(d2(4, 20), d2(4, 19), d2(3, 20)) <= max(0.068, 0.37 * hs)
+        return min(d2(4, 20), d2(4, 19), d2(3, 20)) <= max(0.078, 0.44 * hs)
     if target == "thumb_index_middle":
         di = min(d2(4, 8), d2(4, 7), d2(3, 8))
         dm = min(d2(4, 12), d2(4, 11), d2(3, 12))
-        thr = max(0.070, 0.38 * hs)
+        thr = max(0.080, 0.44 * hs)
         return di <= thr and dm <= thr
     return True
 
@@ -185,18 +314,46 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
             old_rule = f.get("rule")
             if isinstance(old_rule, dict) or lm_f is not None:
                 merged_rule = dict(old_rule) if isinstance(old_rule, dict) else {"evaluated": True}
-                old_targets = list(merged_rule.get("targets") or [])
-                merged_rule["targets"] = list(dict.fromkeys(old_targets + obs_targets))
-                if merged_rule.get("action") in (None, "none", "move_cursor") and res_f.action not in (None, "none"):
-                    merged_rule["action"] = res_f.action
-                    merged_rule["gesture"] = res_f.active_gesture
+                task_f = BY_KEY.get(lab_f.get("task"))
+                phase_f = lab_f.get("phase")
+                if task_f is not None and not task_f.free and task_f.label != "none":
+                    if phase_f == "do":
+                        old_targets = [t for t in (merged_rule.get("targets") or []) if t == task_f.key]
+                        merged_targets = list(dict.fromkeys(old_targets + [t for t in obs_targets if t == task_f.key]))
+                        merged_rule["targets"] = merged_targets
+                        if task_f.key in merged_targets:
+                            merged_rule["action"] = task_f.action or task_f.label
+                            merged_rule["gesture"] = (
+                                f"{task_f.label}_pinch"
+                                if task_f.label in ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle")
+                                else task_f.label
+                            )
+                        else:
+                            merged_rule["action"] = "none"
+                            merged_rule["gesture"] = "none"
+                    else:
+                        merged_rule["targets"] = []
+                        merged_rule["action"] = "none"
+                        merged_rule["gesture"] = "none"
+                elif phase_f in ("prep", "prepare", "rest", "waiting", "paused"):
+                    merged_rule["targets"] = []
+                    merged_rule["action"] = "none"
+                    merged_rule["gesture"] = "none"
+                else:
+                    old_targets = list(merged_rule.get("targets") or [])
+                    merged_rule["targets"] = list(dict.fromkeys(old_targets + obs_targets))
+                    if merged_rule.get("action") in (None, "none", "move_cursor") and res_f.action not in (None, "none"):
+                        merged_rule["action"] = res_f.action
+                        merged_rule["gesture"] = res_f.active_gesture
                 merged_rule["evaluated"] = True
                 frames[idx_f] = {**f, "rule": merged_rule}
     features = np.zeros((n, FEATURES), np.float32)
     spatial_features = np.zeros((n, SPATIAL_FEATURES), np.float32)
     segments = np.full(n, -1, np.int64)
     cond_keys = [label_condition_key(f.get("label") or {}) for f in frames]
+    raw_targets: list[str | None] = [None] * n
     valid_targets: list[str | None] = [None] * n
+    quality_scores, sample_weights, _ = compute_sequence_quality_scores(frames, loss_window=2)
     seg_ranges: list[tuple[int, int]] = []
     start, previous = None, None
     aspect = float(meta.get("frame_aspect", 0.5625))
@@ -227,13 +384,37 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
         if valid and start is None:
             start = i
         if valid and isinstance(target, str):
+            raw_targets[i] = target
             valid_targets[i] = target
+            if isinstance(lab, dict) and "raw_target" not in lab:
+                frames[i] = {**f, "label": {**lab, "raw_target": target}}
         previous = boundary if valid else None
     flush(n)
 
     for i in range(n):
         if features[i, -1] == 0:
+            raw_targets[i] = None
             valid_targets[i] = None
+            sample_weights[i] = 0.0
+    # Stage 2: Downweight or exclude frames right around tracking loss with extreme joint velocity spikes
+    if n >= 300:
+        vel_norm = np.linalg.norm(features[:, 63:126], axis=1)
+        has_hand = features[:, 132] > 0.5
+        for i in range(n):
+            if valid_targets[i] is None:
+                continue
+            near_loss = False
+            for k in range(max(0, i - 2), min(n, i + 3)):
+                if not has_hand[k]:
+                    near_loss = True
+                    break
+            if near_loss:
+                sample_weights[i] = min(float(sample_weights[i]), 0.20)
+                if float(vel_norm[i]) > 0.65:
+                    valid_targets[i] = None
+                    sample_weights[i] = 0.0
+            elif float(vel_norm[i]) > 1.10:
+                sample_weights[i] = min(float(sample_weights[i]), 0.35)
     for i, f in enumerate(frames):
         if valid_targets[i] is None:
             continue
@@ -277,15 +458,6 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
                         break
             idx = j + 1
 
-        # Filter guided pinch 'do' frames by whether the scheduled pinch is actually captured on screen
-        if n >= 600:
-            for i in range(n):
-                tgt_i = valid_targets[i]
-                if tgt_i in ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle"):
-                    lab_i = frames[i].get("label") or {}
-                    if lab_i.get("phase") == "do" and not is_pinch_captured_on_screen(frames[i], tgt_i):
-                        valid_targets[i] = None
-
         do_vecs = [
             spatial_features[i]
             for i in range(n)
@@ -305,6 +477,13 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
                         if dist <= cutoff:
                             valid_targets[i] = None
 
+    label_refinement_stats = refine_guided_transition_labels(
+        frames,
+        valid_targets,
+        spatial_features,
+        sample_weights,
+    )
+
     stored_frames = (
         [{"t": f.get("t", 0.0), "label": f.get("label"), "rule": f.get("rule")} for f in frames]
         if slim_frames
@@ -319,7 +498,11 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
         "segments": segments,
         "seg_ranges": seg_ranges,
         "cond_keys": cond_keys,
+        "raw_targets": raw_targets,
         "valid_targets": valid_targets,
+        "quality_scores": quality_scores,
+        "sample_weights": sample_weights,
+        "label_refinement_stats": label_refinement_stats,
     }
 
 
@@ -413,7 +596,25 @@ def load_sessions(paths, window=15, *, include_windows=True, classes=None, use_c
             ],
             dtype=np.int64,
         )
+        raw_targets_r = r.get("raw_targets") or r["valid_targets"]
+        raw_y = np.array(
+            [
+                -1 if t is None else class_to_idx.get(t, -1)
+                for t in raw_targets_r
+            ],
+            dtype=np.int64,
+        )
         cond = np.array([groups.get(k, -1) for k in r["cond_keys"]], dtype=np.int64)
+        sample_weights = r.get("sample_weights")
+        if sample_weights is None or len(sample_weights) != n:
+            sample_weights = np.ones(n, dtype=np.float32)
+        else:
+            sample_weights = np.asarray(sample_weights, dtype=np.float32).copy()
+        quality_scores = r.get("quality_scores")
+        if quality_scores is None or len(quality_scores) != n:
+            quality_scores = np.ones(n, dtype=np.float32)
+        else:
+            quality_scores = np.asarray(quality_scores, dtype=np.float32).copy()
         sessions.append({
             "path": r["path"],
             "meta": r["meta"],
@@ -422,9 +623,13 @@ def load_sessions(paths, window=15, *, include_windows=True, classes=None, use_c
             "spatial_features": r.get("spatial_features"),
             "x": x,
             "y": y,
+            "raw_y": raw_y,
             "cond": cond,
             "condition_groups": keys,
             "classes": classes,
             "segments": r["segments"].copy(),
+            "sample_weights": sample_weights,
+            "quality_scores": quality_scores,
+            "label_refinement_stats": r.get("label_refinement_stats") or {},
         })
     return sessions

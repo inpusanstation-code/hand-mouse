@@ -132,14 +132,15 @@ class GuidedSession:
             return {"prompt": "녹화 끝! 수고하셨어요", "sub": "", "progress": 1.0, "overall": 1.0, "waiting": False}
         cond, task = self.current
         head = f"[{self.index + 1}/{len(self.sets)}] {self.conditions[cond]} · {task.name}"
-        details = description(self.rows[cond]) if self.rows else ""
+        details = description(self.rows[cond], focus=task.key) if self.rows else ""
         extra = {"condition_detail": details, "paused": self.paused,
                  "position": self.rows[cond]["position"] if self.rows else "자유 이동"}
         if not self.running:
             orient = self.rows[cond].get("orientation", "") if self.rows else ""
-            guide = orientation_guide(orient)
+            guide = orientation_guide(orient, focus=task.key)
             guide_txt = f" [{guide}]" if guide else ""
-            return {"prompt": f"{self.conditions[cond]}{guide_txt} · 자세를 잡은 뒤 스페이스바(또는 [시작])를 누르세요", "sub": head,
+            ready_suffix = "모션 시작 위치에 손을 준비한 뒤 스페이스바(또는 [시작])를 누르세요" if task.track == "motion" else "자세를 잡은 뒤 스페이스바(또는 [시작])를 누르세요"
+            return {"prompt": f"{self.conditions[cond]}{guide_txt} · {ready_suffix}", "sub": head,
                     "progress": 0.0, "overall": overall, "waiting": True, **extra}
         phase, rep, progress = self._step(now)
         if phase == "free":
@@ -149,8 +150,15 @@ class GuidedSession:
             prompt = task.do
             sub = f"{head} · 남은 시간 {max(0, int(self._set_length(task) - (now - self._t0)))}초"
         else:
-            prompt = {"prep": "준비… " + task.do, "do": task.do,
-                      "rest": "쉬세요 · 시작 위치로 천천히 돌아오세요" if task.direction else "쉬세요 (손을 편하게)"}[phase]
+            if task.track == "motion" or task.direction:
+                prompt = {
+                    "prep": f"준비 ({rep}/{int(self.cfg('rec_reps'))}회) · 시작 위치에 손을 두세요 ({task.name})",
+                    "do": f"지금 쓸기! · {task.do}",
+                    "rest": "쉬세요 · 다음 횟수를 위해 시작 위치로 천천히 돌아오세요 (복귀 구간은 학습 제외)",
+                }[phase]
+            else:
+                prompt = {"prep": "준비… " + task.do, "do": task.do,
+                          "rest": "쉬세요 (손을 편하게)"}[phase]
             sub = f"{head} · {rep}/{int(self.cfg('rec_reps'))}회"
         return {"prompt": self.hold_reason or prompt, "sub": sub, "progress": progress,
                 "overall": overall + progress / len(self.sets), "waiting": False, "phase": phase, **extra}

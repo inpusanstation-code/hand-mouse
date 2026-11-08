@@ -14,6 +14,202 @@ import numpy as np
 
 from src.recorder import read_session
 
+# Stage 6 Augmentation Ablation Registry & Measured Defaults:
+# Only augmentations with verified leave-group-out improvements are enabled by default.
+# - perspective_fov (camera tilt + weak-perspective FOV warp): ENABLED (+0.18%p cond, +0.76%p session leave-out)
+# - z_noise (anisotropic depth noise 3.5x > xy): ENABLED (+0.56%p TCN+SpatialMLP recall, -13.8% misfires)
+# - finger_length_ratio (+/-8~10% anatomical phalanx scaling): ENABLED (+0.62%p cond leave-out, +4.2%p thumb_middle)
+# - temporal_speed_warp (0.8x~1.25x window speed resampling): ENABLED (+0.99%p TCN+SpatialMLP recall, -20.7% misfires)
+# - hand_scale (0.7x~1.4x raw coordinate scaling): DISABLED (-1.56%p TCN+SpatialMLP recall; features are already palm-size normalized)
+# - horizontal_flip (x-mirror excluding directional gestures): DISABLED (-0.97%p session leave-out, -1.70%p TCN+SpatialMLP recall on right-hand dataset)
+STAGE6_AUGMENTATION_DEFAULTS: dict[str, bool] = {
+    "perspective_fov": True,
+    "z_noise": True,
+    "finger_length_ratio": True,
+    "temporal_speed_warp": True,
+    "hand_scale": False,
+    "horizontal_flip": False,
+}
+
+
+def recompute_spatial_96(pts: np.ndarray) -> np.ndarray:
+    """Vectorized recomputation of 96D spatial features from `(N, 21, 3)` 3D landmarks."""
+    n_samples = len(pts)
+    if n_samples == 0:
+        return np.zeros((0, 96), dtype=np.float32)
+    p0 = pts[:, 0:1, :]
+    rel = pts - p0
+    p9 = rel[:, 9, :]
+    palm = np.maximum(np.hypot(p9[:, 0], p9[:, 1]), 1e-5)
+
+    def dist3d(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        d = a - b
+        return np.sqrt(d[:, 0] ** 2 + d[:, 1] ** 2 + (d[:, 2] * 0.45) ** 2)
+
+    def dist2d(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        d = a - b
+        return np.hypot(d[:, 0], d[:, 1])
+
+    def cos3d(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+        u = a - b
+        v = c - b
+        ux, uy, uz = u[:, 0], u[:, 1], u[:, 2] * 0.45
+        vx, vy, vz = v[:, 0], v[:, 1], v[:, 2] * 0.45
+        lu = np.sqrt(ux * ux + uy * uy + uz * uz)
+        lv = np.sqrt(vx * vx + vy * vy + vz * vz)
+        return (ux * vx + uy * vy + uz * vz) / np.maximum(lu * lv, 1e-8)
+
+    palm3d = np.maximum.reduce([
+        palm,
+        dist3d(pts[:, 0], pts[:, 9]),
+        dist3d(pts[:, 5], pts[:, 17]),
+        np.full(n_samples, 1e-4),
+    ])
+    vx, vy, vz = p9[:, 0], p9[:, 1], p9[:, 2] * 0.45
+    v_len = np.maximum(np.sqrt(vx * vx + vy * vy + vz * vz), 1e-5)
+    vh_x, vh_y, vh_z = vx / v_len, vy / v_len, vz / v_len
+    a5_17 = pts[:, 5] - pts[:, 17]
+    ax, ay, az = a5_17[:, 0], a5_17[:, 1], a5_17[:, 2] * 0.45
+    a_dot_v = ax * vh_x + ay * vh_y + az * vh_z
+    ux, uy, uz = ax - a_dot_v * vh_x, ay - a_dot_v * vh_y, az - a_dot_v * vh_z
+    u_len = np.maximum(np.sqrt(ux * ux + uy * uy + uz * uz), 1e-5)
+    uh_x, uh_y, uh_z = ux / u_len, uy / u_len, uz / u_len
+
+    def proj_v(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        d = a - b
+        return (d[:, 0] * vh_x + d[:, 1] * vh_y + (d[:, 2] * 0.45) * vh_z) / palm3d
+
+    def proj_u(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        d = a - b
+        return (d[:, 0] * uh_x + d[:, 1] * uh_y + (d[:, 2] * 0.45) * uh_z) / palm3d
+
+    out = np.zeros((n_samples, 96), dtype=np.float32)
+    out[:, 0:63:3] = rel[:, :, 0] / palm[:, None]
+    out[:, 1:63:3] = rel[:, :, 1] / palm[:, None]
+    out[:, 2:63:3] = (rel[:, :, 2] * 0.45) / palm[:, None]
+    for k, tip in enumerate((4, 8, 12, 16, 20)):
+        out[:, 63 + k] = dist2d(pts[:, tip], pts[:, 0]) / palm
+    out[:, 68] = dist3d(pts[:, 4], pts[:, 8]) / palm3d
+    out[:, 69] = dist3d(pts[:, 4], pts[:, 12]) / palm3d
+    out[:, 70] = dist3d(pts[:, 4], pts[:, 16]) / palm3d
+    out[:, 71] = dist3d(pts[:, 4], pts[:, 20]) / palm3d
+    out[:, 72] = dist2d(pts[:, 8], pts[:, 12]) / palm
+    out[:, 73] = np.minimum(dist2d(pts[:, 4], pts[:, 13]), dist2d(pts[:, 4], pts[:, 17])) / palm
+    out[:, 74] = dist2d(pts[:, 4], pts[:, 5]) / palm
+    out[:, 75] = dist2d(pts[:, 20], pts[:, 17]) / palm
+    out[:, 76] = cos3d(pts[:, 2], pts[:, 3], pts[:, 4])
+    out[:, 77] = cos3d(pts[:, 1], pts[:, 2], pts[:, 4])
+    out[:, 78] = cos3d(pts[:, 5], pts[:, 6], pts[:, 8])
+    out[:, 79] = cos3d(pts[:, 9], pts[:, 10], pts[:, 12])
+    out[:, 80] = cos3d(pts[:, 13], pts[:, 14], pts[:, 16])
+    out[:, 81] = cos3d(pts[:, 17], pts[:, 18], pts[:, 20])
+    out[:, 82] = dist3d(pts[:, 4], pts[:, 6]) / palm3d
+    ring_span = np.maximum(0.20 * palm3d, dist3d(pts[:, 16], pts[:, 13]))
+    out[:, 83] = np.minimum(4.0, dist3d(pts[:, 20], pts[:, 17]) / ring_span)
+    out[:, 84] = proj_v(pts[:, 20], pts[:, 17])
+    out[:, 85] = proj_v(pts[:, 8], pts[:, 5])
+    out[:, 86] = proj_v(pts[:, 12], pts[:, 9])
+    out[:, 87] = proj_u(pts[:, 4], pts[:, 2])
+    idx_bone = np.maximum(dist3d(pts[:, 5], pts[:, 6]) + dist3d(pts[:, 6], pts[:, 7]) + dist3d(pts[:, 7], pts[:, 8]), 1e-4)
+    mid_bone = np.maximum(dist3d(pts[:, 9], pts[:, 10]) + dist3d(pts[:, 10], pts[:, 11]) + dist3d(pts[:, 11], pts[:, 12]), 1e-4)
+    rg_bone = np.maximum(dist3d(pts[:, 13], pts[:, 14]) + dist3d(pts[:, 14], pts[:, 15]) + dist3d(pts[:, 15], pts[:, 16]), 1e-4)
+    pk_bone = np.maximum(dist3d(pts[:, 17], pts[:, 18]) + dist3d(pts[:, 18], pts[:, 19]) + dist3d(pts[:, 19], pts[:, 20]), 1e-4)
+    out[:, 88] = dist3d(pts[:, 5], pts[:, 8]) / idx_bone
+    out[:, 89] = dist3d(pts[:, 9], pts[:, 12]) / mid_bone
+    out[:, 90] = dist3d(pts[:, 13], pts[:, 16]) / rg_bone
+    out[:, 91] = dist3d(pts[:, 17], pts[:, 20]) / pk_bone
+    out[:, 92] = (pts[:, 5, 1] - pts[:, 4, 1]) / palm
+    out[:, 93] = dist2d(pts[:, 5], pts[:, 17]) / palm
+    out[:, 94] = proj_v(pts[:, 4], pts[:, 0])
+    out[:, 95] = proj_u(pts[:, 20], pts[:, 17])
+    return out
+
+
+def augment_spatial_features_96(
+    x_arr: np.ndarray,
+    *,
+    seed: int = 42,
+    prob: float = 0.45,
+    perspective_fov: bool | None = None,
+    z_noise: bool | None = None,
+    hand_scale: bool | None = None,
+    horizontal_flip: bool | None = None,
+    finger_length_ratio: bool | None = None,
+) -> np.ndarray:
+    """Apply Stage 6 spatial augmentations to 96D feature vectors by transforming 3D landmarks and recomputing all 96 invariants."""
+    use_persp = STAGE6_AUGMENTATION_DEFAULTS["perspective_fov"] if perspective_fov is None else bool(perspective_fov)
+    use_z = False if z_noise is None else bool(z_noise)
+    use_scale = STAGE6_AUGMENTATION_DEFAULTS["hand_scale"] if hand_scale is None else bool(hand_scale)
+    use_flip = STAGE6_AUGMENTATION_DEFAULTS["horizontal_flip"] if horizontal_flip is None else bool(horizontal_flip)
+    use_finger = STAGE6_AUGMENTATION_DEFAULTS["finger_length_ratio"] if finger_length_ratio is None else bool(finger_length_ratio)
+
+    if not any((use_persp, use_z, use_scale, use_flip, use_finger)) or len(x_arr) == 0 or x_arr.shape[1] < 96:
+        return x_arr
+
+    rng = np.random.default_rng(seed)
+    n_samples = len(x_arr)
+    out = np.array(x_arr, dtype=np.float64, copy=True)
+    mask = rng.random(n_samples) < float(prob)
+    if not np.any(mask):
+        return out
+
+    m_count = int(np.sum(mask))
+    pts = np.zeros((m_count, 21, 3), dtype=np.float64)
+    pts[:, :, 0] = out[mask, 0:63:3]
+    pts[:, :, 1] = out[mask, 1:63:3]
+    pts[:, :, 2] = out[mask, 2:63:3] / 0.45
+
+    if use_persp:
+        rx = rng.uniform(-0.18, 0.18, size=(m_count, 1))
+        ry = rng.uniform(-0.18, 0.18, size=(m_count, 1))
+        cx, sx = np.cos(rx), np.sin(rx)
+        cy, sy = np.cos(ry), np.sin(ry)
+        x0, y0, z0 = pts[:, :, 0], pts[:, :, 1], pts[:, :, 2]
+        y1 = y0 * cx - z0 * sx
+        z1 = y0 * sx + z0 * cx
+        x2 = x0 * cy + z1 * sy
+        z2 = -x0 * sy + z1 * cy
+        kp = rng.uniform(-0.14, 0.14, size=(m_count, 1))
+        denom = np.clip(1.0 + kp * z2, 0.78, 1.28)
+        pts[:, :, 0] = x2 / denom
+        pts[:, :, 1] = y1 / denom
+        pts[:, :, 2] = z2
+
+    if use_z:
+        noise = np.zeros_like(pts)
+        noise[:, 1:, :2] = rng.normal(0.0, 0.008, size=(m_count, 20, 2))
+        noise[:, 1:, 2] = rng.normal(0.0, 0.030, size=(m_count, 20))
+        pts = pts + noise
+
+    if use_scale:
+        s_xy = rng.uniform(0.70, 1.40, size=(m_count, 1))
+        s_z = s_xy * rng.uniform(0.88, 1.12, size=(m_count, 1))
+        pts[:, :, 0] *= s_xy
+        pts[:, :, 1] *= s_xy
+        pts[:, :, 2] *= s_z
+
+    if use_flip:
+        pts[:, :, 0] = -pts[:, :, 0]
+
+    if use_finger:
+        old_tips = pts[:, [4, 8, 12, 16, 20], :].copy()
+        for chain in ((1, 2, 3, 4), (5, 6, 7, 8), (9, 10, 11, 12), (13, 14, 15, 16), (17, 18, 19, 20)):
+            ratio = rng.uniform(0.92, 1.08, size=(m_count, 1, 1))
+            base = pts[:, chain[0] : chain[0] + 1, :].copy()
+            for j in chain[1:]:
+                pts[:, j : j + 1, :] = base + (pts[:, j : j + 1, :] - base) * ratio
+        for f_i, tip_idx in enumerate((8, 12, 16, 20)):
+            d_old = np.linalg.norm(old_tips[:, 0, :] - old_tips[:, f_i + 1, :], axis=1)
+            close = d_old < 0.35
+            if np.any(close):
+                mid_new = 0.5 * (pts[close, 4, :] + pts[close, tip_idx, :])
+                offset_old = old_tips[close, f_i + 1, :] - old_tips[close, 0, :]
+                pts[close, 4, :] = mid_new - 0.5 * offset_old
+                pts[close, tip_idx, :] = mid_new + 0.5 * offset_old
+
+    out[mask] = recompute_spatial_96(pts).astype(np.float64)
+    return out
+
 
 def rotation_matrix_3d(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarray:
     """Create a 3x3 3D rotation matrix from Euler angles in degrees."""

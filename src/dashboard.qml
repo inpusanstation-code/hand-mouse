@@ -49,6 +49,7 @@ ApplicationWindow {
             color: !button.enabled ? "#9AA8B4" : ((button.primary || button.danger) ? "#FFFFFF" : window.navy)
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
         }
         background: Rectangle {
             radius: 10
@@ -241,7 +242,11 @@ ApplicationWindow {
                 readonly property bool selected: seg.current === modelData[0]
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
+                Layout.minimumWidth: 0
+                implicitWidth: 0
                 implicitHeight: 34
+                leftPadding: 6
+                rightPadding: 6
                 enabled: seg.enabled
                 onClicked: seg.picked(modelData[0])
                 contentItem: TextLabel {
@@ -266,12 +271,11 @@ ApplicationWindow {
         id: chip
         property alias text: chipLabel.text
         property bool warn: false
-        implicitWidth: chipLabel.implicitWidth + 20
-        implicitHeight: 28
-        Layout.minimumWidth: Math.min(implicitWidth, 68)
+        implicitWidth: chipLabel.implicitWidth + 18
+        implicitHeight: 26
+        Layout.minimumWidth: Math.min(implicitWidth, 56)
         Layout.preferredWidth: implicitWidth
-        Layout.maximumWidth: implicitWidth
-        radius: 14
+        radius: 13
         color: warn ? "#FFF1D6" : "#E8F7F2"
         border.color: warn ? "#F2B544" : "transparent"
         clip: true
@@ -279,13 +283,41 @@ ApplicationWindow {
             id: chipLabel
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 10
-            anchors.rightMargin: 10
+            anchors.leftMargin: 9
+            anchors.rightMargin: 9
             anchors.verticalCenter: parent.verticalCenter
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
             font.pixelSize: 12
             color: chip.warn ? "#8A5A00" : window.navy
+        }
+    }
+
+    component StyledComboBox: ComboBox {
+        id: scombo
+        implicitHeight: 32
+        leftPadding: 10
+        rightPadding: 28
+        font.pixelSize: 12
+        contentItem: TextLabel {
+            text: scombo.displayText
+            font.pixelSize: 12
+            color: window.navy
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+        }
+        indicator: TextLabel {
+            x: scombo.width - width - 9
+            y: (scombo.availableHeight - height) / 2
+            text: "▾"
+            font.pixelSize: 12
+            color: window.muted
+        }
+        background: Rectangle {
+            radius: 7
+            color: scombo.down ? "#E8EEF2" : "white"
+            border.color: scombo.activeFocus ? "#16846E" : "#CBD5E1"
+            border.width: scombo.activeFocus ? 2 : 1
         }
     }
 
@@ -564,14 +596,16 @@ ApplicationWindow {
             Layout.margins: 20
             spacing: 16
             Rectangle {
-                Layout.preferredWidth: 280
+                Layout.preferredWidth: 312
+                Layout.minimumWidth: 298
+                Layout.maximumWidth: 328
                 Layout.fillHeight: true
                 radius: 16
                 color: "white"
                 border.color: window.line
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 16
+                    anchors.margins: 12
                     spacing: 8
                     ScrollView {
                         id: sideScroll
@@ -579,198 +613,295 @@ ApplicationWindow {
                         Layout.fillHeight: true
                         clip: true
                         contentWidth: availableWidth
-                        ColumnLayout {
-                            width: sideScroll.availableWidth
-                            spacing: 8
-                            TextLabel { text: "포인터"; font.pixelSize: 20; font.bold: true }
-                            Segmented {
-                                enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                options: [["index", "검지 포인터"], ["palm", "손바닥 (Dan)"]]
-                                current: dashboard.pointerOnly ? "index" : "palm"
-                                onPicked: function (value) { dashboard.setPointerPreset(value === "index") }
-                            }
-                            ActionButton {
-                                Layout.fillWidth: true
-                                enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                text: dashboard.motionLabel
-                                onClicked: dashboard.toggleMotion()
-                            }
-                            ActionButton {
-                                Layout.fillWidth: true
-                                enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                text: dashboard.profileLabel + (dashboard.profileCount > 0 ? "  (눌러서 바꾸기)" : "  (없음)")
-                                onClicked: dashboard.cycleProfile()
-                            }
-                            RowLayout {
-                                visible: !dashboard.pointerOnly
-                                Layout.fillWidth: true
-                                spacing: 6
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        Item {
+                            width: Math.max(180, sideScroll.availableWidth - 10)
+                            implicitHeight: sideCol.implicitHeight
+                            ColumnLayout {
+                                id: sideCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                spacing: 8
+                                TextLabel { text: "포인터"; font.pixelSize: 20; font.bold: true }
+                                Segmented {
+                                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                    options: [["index", "검지 포인터"], ["palm", "손바닥 (Dan)"]]
+                                    current: dashboard.pointerOnly ? "index" : "palm"
+                                    onPicked: function (value) { dashboard.setPointerPreset(value === "index") }
+                                }
                                 ActionButton {
                                     Layout.fillWidth: true
-                                    enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
-                                    text: dashboard.palmCalibrated ? "커서 방향 보정 다시" : "커서 방향 보정"
-                                    onClicked: dashboard.beginPalmCalibration()
+                                    Layout.minimumWidth: 0
+                                    implicitWidth: 0
+                                    leftPadding: 10; rightPadding: 10
+                                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                    text: dashboard.motionLabel
+                                    onClicked: dashboard.toggleMotion()
                                 }
                                 ActionButton {
-                                    visible: dashboard.palmCalibrated && !dashboard.palmCalibrating
-                                    text: "초기화"
-                                    onClicked: dashboard.resetPalmCalibration()
-                                }
-                            }
-                            SectionLabel { visible: !dashboard.pointerOnly && dashboard.tcnAvailable; text: "손짓 확인 (TCN: 학습된 동작)" }
-                            Segmented {
-                                visible: !dashboard.pointerOnly && dashboard.tcnAvailable
-                                options: [["off", "끔"], ["on", "켬"]]
-                                current: dashboard.tcnGate ? "on" : "off"
-                                onPicked: function (value) { dashboard.setTcnGate(value === "on") }
-                            }
-                            SectionLabel { visible: !dashboard.pointerOnly; text: "학습 데이터 녹화" }
-                            Segmented {
-                                visible: !dashboard.pointerOnly
-                                enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
-                                options: [["off", "끔"], ["guided", "안내 녹화"], ["free", "평소 녹화"]]
-                                current: dashboard.recMode
-                                onPicked: function (value) {
-                                    if (value === "guided") {
-                                        if (dashboard.focusRecord("")) capturePlan.open()
-                                    } else { dashboard.setRecMode(value) }
-                                }
-                            }
-                            ColumnLayout {
-                                visible: dashboard.pointerOnly
-                                Layout.fillWidth: true
-                                spacing: 8
-                                SectionLabel { text: "클릭" }
-                                Segmented {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    implicitWidth: 0
+                                    leftPadding: 10; rightPadding: 10
                                     enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                    options: [["pinch", "핀치"], ["trigger", "방아쇠"], ["off", "끔"]]
-                                    current: dashboard.clickStyle
-                                    onPicked: function (value) { dashboard.setClickStyle(value) }
-                                }
-                                SectionLabel { text: "커서 기준점" }
-                                Segmented {
-                                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                    options: [["index", "검지 끝"], ["palm", "손바닥 중심"]]
-                                    current: dashboard.pointerAnchor
-                                    onPicked: function (value) { dashboard.setAnchor(value) }
-                                }
-                                SectionLabel { text: "손 주변 확대 (시험)" }
-                                Segmented {
-                                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                    options: [["off", "끔"], ["on", "켬"]]
-                                    current: dashboard.handCrop ? "on" : "off"
-                                    onPicked: function (value) { dashboard.setHandCrop(value === "on") }
+                                    text: dashboard.profileLabel + (dashboard.profileCount > 0 ? "  (눌러서 바꾸기)" : "  (없음)")
+                                    onClicked: dashboard.cycleProfile()
                                 }
                                 RowLayout {
+                                    visible: !dashboard.pointerOnly
                                     Layout.fillWidth: true
                                     spacing: 6
                                     ActionButton {
                                         Layout.fillWidth: true
-                                        enabled: !dashboard.calibratingPointer
-                                        text: dashboard.pointerCalibrated ? "방향 보정 다시" : "방향 보정"
-                                        onClicked: dashboard.beginPointerCalibration()
+                                        Layout.minimumWidth: 0
+                                        implicitWidth: 0
+                                        leftPadding: 10; rightPadding: 10
+                                        enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                                        text: dashboard.palmCalibrated ? "커서 방향 보정 다시" : "커서 방향 보정"
+                                        onClicked: dashboard.beginPalmCalibration()
                                     }
                                     ActionButton {
-                                        visible: dashboard.pointerCalibrated && !dashboard.calibratingPointer
+                                        visible: dashboard.palmCalibrated && !dashboard.palmCalibrating
+                                        leftPadding: 10; rightPadding: 10
                                         text: "초기화"
-                                        onClicked: dashboard.resetPointerCalibration()
+                                        onClicked: dashboard.resetPalmCalibration()
                                     }
                                 }
-                            }
-                            TextLabel {
-                                Layout.fillWidth: true
-                                text: "설정을 바꾸면 입력이 멈춥니다. 다시 제어 시작을 누르세요."
-                                color: window.muted
-                                wrapMode: Text.Wrap
-                                font.pixelSize: 11
-                            }
-                            Divider {}
-                            SectionLabel { text: "동작 안내" }
-                            Repeater {
-                                model: dashboard.pointerOnly ? (dashboard.clickOff
-                                    ? [[dashboard.pointerAnchor === "palm" ? "손바닥 따라가기" : "검지 끝 따라가기", "포인터 이동"], ["클릭", "꺼짐"]]
-                                    : dashboard.triggerClick
-                                    ? [["검지만 펴기", "포인터 이동"], ["엄지로 검지 옆 짧게", "좌클릭"],
-                                       ["누른 채 가만히", "우클릭"], ["누른 채 움직이기", "드래그"]]
-                                    : [["검지만 펴기", "포인터 이동"], ["엄지 + 중지", "좌클릭"], ["엄지 + 약지", "우클릭"]]) : [
-                                    ["손 이동", "포인터 이동"], ["엄지 + 검지", "스크롤"],
-                                    ["엄지 + 중지", "좌클릭"], ["엄지 + 약지", "우클릭"],
-                                    ["엄지 + 새끼", "창 선택"]
-                                ]
-                                delegate: RowLayout {
-                                    required property var modelData
-                                    Layout.fillWidth: true
-                                    TextLabel { text: modelData[0]; font.pixelSize: 12; font.bold: true }
-                                    Item { Layout.fillWidth: true }
-                                    TextLabel { text: modelData[1]; font.pixelSize: 12; color: window.muted }
+                                SectionLabel { visible: !dashboard.pointerOnly && dashboard.tcnAvailable; text: "손짓 확인 (TCN: 학습된 동작)" }
+                                Segmented {
+                                    visible: !dashboard.pointerOnly && dashboard.tcnAvailable
+                                    options: [["off", "끔"], ["on", "켬"]]
+                                    current: dashboard.tcnGate ? "on" : "off"
+                                    onPicked: function (value) { dashboard.setTcnGate(value === "on") }
                                 }
-                            }
-                            TextLabel {
-                                visible: dashboard.pointerOnly
-                                Layout.fillWidth: true
-                                text: dashboard.clickOff
-                                    ? "클릭을 판정하지 않습니다. 손이 보이면 손 모양과 관계없이 커서가 따라갑니다."
-                                    : dashboard.triggerClick
-                                    ? "엄지가 검지 옆에 다가오면 커서가 고정되고, 누르기 직전 위치에서 클릭합니다."
-                                    : "검지를 움직이는 동안에는 클릭하지 않습니다. 멈춘 뒤 엄지를 뗐다가 중지·약지에 대면 클릭합니다."
-                                color: window.muted
-                                wrapMode: Text.Wrap
-                                font.pixelSize: 11
-                            }
-                            TextLabel {
-                                visible: dashboard.pointerOnly && diagnostics.visible
-                                Layout.fillWidth: true
-                                text: "0 엄지 · 1 검지 · 2 중지 · 3 약지 · 4 새끼\n조합: " + (dashboard.detectedContacts || "—")
-                                wrapMode: Text.Wrap
-                                color: window.muted
-                                font.pixelSize: 12
-                            }
-                            Divider { visible: dashboard.pointerOnly }
-                            SectionLabel { visible: dashboard.pointerOnly; text: "트래킹 측정" }
-                            ActionButton {
-                                visible: dashboard.pointerOnly
-                                enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                Layout.fillWidth: true
-                                text: "측정 시작 (클릭 없음)"
-                                onClicked: dashboard.beginTrackingTest()
-                            }
-                            TextLabel {
-                                visible: dashboard.pointerOnly && dashboard.recentResults.length === 0
-                                Layout.fillWidth: true
-                                text: "아직 측정 기록이 없습니다. 설정을 바꿔 가며 측정해 비교하세요."
-                                color: window.muted
-                                wrapMode: Text.Wrap
-                                font.pixelSize: 11
-                            }
-                            Repeater {
-                                model: dashboard.pointerOnly ? dashboard.recentResults : []
-                                delegate: TextLabel {
-                                    required property string modelData
-                                    required property int index
+                                ColumnLayout {
+                                    visible: !dashboard.pointerOnly && dashboard.tcnAvailable && dashboard.tcnGate
                                     Layout.fillWidth: true
-                                    text: modelData
+                                    spacing: 2
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: dashboard.gateCalibratedConfidenceText
+                                        font.pixelSize: 11
+                                        color: window.muted
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: dashboard.gateRejectionReasonText
+                                        font.pixelSize: 11
+                                        color: window.muted
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+                                SectionLabel { visible: !dashboard.pointerOnly; text: "학습 데이터 녹화" }
+                                Segmented {
+                                    visible: !dashboard.pointerOnly
+                                    enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                                    options: [["off", "끔"], ["guided", "안내 녹화"], ["free", "평소 녹화"]]
+                                    current: dashboard.recMode
+                                    onPicked: function (value) {
+                                        if (value === "guided") {
+                                            if (dashboard.focusRecord("")) capturePlan.open()
+                                        } else { dashboard.setRecMode(value) }
+                                    }
+                                }
+                                ColumnLayout {
+                                    visible: dashboard.pointerOnly
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    SectionLabel { text: "클릭" }
+                                    Segmented {
+                                        enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                        options: [["pinch", "핀치"], ["trigger", "방아쇠"], ["off", "끔"]]
+                                        current: dashboard.clickStyle
+                                        onPicked: function (value) { dashboard.setClickStyle(value) }
+                                    }
+                                    SectionLabel { text: "커서 기준점" }
+                                    Segmented {
+                                        enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                        options: [["index", "검지 끝"], ["palm", "손바닥 중심"]]
+                                        current: dashboard.pointerAnchor
+                                        onPicked: function (value) { dashboard.setAnchor(value) }
+                                    }
+                                    SectionLabel { text: "손 주변 확대 (시험)" }
+                                    Segmented {
+                                        enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                        options: [["off", "끔"], ["on", "켬"]]
+                                        current: dashboard.handCrop ? "on" : "off"
+                                        onPicked: function (value) { dashboard.setHandCrop(value === "on") }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        ActionButton {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            implicitWidth: 0
+                                            leftPadding: 10; rightPadding: 10
+                                            enabled: !dashboard.calibratingPointer
+                                            text: dashboard.pointerCalibrated ? "방향 보정 다시" : "방향 보정"
+                                            onClicked: dashboard.beginPointerCalibration()
+                                        }
+                                        ActionButton {
+                                            visible: dashboard.pointerCalibrated && !dashboard.calibratingPointer
+                                            leftPadding: 10; rightPadding: 10
+                                            text: "초기화"
+                                            onClicked: dashboard.resetPointerCalibration()
+                                        }
+                                    }
+                                }
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    text: "설정을 바꾸면 입력이 멈춥니다. 다시 제어 시작을 누르세요."
+                                    color: window.muted
                                     wrapMode: Text.Wrap
                                     font.pixelSize: 11
-                                    font.bold: index === 0
-                                    color: index === 0 ? window.navy : window.muted
                                 }
-                            }
-                            Divider { visible: dashboard.pointerOnly }
-                            SectionLabel { visible: dashboard.pointerOnly; text: "실패 기록" }
-                            TextLabel {
-                                visible: dashboard.pointerOnly
-                                Layout.fillWidth: true
-                                text: dashboard.failureSummary + (dashboard.failureLast ? "\n최근: " + dashboard.failureLast : "")
-                                    + "\n손을 놓치면 앞뒤 3초의 관절 좌표를 logs/failures에 저장합니다(영상 없음)."
-                                color: window.muted
-                                wrapMode: Text.Wrap
-                                font.pixelSize: 11
-                            }
-                            ActionButton {
-                                visible: dashboard.pointerOnly
-                                Layout.fillWidth: true
-                                text: "방금 이상했어요 (F)"
-                                onClicked: dashboard.markFailure()
+                                Divider {}
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    SectionLabel {
+                                        text: "동작 · 단축키 매핑"
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        elide: Text.ElideRight
+                                    }
+                                    CompactButton {
+                                        visible: !dashboard.pointerOnly
+                                        text: "단축키·모션 설정"
+                                        implicitHeight: 24
+                                        leftPadding: 7; rightPadding: 7
+                                        onClicked: {
+                                            trainingCenter.centerTab = "bindings"
+                                            trainingCenter.open()
+                                        }
+                                    }
+                                }
+                                Repeater {
+                                    visible: dashboard.pointerOnly
+                                    model: dashboard.pointerOnly ? (dashboard.clickOff
+                                        ? [[dashboard.pointerAnchor === "palm" ? "손바닥 따라가기" : "검지 끝 따라가기", "포인터 이동"], ["클릭", "꺼짐"]]
+                                        : dashboard.triggerClick
+                                        ? [["검지만 펴기", "포인터 이동"], ["엄지로 검지 옆 짧게", "좌클릭"],
+                                           ["누른 채 가만히", "우클릭"], ["누른 채 움직이기", "드래그"]]
+                                        : [["검지만 펴기", "포인터 이동"], ["엄지 + 중지", "좌클릭"], ["엄지 + 약지", "우클릭"]]) : []
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        TextLabel { text: modelData[0]; font.pixelSize: 12; font.bold: true; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight }
+                                        TextLabel { text: modelData[1]; font.pixelSize: 12; color: window.muted }
+                                    }
+                                }
+                                Repeater {
+                                    visible: !dashboard.pointerOnly
+                                    model: !dashboard.pointerOnly ? dashboard.sidebarGestureMappings : []
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        Rectangle {
+                                            radius: 4
+                                            color: modelData.track === "motion" ? "#EDE9FE" : (modelData.track === "composite" ? "#FEF3C7" : "#E6F8F3")
+                                            border.color: modelData.track === "motion" ? "#C4B5FD" : (modelData.track === "composite" ? "#FCD34D" : "#8CE0CA")
+                                            implicitWidth: sideTrackLbl.implicitWidth + 6
+                                            implicitHeight: 17
+                                            TextLabel {
+                                                id: sideTrackLbl
+                                                anchors.centerIn: parent
+                                                text: modelData.track === "motion" ? "모션" : (modelData.track === "composite" ? "복합" : "정지")
+                                                font.pixelSize: 9
+                                                font.bold: true
+                                                color: modelData.track === "motion" ? "#5B21B6" : (modelData.track === "composite" ? "#92400E" : "#0F6E5B")
+                                            }
+                                        }
+                                        TextLabel {
+                                            text: modelData.gesture
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                        }
+                                        TextLabel {
+                                            text: modelData.badge
+                                            font.pixelSize: 11
+                                            color: modelData.track === "motion" ? "#4C1D95" : "#0F6E5B"
+                                            font.bold: true
+                                            elide: Text.ElideRight
+                                            horizontalAlignment: Text.AlignRight
+                                            Layout.maximumWidth: 118
+                                            Layout.minimumWidth: 0
+                                        }
+                                    }
+                                }
+                                TextLabel {
+                                    visible: dashboard.pointerOnly
+                                    Layout.fillWidth: true
+                                    text: dashboard.clickOff
+                                        ? "클릭을 판정하지 않습니다. 손이 보이면 손 모양과 관계없이 커서가 따라갑니다."
+                                        : dashboard.triggerClick
+                                        ? "엄지가 검지 옆에 다가오면 커서가 고정되고, 누르기 직전 위치에서 클릭합니다."
+                                        : "검지를 움직이는 동안에는 클릭하지 않습니다. 멈춘 뒤 엄지를 뗐다가 중지·약지에 대면 클릭합니다."
+                                    color: window.muted
+                                    wrapMode: Text.Wrap
+                                    font.pixelSize: 11
+                                }
+                                TextLabel {
+                                    visible: dashboard.pointerOnly && diagnostics.visible
+                                    Layout.fillWidth: true
+                                    text: "0 엄지 · 1 검지 · 2 중지 · 3 약지 · 4 새끼\n조합: " + (dashboard.detectedContacts || "—")
+                                    wrapMode: Text.Wrap
+                                    color: window.muted
+                                    font.pixelSize: 12
+                                }
+                                Divider { visible: dashboard.pointerOnly }
+                                SectionLabel { visible: dashboard.pointerOnly; text: "트래킹 측정" }
+                                ActionButton {
+                                    visible: dashboard.pointerOnly
+                                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                    Layout.fillWidth: true
+                                    text: "측정 시작 (클릭 없음)"
+                                    onClicked: dashboard.beginTrackingTest()
+                                }
+                                TextLabel {
+                                    visible: dashboard.pointerOnly && dashboard.recentResults.length === 0
+                                    Layout.fillWidth: true
+                                    text: "아직 측정 기록이 없습니다. 설정을 바꿔 가며 측정해 비교하세요."
+                                    color: window.muted
+                                    wrapMode: Text.Wrap
+                                    font.pixelSize: 11
+                                }
+                                Repeater {
+                                    model: dashboard.pointerOnly ? dashboard.recentResults : []
+                                    delegate: TextLabel {
+                                        required property string modelData
+                                        required property int index
+                                        Layout.fillWidth: true
+                                        text: modelData
+                                        wrapMode: Text.Wrap
+                                        font.pixelSize: 11
+                                        font.bold: index === 0
+                                        color: index === 0 ? window.navy : window.muted
+                                    }
+                                }
+                                Divider { visible: dashboard.pointerOnly }
+                                SectionLabel { visible: dashboard.pointerOnly; text: "실패 기록" }
+                                TextLabel {
+                                    visible: dashboard.pointerOnly
+                                    Layout.fillWidth: true
+                                    text: dashboard.failureSummary + (dashboard.failureLast ? "\n최근: " + dashboard.failureLast : "")
+                                        + "\n손을 놓치면 앞뒤 3초의 관절 좌표를 logs/failures에 저장합니다(영상 없음)."
+                                    color: window.muted
+                                    wrapMode: Text.Wrap
+                                    font.pixelSize: 11
+                                }
+                                ActionButton {
+                                    visible: dashboard.pointerOnly
+                                    Layout.fillWidth: true
+                                    text: "방금 이상했어요 (F)"
+                                    onClicked: dashboard.markFailure()
+                                }
                             }
                         }
                     }
@@ -1090,32 +1221,38 @@ ApplicationWindow {
         property string centerTab: "gestures"
         property string selectedSimFile: ""
         property bool showImprovementReport: false
+        property string bindingsSubTab: "shortcuts"
+        property string selectedBindingKey: "swipe_left"
         anchors.centerIn: parent
-        width: Math.min(1250, window.width - 20)
+        width: Math.min(1256, window.width - 20)
         height: Math.min(836, window.height - 20)
         modal: true
         focus: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         onOpened: dashboard.openTraining()
         onClosed: dashboard.closeTraining()
-        padding: 20
-        background: Rectangle { radius: 16; color: "white"; border.color: window.line }
-        contentItem: ColumnLayout {
+        padding: 14
+        background: Rectangle { radius: 16; color: "white"; border.color: window.line; clip: true }
+        contentItem: Item {
             width: trainingCenter.availableWidth
-            spacing: 8
+            height: trainingCenter.availableHeight
+            clip: true
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 6
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
                 ColumnLayout {
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
-                    spacing: 2
+                    spacing: 1
                     TextLabel {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                         elide: Text.ElideRight
                         text: "학습 센터 · 데이터 품질 · 시뮬레이터"
-                        font.pixelSize: 21
+                        font.pixelSize: 19
                         font.bold: true
                     }
                     TextLabel {
@@ -1123,32 +1260,30 @@ ApplicationWindow {
                         Layout.minimumWidth: 0
                         elide: Text.ElideRight
                         text: "녹화 품질 평가 및 선별 → 동작별 선택/통합 학습 → 시뮬레이터 검증 → 동작별 초기화 및 모델 버전 복원"
-                        font.pixelSize: 12
+                        font.pixelSize: 11
                         color: window.muted
                     }
                 }
-                ActionButton { text: "새로고침"; enabled: dashboard.trainingBusy === ""; onClicked: dashboard.refreshTraining() }
-                ActionButton { text: "닫기"; onClicked: trainingCenter.close() }
+                CompactButton { text: "새로고침"; implicitHeight: 34; leftPadding: 14; rightPadding: 14; enabled: dashboard.trainingBusy === ""; onClicked: dashboard.refreshTraining() }
+                CompactButton { text: "닫기"; implicitHeight: 34; leftPadding: 14; rightPadding: 14; onClicked: trainingCenter.close() }
             }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 Chip {
-                    Layout.fillWidth: true
                     text: dashboard.trainingData !== "" ? dashboard.trainingData : "녹화 읽는 중…"
                 }
                 Chip {
-                    Layout.fillWidth: true
                     text: dashboard.trainingModel !== "" ? dashboard.trainingModel : "모델 확인 중…"
                 }
                 Chip {
                     visible: dashboard.trainingStorage !== "" && !dashboard.trainingStorageWarn
-                    Layout.fillWidth: true
                     text: dashboard.trainingStorage
                 }
                 Chip {
                     warn: !dashboard.hubHasToken
                     Layout.fillWidth: true
+                    Layout.maximumWidth: 360
                     text: "원격 허브 · " + dashboard.hubSummaryLabel
                 }
                 Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
@@ -1160,16 +1295,16 @@ ApplicationWindow {
             Rectangle {
                 visible: dashboard.trainingStorageWarn
                 Layout.fillWidth: true
-                implicitHeight: storageWarn.implicitHeight + 14
+                implicitHeight: storageWarn.implicitHeight + 12
                 radius: 8
                 color: "#FFF1D6"
                 border.color: "#F2B544"
                 TextLabel {
                     id: storageWarn
                     anchors.fill: parent
-                    anchors.margins: 7
+                    anchors.margins: 6
                     text: dashboard.trainingStorage
-                    font.pixelSize: 12
+                    font.pixelSize: 11
                     color: "#8A5A00"
                     wrapMode: Text.Wrap
                 }
@@ -1177,28 +1312,33 @@ ApplicationWindow {
             // Top tab navigation for Training Center
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: 6
                 ActionButton {
+                    implicitHeight: 36
                     text: "1. 동작별 학습 · 초기화"
                     accent: trainingCenter.centerTab === "gestures"
                     onClicked: trainingCenter.centerTab = "gestures"
                 }
                 ActionButton {
+                    implicitHeight: 36
                     text: "2. 녹화 품질 평가 · 선별 (" + dashboard.trainingFiles.length + ")"
                     accent: trainingCenter.centerTab === "recordings"
                     onClicked: trainingCenter.centerTab = "recordings"
                 }
                 ActionButton {
+                    implicitHeight: 36
                     text: "3. 학습 데이터 · 모델 시뮬레이터"
                     accent: trainingCenter.centerTab === "simulator"
                     onClicked: {
                         trainingCenter.centerTab = "simulator"
-                        if (!dashboard.simulationResult.file && dashboard.trainingFiles.length > 0) {
-                            dashboard.runSimulation(dashboard.trainingFiles[0].file)
+                        var targetFile = trainingCenter.selectedSimFile || dashboard.selectedSimFile || (dashboard.trainingFiles.length > 0 ? dashboard.trainingFiles[0].file : "")
+                        if (targetFile !== "" && dashboard.simulationResult.file !== targetFile) {
+                            dashboard.runSimulation(targetFile, true)
                         }
                     }
                 }
                 ActionButton {
+                    implicitHeight: 36
                     text: "4. 모델 버전 복원 · 앱 자가 진단"
                     accent: trainingCenter.centerTab === "diagnostics"
                     onClicked: {
@@ -1207,6 +1347,12 @@ ApplicationWindow {
                             dashboard.runDiagnostics()
                         }
                     }
+                }
+                ActionButton {
+                    implicitHeight: 36
+                    text: "5. 단축키 매핑 · 복합동작 · 시계열 모션"
+                    accent: trainingCenter.centerTab === "bindings"
+                    onClicked: trainingCenter.centerTab = "bindings"
                 }
                 Item { Layout.fillWidth: true }
             }
@@ -1398,18 +1544,22 @@ ApplicationWindow {
                 }
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: 6
                     Repeater {
                         model: dashboard.trainingCategories
-                        ActionButton {
+                        CompactButton {
                             required property string modelData
+                            implicitHeight: 32
+                            leftPadding: 14
+                            rightPadding: 14
                             text: modelData
                             accent: dashboard.trainingFilter === modelData
                             onClicked: dashboard.setTrainingFilter(modelData)
                         }
                     }
                     Item { Layout.fillWidth: true }
+                    TextLabel { text: dashboard.trainingCatalog; font.pixelSize: 12; color: window.muted }
                 }
-                TextLabel { text: dashboard.trainingCatalog; font.pixelSize: 12; color: window.muted }
                 ScrollView {
                     id: trainScroll
                     Layout.fillWidth: true
@@ -1420,70 +1570,206 @@ ApplicationWindow {
                     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     ColumnLayout {
                         width: trainScroll.availableWidth
-                        spacing: 8
+                        spacing: 7
                         Repeater {
                             model: dashboard.trainingRows
                             delegate: Rectangle {
                                 id: row
                                 required property var modelData
                                 Layout.fillWidth: true
-                                implicitHeight: rowBody.implicitHeight + 24
-                                radius: 12
+                                implicitHeight: rowBody.implicitHeight + 18
+                                radius: 10
                                 color: modelData.level === "need" ? "#FFF8EA" : "#F7FAFB"
                                 border.color: modelData.level === "need" ? "#F2B544" : window.line
-                                RowLayout {
+                                ColumnLayout {
                                     id: rowBody
                                     anchors.fill: parent
-                                    anchors.margins: 12
-                                    spacing: 14
-                                    ColumnLayout {
+                                    anchors.margins: 9
+                                    spacing: 6
+
+                                    // Row 1: Gesture Title + Status Badges (Left) | Horizontal Action Buttons Toolbar (Right)
+                                    RowLayout {
                                         Layout.fillWidth: true
-                                        Layout.minimumWidth: 0
-                                        spacing: 5
-                                        RowLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 8
-                                            TextLabel { text: row.modelData.name; font.pixelSize: 16; font.bold: true; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.Wrap }
-                                            Rectangle {
-                                                visible: String(row.modelData.delta_badge || "") !== ""
-                                                radius: 6
-                                                color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
-                                                    ? "#DDF7EE"
-                                                    : (row.modelData.delta_status === "regressed" ? "#FFF0D4" : "#EEF2F5")
-                                                border.color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
-                                                    ? "#6AD6B3"
-                                                    : (row.modelData.delta_status === "regressed" ? "#F2B544" : window.line)
-                                                implicitWidth: rowDeltaTxt.implicitWidth + 12
-                                                implicitHeight: 22
-                                                TextLabel {
-                                                    id: rowDeltaTxt
-                                                    anchors.centerIn: parent
-                                                    text: String(row.modelData.delta_badge || "")
-                                                    font.pixelSize: 11
-                                                    font.bold: true
-                                                    color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
-                                                        ? "#0F6E4F"
-                                                        : (row.modelData.delta_status === "regressed" ? "#945800" : window.muted)
-                                                }
-                                            }
-                                            Chip {
-                                                visible: Boolean(row.modelData.is_disabled)
-                                                warn: true
-                                                text: "초기화됨 (규칙 동작)"
-                                            }
-                                            Chip {
-                                                warn: row.modelData.level === "need"
-                                                text: row.modelData.level === "ok" ? "좋아요" : row.modelData.level === "need" ? "더 녹화" : "다시 학습"
+                                        spacing: 8
+                                        TextLabel {
+                                            text: row.modelData.name
+                                            font.pixelSize: 15
+                                            font.bold: true
+                                        }
+                                        Chip {
+                                            warn: row.modelData.level === "need"
+                                            text: row.modelData.level === "ok" ? "좋아요" : row.modelData.level === "need" ? "더 녹화" : "다시 학습"
+                                        }
+                                        Rectangle {
+                                            radius: 5
+                                            color: row.modelData.track === "motion" ? "#EDE9FE" : (row.modelData.track === "static" ? "#E6F8F3" : "#EEF2F5")
+                                            border.color: row.modelData.track === "motion" ? "#C4B5FD" : (row.modelData.track === "static" ? "#8CE0CA" : window.line)
+                                            implicitWidth: trackFmtTxt.implicitWidth + 10
+                                            implicitHeight: 22
+                                            TextLabel {
+                                                id: trackFmtTxt
+                                                anchors.centerIn: parent
+                                                text: row.modelData.track === "motion" ? "시계열 모션 트랙" : (row.modelData.track === "static" ? "정지·핀치 트랙" : "연속 배경")
+                                                font.pixelSize: 10
+                                                font.bold: true
+                                                color: row.modelData.track === "motion" ? "#5B21B6" : (row.modelData.track === "static" ? "#0F6E5B" : window.muted)
                                             }
                                         }
-                                        TextLabel { text: row.modelData.instruction; Layout.fillWidth: true; Layout.minimumWidth: 0; wrapMode: Text.Wrap; font.pixelSize: 12; color: window.muted }
-                                        RowLayout {
+                                        Rectangle {
+                                            visible: String(row.modelData.shortcut_badge || "") !== ""
+                                            radius: 5
+                                            color: "#F0F9FF"
+                                            border.color: "#7DD3FC"
+                                            implicitWidth: scBadgeTxt.implicitWidth + 12
+                                            implicitHeight: 22
+                                            TextLabel {
+                                                id: scBadgeTxt
+                                                anchors.centerIn: parent
+                                                text: {
+                                                    var sb = String(row.modelData.shortcut_badge || "")
+                                                    return sb.indexOf("단축키:") === 0 ? sb : ("단축키: " + sb)
+                                                }
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                color: "#0369A1"
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    if (row.modelData.can_train) {
+                                                        trainingCenter.selectedBindingKey = row.modelData.key
+                                                        trainingCenter.bindingsSubTab = "shortcuts"
+                                                        trainingCenter.centerTab = "bindings"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Chip {
+                                            visible: Boolean(row.modelData.is_disabled)
+                                            warn: true
+                                            text: "초기화됨 (규칙 동작)"
+                                        }
+                                        Rectangle {
+                                            visible: String(row.modelData.delta_badge || "") !== ""
+                                            radius: 6
+                                            color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
+                                                ? "#DDF7EE"
+                                                : (row.modelData.delta_status === "regressed" ? "#FFF0D4" : "#EEF2F5")
+                                            border.color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
+                                                ? "#6AD6B3"
+                                                : (row.modelData.delta_status === "regressed" ? "#F2B544" : window.line)
+                                            implicitWidth: rowDeltaTxt.implicitWidth + 12
+                                            implicitHeight: 22
+                                            TextLabel {
+                                                id: rowDeltaTxt
+                                                anchors.centerIn: parent
+                                                text: String(row.modelData.delta_badge || "")
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
+                                                    ? "#0F6E4F"
+                                                    : (row.modelData.delta_status === "regressed" ? "#945800" : window.muted)
+                                            }
+                                        }
+                                        TextLabel {
+                                            text: row.modelData.instruction
+                                            font.pixelSize: 12
+                                            color: window.muted
+                                            elide: Text.ElideRight
                                             Layout.fillWidth: true
-                                            spacing: 8
-                                            TextLabel { text: "데이터"; font.pixelSize: 12; color: window.muted; Layout.preferredWidth: 40 }
+                                            Layout.minimumWidth: 0
+                                        }
+                                        RowLayout {
+                                            spacing: 5
+                                            CompactButton {
+                                                text: row.modelData.track === "motion" ? "시계열 모션 학습" : "이 동작만 학습"
+                                                implicitHeight: 32
+                                                leftPadding: 11; rightPadding: 11
+                                                visible: row.modelData.can_train
+                                                primary: true
+                                                enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
+                                                onClicked: {
+                                                    if (row.modelData.track === "motion") {
+                                                        dashboard.trainMotionTemplatesSlot(row.modelData.key)
+                                                    } else {
+                                                        dashboard.trainSelectedGesture(row.modelData.key)
+                                                    }
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "단축키 변경"
+                                                implicitHeight: 32
+                                                leftPadding: 9; rightPadding: 9
+                                                visible: row.modelData.can_train
+                                                onClicked: {
+                                                    trainingCenter.selectedBindingKey = row.modelData.key
+                                                    trainingCenter.bindingsSubTab = "shortcuts"
+                                                    trainingCenter.centerTab = "bindings"
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "판정 검증"
+                                                implicitHeight: 32
+                                                leftPadding: 10; rightPadding: 10
+                                                visible: Boolean(row.modelData.can_train && String(row.modelData.latest_file || "") !== "")
+                                                enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
+                                                onClicked: dashboard.testGestureJudgment(row.modelData.key)
+                                            }
+                                            CompactButton {
+                                                text: "시뮬레이터 재생"
+                                                implicitHeight: 32
+                                                leftPadding: 10; rightPadding: 10
+                                                visible: String(row.modelData.latest_file || "") !== ""
+                                                enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                                                onClicked: {
+                                                    var targetFile = String(row.modelData.latest_file || "")
+                                                    if (targetFile !== "") {
+                                                        trainingCenter.selectedSimFile = targetFile
+                                                        dashboard.setSelectedSimFile(targetFile)
+                                                        trainingCenter.centerTab = "simulator"
+                                                        dashboard.runSimulation(targetFile, true)
+                                                    }
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "학습 초기화"
+                                                implicitHeight: 32
+                                                leftPadding: 10; rightPadding: 10
+                                                visible: Boolean(row.modelData.can_train && row.modelData.is_trained)
+                                                enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
+                                                onClicked: dashboard.resetGestureTraining(row.modelData.key)
+                                            }
+                                            TextLabel {
+                                                visible: !row.modelData.can_train
+                                                text: "공통 오답 자료"
+                                                font.pixelSize: 11
+                                                color: window.muted
+                                            }
+                                            CompactButton {
+                                                text: "집중 녹화 설정"
+                                                implicitHeight: 32
+                                                leftPadding: 10; rightPadding: 10
+                                                enabled: !dashboard.trainingRunning && dashboard.recMode === "off"
+                                                onClicked: {
+                                                    if (dashboard.focusRecord(row.modelData.key)) {
+                                                        trainingCenter.close()
+                                                        capturePlan.open()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Row 2: Full-width Data Progress + Recognition Score + Fit + Model Info
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 12
+                                        RowLayout {
+                                            spacing: 6
+                                            TextLabel { text: "데이터"; font.pixelSize: 11; font.bold: true; color: window.muted }
                                             Rectangle {
-                                                Layout.fillWidth: true
-                                                Layout.maximumWidth: 260
+                                                width: 150
                                                 height: 8; radius: 4; color: "#E3E9EE"
                                                 Rectangle {
                                                     width: parent.width * Math.max(0, Math.min(1, row.modelData.data_ratio))
@@ -1491,14 +1777,36 @@ ApplicationWindow {
                                                     color: row.modelData.data_ratio >= 1 ? "#45E0B4" : "#F2B544"
                                                 }
                                             }
-                                            TextLabel { text: row.modelData.data_text; font.pixelSize: 12 }
+                                            TextLabel { text: row.modelData.data_text; font.pixelSize: 12; font.bold: true }
                                         }
-                                        RowLayout {
-                                            spacing: 16
-                                            TextLabel { text: row.modelData.score_text; font.pixelSize: 13; font.bold: true }
-                                            TextLabel { text: row.modelData.fit_text; font.pixelSize: 12; color: window.muted }
+                                        Rectangle { width: 1; height: 14; color: window.line }
+                                        TextLabel { text: row.modelData.score_text; font.pixelSize: 12; font.bold: true; color: "#0F6E5B" }
+                                        TextLabel { text: row.modelData.fit_text; font.pixelSize: 12; color: window.muted }
+                                        Rectangle { width: 1; height: 14; color: window.line }
+                                        TextLabel {
+                                            text: String(row.modelData.training_format_badge || "") + "  ·  " + row.modelData.model_text
+                                                + (String(row.modelData.motion_metrics_text || "") !== "" ? ("  [" + row.modelData.motion_metrics_text + "]") : "")
+                                            font.pixelSize: 11
+                                            color: row.modelData.track === "motion" ? "#4C1D95" : window.muted
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                         }
-                                        TextLabel { text: row.modelData.model_text; font.pixelSize: 11; color: window.muted }
+                                    }
+
+                                    // Row 3: Advice + Shared Model Note + Optional Delta/Diagnosis/Test Result
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        TextLabel {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            text: "→ " + row.modelData.advice
+                                                + (row.modelData.label === "thumb_middle" ? "  (좌클릭과 중지 유지 드래그가 같은 모델을 공유합니다)" : "")
+                                            font.pixelSize: 11
+                                            color: row.modelData.level === "need" ? "#8A5A00" : window.muted
+                                            elide: Text.ElideRight
+                                        }
                                         TextLabel {
                                             visible: String(row.modelData.delta_detail || "") !== ""
                                             text: "개선 평가: " + String(row.modelData.delta_detail || "")
@@ -1507,127 +1815,58 @@ ApplicationWindow {
                                             color: row.modelData.delta_status === "improved" || row.modelData.delta_status === "new"
                                                 ? "#0F6E4F"
                                                 : (row.modelData.delta_status === "regressed" ? "#945800" : window.muted)
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            wrapMode: Text.Wrap
-                                        }
-                                        Rectangle {
-                                            visible: String(row.modelData.diagnosis_summary || "") !== ""
-                                            Layout.fillWidth: true
-                                            radius: 6
-                                            color: row.modelData.delta_status === "regressed" ? "#FFF7E6" : "#EFFAF5"
-                                            border.color: row.modelData.delta_status === "regressed" ? "#F2C97D" : "#A7E3CB"
-                                            implicitHeight: rowDiagTxt.implicitHeight + 10
-                                            TextLabel {
-                                                id: rowDiagTxt
-                                                anchors.fill: parent
-                                                anchors.margins: 5
-                                                text: "💡 " + String(row.modelData.diagnosis_summary || "")
-                                                font.pixelSize: 11
-                                                color: row.modelData.delta_status === "regressed" ? "#7A4300" : "#135D47"
-                                                wrapMode: Text.Wrap
-                                            }
-                                        }
-                                        TextLabel {
-                                            visible: row.modelData.label === "thumb_middle"
-                                            text: "좌클릭과 중지 유지 드래그가 같은 모델을 공유합니다."
-                                            font.pixelSize: 11
-                                            color: window.muted
-                                        }
-                                        TextLabel {
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            text: "→ " + row.modelData.advice
-                                            font.pixelSize: 12
-                                            color: row.modelData.level === "need" ? "#8A5A00" : window.muted
-                                            wrapMode: Text.Wrap
-                                        }
-                                        Rectangle {
-                                            visible: Boolean(dashboard.gestureTestResults[row.modelData.key])
-                                            Layout.fillWidth: true
-                                            radius: 6
-                                            color: "#EEF8F6"
-                                            border.color: "#7BD6BD"
-                                            implicitHeight: testResCol.implicitHeight + 10
-                                            ColumnLayout {
-                                                id: testResCol
-                                                anchors.fill: parent
-                                                anchors.margins: 5
-                                                spacing: 2
-                                                TextLabel {
-                                                    Layout.fillWidth: true
-                                                    Layout.minimumWidth: 0
-                                                    text: dashboard.gestureTestResults[row.modelData.key]
-                                                        ? String(dashboard.gestureTestResults[row.modelData.key].summary || "")
-                                                        : ""
-                                                    font.pixelSize: 11
-                                                    font.bold: true
-                                                    color: "#0D5944"
-                                                    wrapMode: Text.Wrap
-                                                }
-                                                TextLabel {
-                                                    visible: Boolean(dashboard.gestureTestResults[row.modelData.key] && dashboard.gestureTestResults[row.modelData.key].detail)
-                                                    Layout.fillWidth: true
-                                                    Layout.minimumWidth: 0
-                                                    text: dashboard.gestureTestResults[row.modelData.key]
-                                                        ? String(dashboard.gestureTestResults[row.modelData.key].detail || "")
-                                                        : ""
-                                                    font.pixelSize: 11
-                                                    color: window.muted
-                                                    wrapMode: Text.Wrap
-                                                }
-                                            }
                                         }
                                     }
-                                    ColumnLayout {
-                                        spacing: 6
-                                        ActionButton {
-                                            text: "이 동작만 학습"
-                                            visible: row.modelData.can_train
-                                            primary: true
-                                            enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
-                                            onClicked: dashboard.trainSelectedGesture(row.modelData.key)
-                                        }
-                                        ActionButton {
-                                            text: "판정 검증"
-                                            visible: Boolean(row.modelData.can_train && String(row.modelData.latest_file || "") !== "")
-                                            enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
-                                            onClicked: dashboard.testGestureJudgment(row.modelData.key)
-                                        }
-                                        ActionButton {
-                                            text: "시뮬레이터 재생"
-                                            visible: String(row.modelData.latest_file || "") !== ""
-                                            enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
-                                            onClicked: {
-                                                var targetFile = String(row.modelData.latest_file || "")
-                                                if (targetFile !== "") {
-                                                    trainingCenter.selectedSimFile = targetFile
-                                                    trainingCenter.centerTab = "simulator"
-                                                    dashboard.evaluateSimRecording(targetFile)
-                                                    dashboard.runSimulation(targetFile, true)
-                                                }
-                                            }
-                                        }
-                                        ActionButton {
-                                            text: "학습 초기화"
-                                            visible: Boolean(row.modelData.can_train && row.modelData.is_trained)
-                                            enabled: !dashboard.trainingRunning && !dashboard.recActive && dashboard.trainingBusy === ""
-                                            onClicked: dashboard.resetGestureTraining(row.modelData.key)
-                                        }
+                                    Rectangle {
+                                        visible: String(row.modelData.diagnosis_summary || "") !== ""
+                                        Layout.fillWidth: true
+                                        radius: 6
+                                        color: row.modelData.delta_status === "regressed" ? "#FFF7E6" : "#EFFAF5"
+                                        border.color: row.modelData.delta_status === "regressed" ? "#F2C97D" : "#A7E3CB"
+                                        implicitHeight: rowDiagTxt.implicitHeight + 8
                                         TextLabel {
-                                            visible: !row.modelData.can_train
-                                            text: "선택 학습의 공통 오답 자료"
+                                            id: rowDiagTxt
+                                            anchors.fill: parent
+                                            anchors.margins: 4
+                                            text: "💡 " + String(row.modelData.diagnosis_summary || "")
                                             font.pixelSize: 11
-                                            color: window.muted
+                                            color: row.modelData.delta_status === "regressed" ? "#7A4300" : "#135D47"
+                                            wrapMode: Text.Wrap
                                         }
-                                        ActionButton {
-                                            text: "집중 녹화 설정"
-                                            enabled: !dashboard.trainingRunning && dashboard.recMode === "off"
-                                            onClicked: {
-                                                if (dashboard.focusRecord(row.modelData.key)) {
-                                                    trainingCenter.close()
-                                                    capturePlan.open()
-                                                }
+                                    }
+                                    Rectangle {
+                                        visible: Boolean(dashboard.gestureTestResults[row.modelData.key])
+                                        Layout.fillWidth: true
+                                        radius: 6
+                                        color: "#EEF8F6"
+                                        border.color: "#7BD6BD"
+                                        implicitHeight: testResCol.implicitHeight + 8
+                                        ColumnLayout {
+                                            id: testResCol
+                                            anchors.fill: parent
+                                            anchors.margins: 4
+                                            spacing: 2
+                                            TextLabel {
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                text: dashboard.gestureTestResults[row.modelData.key]
+                                                    ? String(dashboard.gestureTestResults[row.modelData.key].summary || "")
+                                                    : ""
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                color: "#0D5944"
+                                                wrapMode: Text.Wrap
+                                            }
+                                            TextLabel {
+                                                visible: Boolean(dashboard.gestureTestResults[row.modelData.key] && dashboard.gestureTestResults[row.modelData.key].detail)
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                text: dashboard.gestureTestResults[row.modelData.key]
+                                                    ? String(dashboard.gestureTestResults[row.modelData.key].detail || "")
+                                                    : ""
+                                                font.pixelSize: 11
+                                                color: window.muted
+                                                wrapMode: Text.Wrap
                                             }
                                         }
                                     }
@@ -1759,8 +1998,8 @@ ApplicationWindow {
                                             enabled: dashboard.trainingBusy === ""
                                             onClicked: {
                                                 trainingCenter.selectedSimFile = fileRow.modelData.file
+                                                dashboard.setSelectedSimFile(fileRow.modelData.file)
                                                 trainingCenter.centerTab = "simulator"
-                                                dashboard.evaluateSimRecording(fileRow.modelData.file)
                                                 dashboard.runSimulation(fileRow.modelData.file, true)
                                             }
                                         }
@@ -1822,11 +2061,16 @@ ApplicationWindow {
                 Connections {
                     target: dashboard
                     function onTrainingChanged() {
-                        skeletonCanvas.requestPaint()
+                        if (dashboard.selectedSimFile !== "" && trainingCenter.selectedSimFile !== dashboard.selectedSimFile) {
+                            trainingCenter.selectedSimFile = dashboard.selectedSimFile
+                        }
+                        simTabRoot.refreshCurFrame()
                     }
                 }
 
                 function currentSimFilename() {
+                    if (dashboard.selectedSimFile !== "")
+                        return dashboard.selectedSimFile
                     if (trainingCenter.selectedSimFile !== "")
                         return trainingCenter.selectedSimFile
                     var idx = simFileCombo.currentIndex
@@ -1868,41 +2112,53 @@ ApplicationWindow {
                 // Top selector & simulation trigger row inside a properly sized background Rectangle
                 Rectangle {
                     Layout.fillWidth: true
-                    implicitHeight: topSelectorRow.implicitHeight + 14
+                    implicitHeight: topSelectorRow.implicitHeight + 12
                     radius: 10
                     color: "#F7FAFB"
                     border.color: window.line
                     RowLayout {
                         id: topSelectorRow
                         anchors.fill: parent
-                        anchors.margins: 7
+                        anchors.margins: 6
                         spacing: 8
                         TextLabel { text: "대상 녹화:"; font.bold: true; font.pixelSize: 13 }
-                        ComboBox {
+                        StyledComboBox {
                             id: simFileCombo
                             Layout.fillWidth: true
-                            Layout.minimumWidth: 160
+                            Layout.minimumWidth: 180
                             implicitHeight: 32
                             model: dashboard.trainingFiles
                             textRole: "combo_label"
+                            currentIndex: {
+                                var list = dashboard.trainingFiles || []
+                                var target = dashboard.selectedSimFile || trainingCenter.selectedSimFile || (dashboard.simulationResult && dashboard.simulationResult.file) || ""
+                                for (var i = 0; i < list.length; i++) {
+                                    if (list[i].file === target) return i
+                                }
+                                return list.length > 0 ? 0 : -1
+                            }
                             onActivated: function(idx) {
                                 if (idx >= 0 && idx < dashboard.trainingFiles.length) {
                                     var f = dashboard.trainingFiles[idx].file
                                     trainingCenter.selectedSimFile = f
+                                    dashboard.setSelectedSimFile(f)
                                     simTabRoot.isPlaying = false
                                     simTabRoot.playFrameIdx = 0
-                                    dashboard.evaluateSimRecording(f)
                                     dashboard.runSimulation(f, true)
                                 }
                             }
                         }
-                        ActionButton {
+                        CompactButton {
                             text: "데이터 평가"
+                            implicitHeight: 32
+                            leftPadding: 12; rightPadding: 12
                             enabled: dashboard.trainingBusy === "" && dashboard.trainingFiles.length > 0
                             onClicked: dashboard.evaluateSimRecording(simTabRoot.currentSimFilename())
                         }
-                        ActionButton {
+                        CompactButton {
                             text: "시뮬레이션 실행 (보정본)"
+                            implicitHeight: 32
+                            leftPadding: 12; rightPadding: 12
                             primary: true
                             enabled: dashboard.trainingBusy === "" && dashboard.trainingFiles.length > 0
                             onClicked: {
@@ -1911,8 +2167,10 @@ ApplicationWindow {
                                 dashboard.runSimulation(simTabRoot.currentSimFilename(), true)
                             }
                         }
-                        ActionButton {
+                        CompactButton {
                             text: "원본 시뮬레이션"
+                            implicitHeight: 32
+                            leftPadding: 12; rightPadding: 12
                             enabled: dashboard.trainingBusy === "" && dashboard.trainingFiles.length > 0
                             onClicked: {
                                 simTabRoot.isPlaying = false
@@ -1930,20 +2188,20 @@ ApplicationWindow {
                 // ONNX Model Selector + Load/Use + Train + Spatial Spray Filter Bar
                 Rectangle {
                     Layout.fillWidth: true
-                    implicitHeight: onnxSelectRow.implicitHeight + 14
+                    implicitHeight: onnxSelectRow.implicitHeight + 12
                     radius: 10
                     color: "#EEF8F6"
                     border.color: "#8CE0CA"
                     RowLayout {
                         id: onnxSelectRow
                         anchors.fill: parent
-                        anchors.margins: 7
+                        anchors.margins: 6
                         spacing: 8
                         TextLabel { text: "ONNX 모델 선택:"; font.bold: true; font.pixelSize: 13; color: "#0B4F40" }
-                        ComboBox {
+                        StyledComboBox {
                             id: onnxModelCombo
                             Layout.fillWidth: true
-                            Layout.minimumWidth: 200
+                            Layout.minimumWidth: 180
                             implicitHeight: 32
                             model: dashboard.onnxModels
                             textRole: "combo_label"
@@ -1989,7 +2247,7 @@ ApplicationWindow {
                             onClicked: dashboard.trainSelectedOnnxModel(dashboard.selectedOnnxModelId)
                         }
                         TextLabel { text: "스프레이 동작 필터:"; font.bold: true; font.pixelSize: 12; color: "#0B4F40" }
-                        ComboBox {
+                        StyledComboBox {
                             id: sprayFilterCombo
                             Layout.preferredWidth: 165
                             implicitHeight: 30
@@ -2013,21 +2271,33 @@ ApplicationWindow {
                     }
                 }
 
+                ScrollView {
+                    id: simScroll
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    contentWidth: availableWidth
+                    ScrollBar.vertical.policy: ScrollBar.AlwaysOn
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    ColumnLayout {
+                        width: simScroll.availableWidth
+                        spacing: 8
+
                 // 3) 팔·어깨(Pose) + 21관절 손 스켈레톤 & 카메라 화면 영역(3x3) 시각화 재생기 (화면 확대 지원)
                 Rectangle {
                     Layout.fillWidth: true
-                    implicitHeight: simTabRoot.expandSkeleton ? 440 : 252
+                    implicitHeight: simTabRoot.expandSkeleton ? 420 : 244
                     radius: 10
                     color: "#F7FAFB"
                     border.color: window.line
                     RowLayout {
                         anchors.fill: parent
-                        anchors.margins: 9
+                        anchors.margins: 8
                         spacing: 10
 
                         // Left: Expandable Arm/Shoulder + 21-Joint Hand Skeleton & 3x3 Camera Screen Zone Visualizer Canvas
                         Rectangle {
-                            Layout.preferredWidth: simTabRoot.expandSkeleton ? 540 : 330
+                            Layout.preferredWidth: simTabRoot.expandSkeleton ? 460 : 320
                             Layout.fillHeight: true
                             radius: 10
                             color: "#0D1B26"
@@ -2388,7 +2658,7 @@ ApplicationWindow {
                                 }
                             }
 
-                            // Top-right active Event Badge (PINCH / SWIPE / SIGN)
+                            // Top-right active Event Badge (판정 구간 vs 전환 과정)
                             Rectangle {
                                 visible: simTabRoot.curFrame !== null
                                 anchors.top: parent.top
@@ -2398,7 +2668,8 @@ ApplicationWindow {
                                 color: !simTabRoot.curFrame ? "#334E68"
                                     : (simTabRoot.curFrame.event_kind === "pinch" ? "#16846E"
                                     : (simTabRoot.curFrame.event_kind === "swipe" ? "#D97706"
-                                    : (simTabRoot.curFrame.event_kind === "sign" ? "#0284C7" : "#243B4A")))
+                                    : (simTabRoot.curFrame.event_kind === "sign" ? "#0284C7"
+                                    : (simTabRoot.curFrame.event_kind === "transition" ? "#475569" : "#243B4A"))))
                                 width: evBadgeText.implicitWidth + 12
                                 height: 22
                                 TextLabel {
@@ -2456,11 +2727,11 @@ ApplicationWindow {
                             // Summary Banner + Skeleton View Mode Controls
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 6
+                                spacing: 4
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.minimumWidth: 0
-                                    implicitHeight: 30
+                                    implicitHeight: 28
                                     radius: 7
                                     color: "#EEFCF8"
                                     border.color: "#45E0B4"
@@ -2476,21 +2747,29 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
-                                    text: simTabRoot.showSpatialSpray ? "스프레이 분포 켜짐" : "스프레이 분포 꺼짐"
+                                    implicitHeight: 28
+                                    leftPadding: 8; rightPadding: 8
+                                    text: simTabRoot.showSpatialSpray ? "스프레이 켜짐" : "스프레이 꺼짐"
                                     accent: simTabRoot.showSpatialSpray
                                     onClicked: simTabRoot.showSpatialSpray = !simTabRoot.showSpatialSpray
                                 }
                                 CompactButton {
+                                    implicitHeight: 28
+                                    leftPadding: 8; rightPadding: 8
                                     text: simTabRoot.showArmPose ? "팔·어깨 켜짐" : "팔·어깨 꺼짐"
                                     accent: simTabRoot.showArmPose
                                     onClicked: simTabRoot.showArmPose = !simTabRoot.showArmPose
                                 }
                                 CompactButton {
+                                    implicitHeight: 28
+                                    leftPadding: 8; rightPadding: 8
                                     text: simTabRoot.fullScreenCoordMode ? "전체화면 좌표" : "손 확대"
                                     accent: simTabRoot.fullScreenCoordMode
                                     onClicked: simTabRoot.fullScreenCoordMode = !simTabRoot.fullScreenCoordMode
                                 }
                                 CompactButton {
+                                    implicitHeight: 28
+                                    leftPadding: 8; rightPadding: 8
                                     text: simTabRoot.expandSkeleton ? "화면 축소 ⤡" : "화면 크게 ⤢"
                                     accent: simTabRoot.expandSkeleton
                                     onClicked: simTabRoot.expandSkeleton = !simTabRoot.expandSkeleton
@@ -2507,23 +2786,26 @@ ApplicationWindow {
                                     Layout.minimumWidth: 0
                                     implicitHeight: 42
                                     radius: 7
-                                    color: (simTabRoot.curFrame && simTabRoot.curFrame.phase === "do") ? "#E6F8F3" : "white"
-                                    border.color: (simTabRoot.curFrame && simTabRoot.curFrame.phase === "do") ? "#16846E" : window.line
+                                    color: (simTabRoot.curFrame && simTabRoot.curFrame.zone === "judgment") ? "#E6F8F3"
+                                        : ((simTabRoot.curFrame && simTabRoot.curFrame.zone === "transition") ? "#F8FAFC" : "white")
+                                    border.color: (simTabRoot.curFrame && simTabRoot.curFrame.zone === "judgment") ? "#16846E"
+                                        : ((simTabRoot.curFrame && simTabRoot.curFrame.zone === "transition") ? "#94A3B8" : window.line)
                                     ColumnLayout {
                                         anchors.fill: parent
                                         anchors.leftMargin: 8
                                         anchors.rightMargin: 8
                                         spacing: 0
-                                        TextLabel { text: "목표 라벨 · 화면 위치"; font.pixelSize: 10; color: window.muted; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                        TextLabel { text: "구간 상태 (판정 구간 vs 전환 과정) · 화면 위치"; font.pixelSize: 10; color: window.muted; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                         TextLabel {
                                             text: simTabRoot.curFrame
                                                 ? (simTabRoot.curFrame.target_name
-                                                    + (simTabRoot.curFrame.phase === "do" ? " [수행]"
-                                                        : ((simTabRoot.curFrame.phase === "waiting" || simTabRoot.curFrame.phase === "paused" || simTabRoot.curFrame.target === "idle") ? " [세트 대기]" : " [중립]"))
+                                                    + (simTabRoot.curFrame.zone === "judgment" ? " [판정 구간]"
+                                                        : ((simTabRoot.curFrame.zone === "waiting" || simTabRoot.curFrame.phase === "waiting" || simTabRoot.curFrame.phase === "paused" || simTabRoot.curFrame.target === "idle") ? " [세트 대기]" : " [전환 과정]"))
                                                     + (simTabRoot.curFrame.screen_zone ? (" · " + simTabRoot.curFrame.screen_zone) : ""))
                                                 : "-"
                                             font.bold: true
                                             font.pixelSize: 12
+                                            color: (simTabRoot.curFrame && simTabRoot.curFrame.zone === "judgment") ? "#0F6E5B" : window.navy
                                             elide: Text.ElideRight
                                             Layout.fillWidth: true
                                             Layout.minimumWidth: 0
@@ -2604,7 +2886,7 @@ ApplicationWindow {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         TextLabel {
-                                            text: "시간축 확신도 & 프레임 탐색 바 (클릭·드래그하여 원하는 시점으로 이동 · 초록=목표 인식, 주황=목표 미달, 빨강=오작동)"
+                                            text: "시간축 판정 구간 & 전환 과정 프레임 바 (클릭·드래그 탐색 · 초록=판정 구간[목표 인식], 주황=판정 구간[미달], 청회색=전환 과정)"
                                             font.pixelSize: 10
                                             color: window.muted
                                             elide: Text.ElideRight
@@ -2624,16 +2906,36 @@ ApplicationWindow {
                                                     required property var modelData
                                                     Layout.fillWidth: true
                                                     Layout.fillHeight: true
+                                                    property string binZone: modelData.zone ? modelData.zone : (modelData.target === "idle" ? "waiting" : (modelData.target !== "none" ? "judgment" : "transition"))
+                                                    // Zone background tint so 판정 구간 vs 전환 과정 spans are immediately visible
+                                                    Rectangle {
+                                                        anchors.fill: parent
+                                                        radius: 1
+                                                        color: binZone === "judgment"
+                                                            ? "#E2F7F0"
+                                                            : (binZone === "transition" ? "#F1F5F9" : "#F8FAFC")
+                                                    }
+                                                    // Top marker band highlighting 판정 구간
+                                                    Rectangle {
+                                                        visible: binZone === "judgment"
+                                                        anchors.top: parent.top
+                                                        width: parent.width
+                                                        height: 3
+                                                        color: modelData.confirmed ? "#16846E" : "#D97706"
+                                                    }
+                                                    // Target confidence / interval bar
                                                     Rectangle {
                                                         anchors.bottom: parent.bottom
                                                         width: parent.width
-                                                        height: Math.max(3, parent.height * Math.min(1.0, modelData.prob))
+                                                        height: binZone === "judgment"
+                                                            ? Math.max(parent.height * 0.42, parent.height * Math.min(1.0, modelData.prob))
+                                                            : Math.max(4, parent.height * Math.min(0.65, modelData.prob * 0.65))
                                                         radius: 1
-                                                        color: modelData.target === "idle"
+                                                        color: binZone === "waiting"
                                                             ? "#CBD5E1"
-                                                            : (modelData.target !== "none"
+                                                            : (binZone === "judgment"
                                                                 ? (modelData.confirmed ? "#16846E" : "#F2B544")
-                                                                : (modelData.confirmed ? "#E5484D" : "#CBD5E0"))
+                                                                : "#94A3B8")
                                                     }
                                                 }
                                             }
@@ -2671,10 +2973,11 @@ ApplicationWindow {
                             // Media Player Transport Controls (여유 있게 배치 + 재생 중일 때만 연두색 선택 표시)
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 4
+                                spacing: 3
                                 CompactButton {
-                                    text: "⏮ 처음"
-                                    leftPadding: 8; rightPadding: 8
+                                    text: "⏮"
+                                    implicitHeight: 28
+                                    leftPadding: 7; rightPadding: 7
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2682,8 +2985,9 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
-                                    text: "⏪ -10F"
-                                    leftPadding: 8; rightPadding: 8
+                                    text: "-10F"
+                                    implicitHeight: 28
+                                    leftPadding: 7; rightPadding: 7
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2691,8 +2995,9 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
-                                    text: "◀ -1F"
-                                    leftPadding: 8; rightPadding: 8
+                                    text: "-1F"
+                                    implicitHeight: 28
+                                    leftPadding: 7; rightPadding: 7
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2701,7 +3006,8 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: simTabRoot.isPlaying ? "⏸ 일시정지" : "▶ 재생"
-                                    leftPadding: 10; rightPadding: 10
+                                    implicitHeight: 28
+                                    leftPadding: 9; rightPadding: 9
                                     accent: simTabRoot.isPlaying
                                     primary: !simTabRoot.isPlaying
                                     enabled: simTabRoot.totalFrames > 0
@@ -2712,8 +3018,9 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
-                                    text: "⏹ 정지"
-                                    leftPadding: 8; rightPadding: 8
+                                    text: "⏹"
+                                    implicitHeight: 28
+                                    leftPadding: 7; rightPadding: 7
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2721,8 +3028,9 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
-                                    text: "+1F ▶"
-                                    leftPadding: 8; rightPadding: 8
+                                    text: "+1F"
+                                    implicitHeight: 28
+                                    leftPadding: 7; rightPadding: 7
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2730,8 +3038,9 @@ ApplicationWindow {
                                     }
                                 }
                                 CompactButton {
-                                    text: "+10F ⏩"
-                                    leftPadding: 8; rightPadding: 8
+                                    text: "+10F"
+                                    implicitHeight: 28
+                                    leftPadding: 7; rightPadding: 7
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
                                         simTabRoot.isPlaying = false
@@ -2740,6 +3049,7 @@ ApplicationWindow {
                                 }
                                 CompactButton {
                                     text: "다음 이벤트 ⏭"
+                                    implicitHeight: 28
                                     leftPadding: 8; rightPadding: 8
                                     enabled: simTabRoot.totalFrames > 0
                                     onClicked: {
@@ -2753,7 +3063,8 @@ ApplicationWindow {
                                     model: [0.25, 0.5, 1.0, 2.0, 4.0]
                                     delegate: CompactButton {
                                         required property real modelData
-                                        leftPadding: 7; rightPadding: 7
+                                        implicitHeight: 28
+                                        leftPadding: 6; rightPadding: 6
                                         text: modelData + "x"
                                         accent: Math.abs(simTabRoot.playSpeed - modelData) < 0.01
                                         onClicked: simTabRoot.playSpeed = modelData
@@ -2763,18 +3074,6 @@ ApplicationWindow {
                         }
                     }
                 }
-
-                ScrollView {
-                    id: simScroll
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    contentWidth: availableWidth
-                    ScrollBar.vertical.policy: ScrollBar.AlwaysOn
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                    ColumnLayout {
-                        width: simScroll.availableWidth
-                        spacing: 8
 
                         // Selected ONNX Model Per-Gesture Recognition Rates & Spatial Spray Distribution Card
                         Rectangle {
@@ -3409,51 +3708,1128 @@ ApplicationWindow {
                     }
                 }
             }
+
+            // Tab 5: Shortcut Mapping · Composite Gestures · Dedicated Time-Series Motion Learning
+            Item {
+                id: bindingsTabRoot
+                visible: trainingCenter.centerTab === "bindings"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                property var selectedRowObj: {
+                    var rows = dashboard.actionBindingRows || []
+                    for (var i = 0; i < rows.length; i++) {
+                        if (rows[i].key === trainingCenter.selectedBindingKey) {
+                            return rows[i]
+                        }
+                    }
+                    return rows.length > 0 ? rows[0] : null
+                }
+                property string editActionType: selectedRowObj ? String(selectedRowObj.action_type || "hotkey") : "hotkey"
+                property string editActionValue: selectedRowObj ? String(selectedRowObj.action_value || "") : ""
+                property bool editBindingEnabled: selectedRowObj ? Boolean(selectedRowObj.binding_enabled) : true
+
+                property string appMatchInput: ""
+                property string appActionTypeInput: "youtube_key"
+                property string appActionValueInput: "k"
+
+                property string newMotionName: ""
+                property string newMotionKey: ""
+                property string newMotionPosture: "open_hand"
+                property string newMotionDir: "up"
+                property string newMotionActType: "hotkey"
+                property string newMotionActVal: "ctrl+t"
+
+                property string newCompName: ""
+                property string newCompPosture: "thumb_index"
+                property string newCompTrigger: "swipe_up"
+                property string newCompActType: "youtube_key"
+                property string newCompActVal: "f"
+
+                onSelectedRowObjChanged: {
+                    if (selectedRowObj) {
+                        editActionType = String(selectedRowObj.action_type || "hotkey")
+                        editActionValue = String(selectedRowObj.action_value || "")
+                        editBindingEnabled = Boolean(selectedRowObj.binding_enabled)
+                    }
+                }
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: 8
+
+                    // Sub-tab selector bar
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+                        radius: 10
+                        color: "#F0F4F8"
+                        border.color: window.line
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: 5
+                            spacing: 6
+                            CompactButton {
+                                implicitHeight: 32
+                                leftPadding: 14; rightPadding: 14
+                                text: "5-1. 단축키 · 유튜브 · 프로그램 실행 · 앱별 매핑"
+                                accent: trainingCenter.bindingsSubTab === "shortcuts"
+                                onClicked: trainingCenter.bindingsSubTab = "shortcuts"
+                            }
+                            CompactButton {
+                                implicitHeight: 32
+                                leftPadding: 14; rightPadding: 14
+                                text: "5-2. 시계열 모션 전용 학습 · 새 모션 동작 등록 (" + dashboard.motionTrackRows.length + ")"
+                                accent: trainingCenter.bindingsSubTab === "motions"
+                                onClicked: trainingCenter.bindingsSubTab = "motions"
+                            }
+                            CompactButton {
+                                implicitHeight: 32
+                                leftPadding: 14; rightPadding: 14
+                                text: "5-3. 복합 손동작 (핀치+스와이프/유지/더블핀치) 등록 (" + dashboard.compositeGestureRows.length + ")"
+                                accent: trainingCenter.bindingsSubTab === "composites"
+                                onClicked: trainingCenter.bindingsSubTab = "composites"
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+                    }
+
+                    // =========================================================================
+                    // SUB-TAB 1: SHORTCUT MAPPINGS & PER-APP FOREGROUND OVERRIDES
+                    // =========================================================================
+                    RowLayout {
+                        visible: trainingCenter.bindingsSubTab === "shortcuts"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        spacing: 10
+
+                        // Left list: all static & motion gestures with their mapped shortcut badges
+                        Rectangle {
+                            Layout.preferredWidth: 420
+                            Layout.fillHeight: true
+                            radius: 10
+                            color: "#F7FAFB"
+                            border.color: window.line
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 6
+                                TextLabel {
+                                    text: "동작별 현재 매핑된 단축키 · 명령 목록"
+                                    font.bold: true
+                                    font.pixelSize: 13
+                                }
+                                ScrollView {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    clip: true
+                                    ColumnLayout {
+                                        width: parent.width - 12
+                                        spacing: 5
+                                        Repeater {
+                                            model: dashboard.actionBindingRows
+                                            delegate: Rectangle {
+                                                id: bItem
+                                                required property var modelData
+                                                readonly property bool isSel: bindingsTabRoot.selectedRowObj && bindingsTabRoot.selectedRowObj.key === modelData.key
+                                                Layout.fillWidth: true
+                                                implicitHeight: bItemCol.implicitHeight + 12
+                                                radius: 8
+                                                color: isSel ? "#E0F2FE" : "white"
+                                                border.color: isSel ? "#0284C7" : window.line
+                                                border.width: isSel ? 2 : 1
+                                                ColumnLayout {
+                                                    id: bItemCol
+                                                    anchors.fill: parent
+                                                    anchors.margins: 6
+                                                    spacing: 3
+                                                    RowLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 6
+                                                        Rectangle {
+                                                            radius: 4
+                                                            color: bItem.modelData.track === "motion" ? "#EDE9FE" : "#E6F8F3"
+                                                            border.color: bItem.modelData.track === "motion" ? "#C4B5FD" : "#8CE0CA"
+                                                            implicitWidth: bTrkTxt.implicitWidth + 8
+                                                            implicitHeight: 18
+                                                            TextLabel {
+                                                                id: bTrkTxt
+                                                                anchors.centerIn: parent
+                                                                text: bItem.modelData.track === "motion" ? "시계열 모션" : "정지·핀치"
+                                                                font.pixelSize: 9
+                                                                font.bold: true
+                                                                color: bItem.modelData.track === "motion" ? "#5B21B6" : "#0F6E5B"
+                                                            }
+                                                        }
+                                                        TextLabel {
+                                                            text: bItem.modelData.name
+                                                            font.bold: true
+                                                            font.pixelSize: 12
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+                                                    RowLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 6
+                                                        TextLabel {
+                                                            text: "→ " + String(bItem.modelData.shortcut_badge || "")
+                                                            font.pixelSize: 11
+                                                            font.bold: true
+                                                            color: "#0369A1"
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+                                                        TextLabel {
+                                                            visible: (bItem.modelData.app_overrides || []).length > 0
+                                                            text: "앱전용 " + (bItem.modelData.app_overrides || []).length + "개"
+                                                            font.pixelSize: 10
+                                                            font.bold: true
+                                                            color: "#7C3AED"
+                                                        }
+                                                    }
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: trainingCenter.selectedBindingKey = bItem.modelData.key
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Right editor: customize global binding & per-app foreground overrides
+                        ScrollView {
+                            id: shortcutEditorScroll
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            contentWidth: availableWidth
+                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                            ColumnLayout {
+                                width: Math.max(240, shortcutEditorScroll.availableWidth - 16)
+                                spacing: 10
+
+                                Rectangle {
+                                    visible: bindingsTabRoot.selectedRowObj !== null
+                                    Layout.fillWidth: true
+                                    implicitHeight: globalEditCol.implicitHeight + 20
+                                    radius: 10
+                                    color: "#F7FAFB"
+                                    border.color: window.line
+                                    ColumnLayout {
+                                        id: globalEditCol
+                                        anchors.fill: parent
+                                        anchors.margins: 10
+                                        spacing: 8
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            TextLabel {
+                                                text: bindingsTabRoot.selectedRowObj ? ("[" + bindingsTabRoot.selectedRowObj.name + "] 실행 동작 · 단축키 설정") : ""
+                                                font.bold: true
+                                                font.pixelSize: 15
+                                            }
+                                            Item { Layout.fillWidth: true }
+                                            CompactButton {
+                                                text: bindingsTabRoot.editBindingEnabled ? "동작 사용 중 (클릭 시 끔)" : "비활성화됨 (클릭 시 켬)"
+                                                accent: bindingsTabRoot.editBindingEnabled
+                                                onClicked: bindingsTabRoot.editBindingEnabled = !bindingsTabRoot.editBindingEnabled
+                                            }
+                                        }
+
+                                        TextLabel {
+                                            Layout.fillWidth: true
+                                            text: bindingsTabRoot.selectedRowObj ? ("현재 매핑: " + bindingsTabRoot.selectedRowObj.shortcut_detail + "  ·  학습 트랙: " + bindingsTabRoot.selectedRowObj.training_format_badge) : ""
+                                            font.pixelSize: 12
+                                            color: "#0369A1"
+                                            font.bold: true
+                                            wrapMode: Text.Wrap
+                                        }
+
+                                        // Action Category Selector
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            TextLabel { text: "실행 유형:"; font.bold: true; font.pixelSize: 12 }
+                                            CompactButton {
+                                                text: "1. 윈도우 키보드 단축키"
+                                                accent: bindingsTabRoot.editActionType === "hotkey"
+                                                onClicked: {
+                                                    bindingsTabRoot.editActionType = "hotkey"
+                                                    if (bindingsTabRoot.editActionValue === "" || bindingsTabRoot.editActionValue === "left_click") {
+                                                        bindingsTabRoot.editActionValue = "ctrl+tab"
+                                                    }
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "2. 유튜브 · 미디어 전용 키"
+                                                accent: bindingsTabRoot.editActionType === "youtube_key"
+                                                onClicked: {
+                                                    bindingsTabRoot.editActionType = "youtube_key"
+                                                    bindingsTabRoot.editActionValue = "k"
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "3. 특정 프로그램 · 웹사이트 실행"
+                                                accent: bindingsTabRoot.editActionType === "launch_app"
+                                                onClicked: {
+                                                    bindingsTabRoot.editActionType = "launch_app"
+                                                    bindingsTabRoot.editActionValue = "notepad.exe"
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "4. 기본 마우스 · 시스템 동작"
+                                                accent: bindingsTabRoot.editActionType === "mouse_action"
+                                                onClicked: {
+                                                    bindingsTabRoot.editActionType = "mouse_action"
+                                                    bindingsTabRoot.editActionValue = "left_click"
+                                                }
+                                            }
+                                        }
+
+                                        // Preset Picker for Hotkeys
+                                        Flow {
+                                            visible: bindingsTabRoot.editActionType === "hotkey"
+                                            Layout.fillWidth: true
+                                            spacing: 5
+                                            Repeater {
+                                                model: dashboard.hotkeyPresets
+                                                delegate: CompactButton {
+                                                    required property var modelData
+                                                    implicitHeight: 26
+                                                    leftPadding: 8; rightPadding: 8
+                                                    text: modelData.label
+                                                    accent: bindingsTabRoot.editActionValue.toLowerCase() === String(modelData.value).toLowerCase()
+                                                    onClicked: bindingsTabRoot.editActionValue = modelData.value
+                                                }
+                                            }
+                                        }
+
+                                        // Preset Picker for YouTube Keys
+                                        Flow {
+                                            visible: bindingsTabRoot.editActionType === "youtube_key"
+                                            Layout.fillWidth: true
+                                            spacing: 5
+                                            Repeater {
+                                                model: dashboard.youtubeKeyPresets
+                                                delegate: CompactButton {
+                                                    required property var modelData
+                                                    implicitHeight: 26
+                                                    leftPadding: 8; rightPadding: 8
+                                                    text: modelData.label
+                                                    accent: bindingsTabRoot.editActionValue === modelData.value
+                                                    onClicked: bindingsTabRoot.editActionValue = modelData.value
+                                                }
+                                            }
+                                        }
+
+                                        // Preset Picker for Launch App
+                                        Flow {
+                                            visible: bindingsTabRoot.editActionType === "launch_app"
+                                            Layout.fillWidth: true
+                                            spacing: 5
+                                            Repeater {
+                                                model: [
+                                                    {"label": "메모장 (notepad)", "value": "notepad.exe"},
+                                                    {"label": "계산기 (calc)", "value": "calc.exe"},
+                                                    {"label": "파일 탐색기 (explorer)", "value": "explorer.exe"},
+                                                    {"label": "크롬 브라우저", "value": "chrome.exe"},
+                                                    {"label": "유튜브 열기", "value": "https://www.youtube.com"},
+                                                    {"label": "작업 관리자 (taskmgr)", "value": "taskmgr.exe"}
+                                                ]
+                                                delegate: CompactButton {
+                                                    required property var modelData
+                                                    implicitHeight: 26
+                                                    leftPadding: 8; rightPadding: 8
+                                                    text: modelData.label
+                                                    accent: bindingsTabRoot.editActionValue === modelData.value
+                                                    onClicked: bindingsTabRoot.editActionValue = modelData.value
+                                                }
+                                            }
+                                        }
+
+                                        // Preset Picker for Mouse Actions
+                                        Flow {
+                                            visible: bindingsTabRoot.editActionType === "mouse_action"
+                                            Layout.fillWidth: true
+                                            spacing: 5
+                                            Repeater {
+                                                model: dashboard.mouseActionPresets
+                                                delegate: CompactButton {
+                                                    required property var modelData
+                                                    implicitHeight: 26
+                                                    leftPadding: 8; rightPadding: 8
+                                                    text: modelData.label
+                                                    accent: bindingsTabRoot.editActionValue === modelData.value
+                                                    onClicked: bindingsTabRoot.editActionValue = modelData.value
+                                                }
+                                            }
+                                        }
+
+                                        // Direct Value Input + Save/Reset Buttons
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            TextLabel {
+                                                text: bindingsTabRoot.editActionType === "launch_app" ? "실행 경로/명령어:" : "단축키/명령 값:"
+                                                font.bold: true
+                                                font.pixelSize: 12
+                                            }
+                                            TextField {
+                                                id: customBindingField
+                                                Layout.fillWidth: true
+                                                implicitHeight: 34
+                                                text: bindingsTabRoot.editActionValue
+                                                placeholderText: bindingsTabRoot.editActionType === "hotkey"
+                                                    ? "예: ctrl+shift+t, alt+left, win+d, space"
+                                                    : (bindingsTabRoot.editActionType === "launch_app" ? "예: C:\\Program Files\\...\\app.exe 또는 calc.exe" : "명령 값 입력")
+                                                font.pixelSize: 13
+                                                onTextEdited: bindingsTabRoot.editActionValue = text
+                                            }
+                                            CompactButton {
+                                                text: "단축키 매핑 저장"
+                                                primary: true
+                                                implicitHeight: 34
+                                                leftPadding: 14; rightPadding: 14
+                                                onClicked: {
+                                                    if (bindingsTabRoot.selectedRowObj) {
+                                                        dashboard.saveGestureBinding(
+                                                            bindingsTabRoot.selectedRowObj.key,
+                                                            bindingsTabRoot.editActionType,
+                                                            bindingsTabRoot.editActionValue,
+                                                            bindingsTabRoot.editBindingEnabled
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "기본값 복원"
+                                                implicitHeight: 34
+                                                onClicked: {
+                                                    if (bindingsTabRoot.selectedRowObj) {
+                                                        dashboard.resetGestureBinding(bindingsTabRoot.selectedRowObj.key)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Foreground Program-Specific Override Section
+                                Rectangle {
+                                    visible: bindingsTabRoot.selectedRowObj !== null
+                                    Layout.fillWidth: true
+                                    implicitHeight: appOvrCol.implicitHeight + 20
+                                    radius: 10
+                                    color: "#F5F3FF"
+                                    border.color: "#C4B5FD"
+                                    ColumnLayout {
+                                        id: appOvrCol
+                                        anchors.fill: parent
+                                        anchors.margins: 10
+                                        spacing: 8
+                                        TextLabel {
+                                            text: "전면 실행 중인 프로그램별 전용 단축키 지정 (Foreground App Override)"
+                                            font.bold: true
+                                            font.pixelSize: 14
+                                            color: "#4C1D95"
+                                        }
+                                        TextLabel {
+                                            Layout.fillWidth: true
+                                            text: "특정 프로그램(예: YouTube, chrome.exe, premiere, vlc.exe, powerpnt.exe)이 화면 맨 앞에 켜져 있을 때만 이 손동작을 해당 프로그램 전용 단축키로 자동 전환합니다."
+                                            font.pixelSize: 11
+                                            color: window.muted
+                                            wrapMode: Text.Wrap
+                                        }
+
+                                        Flow {
+                                            Layout.fillWidth: true
+                                            spacing: 5
+                                            TextLabel { text: "자주 쓰는 대상 앱:"; font.pixelSize: 11; font.bold: true; color: "#4C1D95" }
+                                            Repeater {
+                                                model: [
+                                                    {"label": "YouTube (창 제목)", "match": "youtube"},
+                                                    {"label": "크롬 (chrome.exe)", "match": "chrome.exe"},
+                                                    {"label": "엣지 (msedge.exe)", "match": "msedge.exe"},
+                                                    {"label": "팟플레이어/VLC", "match": "vlc.exe"},
+                                                    {"label": "파워포인트 (powerpnt.exe)", "match": "powerpnt.exe"},
+                                                    {"label": "프리미어 (premiere)", "match": "premiere"}
+                                                ]
+                                                delegate: CompactButton {
+                                                    required property var modelData
+                                                    implicitHeight: 24
+                                                    leftPadding: 7; rightPadding: 7
+                                                    text: modelData.label
+                                                    accent: bindingsTabRoot.appMatchInput === modelData.match
+                                                    onClicked: bindingsTabRoot.appMatchInput = modelData.match
+                                                }
+                                            }
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            TextField {
+                                                Layout.preferredWidth: 160
+                                                implicitHeight: 32
+                                                placeholderText: "대상 앱 (예: youtube, chrome.exe)"
+                                                text: bindingsTabRoot.appMatchInput
+                                                font.pixelSize: 12
+                                                onTextEdited: bindingsTabRoot.appMatchInput = text
+                                            }
+                                            CompactButton {
+                                                text: "유튜브키"
+                                                implicitHeight: 30
+                                                accent: bindingsTabRoot.appActionTypeInput === "youtube_key"
+                                                onClicked: {
+                                                    bindingsTabRoot.appActionTypeInput = "youtube_key"
+                                                    bindingsTabRoot.appActionValueInput = "k"
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "단축키"
+                                                implicitHeight: 30
+                                                accent: bindingsTabRoot.appActionTypeInput === "hotkey"
+                                                onClicked: {
+                                                    bindingsTabRoot.appActionTypeInput = "hotkey"
+                                                    bindingsTabRoot.appActionValueInput = "space"
+                                                }
+                                            }
+                                            TextField {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 32
+                                                placeholderText: "실행할 단축키 또는 유튜브 키 (예: k, j, l, f, ctrl+w)"
+                                                text: bindingsTabRoot.appActionValueInput
+                                                font.pixelSize: 12
+                                                onTextEdited: bindingsTabRoot.appActionValueInput = text
+                                            }
+                                            CompactButton {
+                                                text: "앱 전용 단축키 추가"
+                                                primary: true
+                                                implicitHeight: 32
+                                                onClicked: {
+                                                    if (bindingsTabRoot.selectedRowObj && bindingsTabRoot.appMatchInput.trim() !== "") {
+                                                        dashboard.addAppOverrideSlot(
+                                                            bindingsTabRoot.selectedRowObj.key,
+                                                            bindingsTabRoot.appMatchInput,
+                                                            bindingsTabRoot.appActionTypeInput,
+                                                            bindingsTabRoot.appActionValueInput
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Repeater {
+                                            model: bindingsTabRoot.selectedRowObj ? (bindingsTabRoot.selectedRowObj.app_overrides || []) : []
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                Layout.fillWidth: true
+                                                implicitHeight: 32
+                                                radius: 6
+                                                color: "white"
+                                                border.color: "#DDD6FE"
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 8; anchors.rightMargin: 8
+                                                    spacing: 8
+                                                    TextLabel {
+                                                        text: "전면 앱 [" + modelData.app_match + "] 활성 시  →  " + String(modelData.badge || modelData.action_value)
+                                                        font.pixelSize: 12
+                                                        font.bold: true
+                                                        color: "#4C1D95"
+                                                        Layout.fillWidth: true
+                                                    }
+                                                    CompactButton {
+                                                        text: "삭제"
+                                                        danger: true
+                                                        implicitHeight: 24
+                                                        onClicked: {
+                                                            if (bindingsTabRoot.selectedRowObj) {
+                                                                dashboard.removeAppOverrideSlot(bindingsTabRoot.selectedRowObj.key, modelData.app_match)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // =========================================================================
+                    // SUB-TAB 2: DEDICATED TIME-SERIES MOTION LEARNING & NEW MOTION REGISTRATION
+                    // =========================================================================
+                    ScrollView {
+                        id: motionsSubScroll
+                        visible: trainingCenter.bindingsSubTab === "motions"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        contentWidth: availableWidth
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        ColumnLayout {
+                            width: Math.max(240, motionsSubScroll.availableWidth - 16)
+                            spacing: 10
+
+                            // Architectural Explanation & Batch Motion Trajectory Training Banner
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: motionArchCol.implicitHeight + 18
+                                radius: 10
+                                color: "#EDE9FE"
+                                border.color: "#C4B5FD"
+                                ColumnLayout {
+                                    id: motionArchCol
+                                    anchors.fill: parent
+                                    anchors.margins: 9
+                                    spacing: 4
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        TextLabel {
+                                            text: "시계열 모션 동작 전용 학습 시스템 (정지 동작 96D 공간 MLP와 분리된 16-Step 궤적·속도 프로파일 학습)"
+                                            font.bold: true
+                                            font.pixelSize: 14
+                                            color: "#4C1D95"
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        CompactButton {
+                                            text: "전체 시계열 모션 궤적 일괄 학습"
+                                            primary: true
+                                            implicitHeight: 32
+                                            enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                                            onClicked: dashboard.trainMotionTemplatesSlot("")
+                                        }
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: "• 정지 동작(좌클릭·우클릭·핀치)은 단일 프레임 손 모양(96D Spatial MLP)으로 판정하지만, 앞으로·뒤로·이전탭·다음탭 같은 시계열 모션은 [시작 → 가속 피크 → 감속 → 원위치 복귀]의 시간축 흐름을 가집니다.\n• 시계열 모션 전용 학습기는 녹화 데이터에서 16단계 정규화 위치 궤적(dx, dy), 속도 엔벨로프(vx, vy), 진행 방향 일관성을 추출해 전용 템플릿으로 학습하며, 손이 제자리로 돌아오는 역방향 복귀 구간(Return Stroke) 오발화를 자동 차단합니다."
+                                        font.pixelSize: 11
+                                        color: "#4C1D95"
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                            }
+
+                            // New Temporal Motion Gesture Registration Form
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: newMotionCol.implicitHeight + 18
+                                radius: 10
+                                color: "#F7FAFB"
+                                border.color: window.line
+                                ColumnLayout {
+                                    id: newMotionCol
+                                    anchors.fill: parent
+                                    anchors.margins: 9
+                                    spacing: 6
+                                    TextLabel {
+                                        text: "새 시계열 모션 동작 등록 (등록 즉시 녹화 마법사 · 시계열 궤적 학습 · 단축키 매핑에 추가됨)"
+                                        font.bold: true
+                                        font.pixelSize: 13
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextField {
+                                            Layout.preferredWidth: 210
+                                            implicitHeight: 32
+                                            placeholderText: "새 모션 이름 (예: 위로 쓸어 새 탭 열기)"
+                                            text: bindingsTabRoot.newMotionName
+                                            font.pixelSize: 12
+                                            onTextEdited: bindingsTabRoot.newMotionName = text
+                                        }
+                                        TextField {
+                                            Layout.preferredWidth: 140
+                                            implicitHeight: 32
+                                            placeholderText: "모션 키(선택, 예: swipe_up_tab)"
+                                            text: bindingsTabRoot.newMotionKey
+                                            font.pixelSize: 12
+                                            onTextEdited: bindingsTabRoot.newMotionKey = text
+                                        }
+                                        TextLabel { text: "손 모양:"; font.pixelSize: 11; font.bold: true }
+                                        Repeater {
+                                            model: dashboard.posturePresets
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                implicitHeight: 26
+                                                leftPadding: 7; rightPadding: 7
+                                                text: modelData.label
+                                                accent: bindingsTabRoot.newMotionPosture === modelData.value
+                                                onClicked: bindingsTabRoot.newMotionPosture = modelData.value
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "시계열 이동 방향:"; font.pixelSize: 11; font.bold: true }
+                                        Repeater {
+                                            model: dashboard.directionPresets
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                implicitHeight: 26
+                                                leftPadding: 8; rightPadding: 8
+                                                text: modelData.label
+                                                accent: bindingsTabRoot.newMotionDir === modelData.value
+                                                onClicked: bindingsTabRoot.newMotionDir = modelData.value
+                                            }
+                                        }
+                                        TextLabel { text: "매핑 단축키:"; font.pixelSize: 11; font.bold: true }
+                                        CompactButton {
+                                            text: "단축키"
+                                            implicitHeight: 26
+                                            accent: bindingsTabRoot.newMotionActType === "hotkey"
+                                            onClicked: bindingsTabRoot.newMotionActType = "hotkey"
+                                        }
+                                        CompactButton {
+                                            text: "유튜브키"
+                                            implicitHeight: 26
+                                            accent: bindingsTabRoot.newMotionActType === "youtube_key"
+                                            onClicked: bindingsTabRoot.newMotionActType = "youtube_key"
+                                        }
+                                        CompactButton {
+                                            text: "앱실행"
+                                            implicitHeight: 26
+                                            accent: bindingsTabRoot.newMotionActType === "launch_app"
+                                            onClicked: bindingsTabRoot.newMotionActType = "launch_app"
+                                        }
+                                        TextField {
+                                            Layout.fillWidth: true
+                                            implicitHeight: 30
+                                            placeholderText: "단축키/유튜브키/실행경로 (예: ctrl+t, k, calc.exe)"
+                                            text: bindingsTabRoot.newMotionActVal
+                                            font.pixelSize: 12
+                                            onTextEdited: bindingsTabRoot.newMotionActVal = text
+                                        }
+                                        CompactButton {
+                                            text: "+ 새 시계열 모션 등록"
+                                            primary: true
+                                            implicitHeight: 32
+                                            onClicked: {
+                                                if (dashboard.registerMotionGestureSlot(
+                                                    bindingsTabRoot.newMotionKey,
+                                                    bindingsTabRoot.newMotionName,
+                                                    bindingsTabRoot.newMotionPosture,
+                                                    bindingsTabRoot.newMotionDir,
+                                                    bindingsTabRoot.newMotionActType,
+                                                    bindingsTabRoot.newMotionActVal,
+                                                    0.14,
+                                                    0.25
+                                                )) {
+                                                    bindingsTabRoot.newMotionName = ""
+                                                    bindingsTabRoot.newMotionKey = ""
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Dedicated List of Temporal Motion Gestures
+                            Repeater {
+                                model: dashboard.motionTrackRows
+                                delegate: Rectangle {
+                                    id: mRow
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    implicitHeight: mRowCol.implicitHeight + 16
+                                    radius: 10
+                                    color: "white"
+                                    border.color: mRow.modelData.has_motion_template ? "#8B5CF6" : window.line
+                                    ColumnLayout {
+                                        id: mRowCol
+                                        anchors.fill: parent
+                                        anchors.margins: 8
+                                        spacing: 4
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Rectangle {
+                                                radius: 4
+                                                color: "#EDE9FE"
+                                                border.color: "#C4B5FD"
+                                                implicitWidth: mBadgeLbl.implicitWidth + 10
+                                                implicitHeight: 20
+                                                TextLabel {
+                                                    id: mBadgeLbl
+                                                    anchors.centerIn: parent
+                                                    text: mRow.modelData.is_custom_motion ? "사용자 시계열 모션" : "기본 시계열 모션"
+                                                    font.pixelSize: 10
+                                                    font.bold: true
+                                                    color: "#5B21B6"
+                                                }
+                                            }
+                                            TextLabel {
+                                                text: mRow.modelData.name
+                                                font.bold: true
+                                                font.pixelSize: 14
+                                            }
+                                            Rectangle {
+                                                radius: 5
+                                                color: "#F0F9FF"
+                                                border.color: "#7DD3FC"
+                                                implicitWidth: mScTxt.implicitWidth + 10
+                                                implicitHeight: 20
+                                                TextLabel {
+                                                    id: mScTxt
+                                                    anchors.centerIn: parent
+                                                    text: {
+                                                        var sb = String(mRow.modelData.shortcut_badge || "")
+                                                        return sb.indexOf("단축키:") === 0 ? sb : ("매핑: " + sb)
+                                                    }
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: "#0369A1"
+                                                }
+                                            }
+                                            TextLabel {
+                                                text: mRow.modelData.instruction
+                                                font.pixelSize: 11
+                                                color: window.muted
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                            CompactButton {
+                                                text: "1. 이 모션 집중 녹화"
+                                                implicitHeight: 30
+                                                enabled: !dashboard.trainingRunning && dashboard.recMode === "off"
+                                                onClicked: {
+                                                    if (dashboard.focusRecord(mRow.modelData.key)) {
+                                                        trainingCenter.close()
+                                                        capturePlan.open()
+                                                    }
+                                                }
+                                            }
+                                            CompactButton {
+                                                text: "2. 시계열 궤적·속도 학습"
+                                                primary: true
+                                                implicitHeight: 30
+                                                enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
+                                                onClicked: dashboard.trainMotionTemplatesSlot(mRow.modelData.key)
+                                            }
+                                            CompactButton {
+                                                text: "단축키 변경"
+                                                implicitHeight: 30
+                                                onClicked: {
+                                                    trainingCenter.selectedBindingKey = mRow.modelData.key
+                                                    trainingCenter.bindingsSubTab = "shortcuts"
+                                                }
+                                            }
+                                            CompactButton {
+                                                visible: Boolean(mRow.modelData.is_custom_motion)
+                                                text: "삭제"
+                                                danger: true
+                                                implicitHeight: 30
+                                                onClicked: dashboard.deleteMotionGestureSlot(mRow.modelData.key)
+                                            }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 12
+                                            TextLabel {
+                                                text: "녹화 데이터: " + mRow.modelData.data_text
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                            }
+                                            TextLabel {
+                                                text: mRow.modelData.motion_metrics_text !== ""
+                                                    ? ("시계열 학습 결과: " + mRow.modelData.motion_metrics_text)
+                                                    : "시계열 궤적 템플릿 미학습 (모션 녹화 후 [시계열 궤적·속도 학습]을 누르세요)"
+                                                font.pixelSize: 11
+                                                font.bold: mRow.modelData.motion_metrics_text !== ""
+                                                color: mRow.modelData.motion_metrics_text !== "" ? "#4C1D95" : window.muted
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // =========================================================================
+                    // SUB-TAB 3: COMPOSITE HAND GESTURE MECHANISMS (Pinch+Swipe / Hold / Double-Pinch)
+                    // =========================================================================
+                    ScrollView {
+                        id: compositesSubScroll
+                        visible: trainingCenter.bindingsSubTab === "composites"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        contentWidth: availableWidth
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        ColumnLayout {
+                            width: Math.max(240, compositesSubScroll.availableWidth - 16)
+                            spacing: 10
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: compBannerCol.implicitHeight + 16
+                                radius: 10
+                                color: "#FFFBEB"
+                                border.color: "#FCD34D"
+                                ColumnLayout {
+                                    id: compBannerCol
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    spacing: 4
+                                    TextLabel {
+                                        text: "복합 손동작 메커니즘 (기본 손 모양/핀치 + 이동·유지·연속 핀치 결합)"
+                                        font.bold: true
+                                        font.pixelSize: 14
+                                        color: "#92400E"
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: "별도의 모션 모드 진입 없이도 일반 제어 상태에서 [특정 손가락 핀치 유지 + 상하좌우 스와이프], [핀치 길게 누르기], [더블 핀치]를 조합해 유튜브 제어, 탭 전환, 프로그램 실행 등 원하는 단축키를 즉시 실행합니다."
+                                        font.pixelSize: 11
+                                        color: "#92400E"
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                            }
+
+                            // Register New Composite Gesture
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: newCompCol.implicitHeight + 18
+                                radius: 10
+                                color: "#F7FAFB"
+                                border.color: window.line
+                                ColumnLayout {
+                                    id: newCompCol
+                                    anchors.fill: parent
+                                    anchors.margins: 9
+                                    spacing: 6
+                                    TextLabel {
+                                        text: "새 복합 손동작 추가"
+                                        font.bold: true
+                                        font.pixelSize: 13
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextField {
+                                            Layout.preferredWidth: 220
+                                            implicitHeight: 32
+                                            placeholderText: "복합 동작 이름 (예: 검지 핀치 + 위로 스와이프)"
+                                            text: bindingsTabRoot.newCompName
+                                            font.pixelSize: 12
+                                            onTextEdited: bindingsTabRoot.newCompName = text
+                                        }
+                                        TextLabel { text: "기반 자세:"; font.pixelSize: 11; font.bold: true }
+                                        Repeater {
+                                            model: dashboard.posturePresets
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                implicitHeight: 26
+                                                leftPadding: 7; rightPadding: 7
+                                                text: modelData.label
+                                                accent: bindingsTabRoot.newCompPosture === modelData.value
+                                                onClicked: bindingsTabRoot.newCompPosture = modelData.value
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 5
+                                        TextLabel { text: "결합 트리거:"; font.pixelSize: 11; font.bold: true }
+                                        Repeater {
+                                            model: dashboard.compositeTriggerPresets
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                implicitHeight: 26
+                                                leftPadding: 7; rightPadding: 7
+                                                text: modelData.label
+                                                accent: bindingsTabRoot.newCompTrigger === modelData.value
+                                                onClicked: bindingsTabRoot.newCompTrigger = modelData.value
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        TextLabel { text: "실행 유형:"; font.pixelSize: 11; font.bold: true }
+                                        CompactButton {
+                                            text: "단축키"
+                                            implicitHeight: 28
+                                            accent: bindingsTabRoot.newCompActType === "hotkey"
+                                            onClicked: {
+                                                bindingsTabRoot.newCompActType = "hotkey"
+                                                bindingsTabRoot.newCompActVal = "ctrl+tab"
+                                            }
+                                        }
+                                        CompactButton {
+                                            text: "유튜브 기능키"
+                                            implicitHeight: 28
+                                            accent: bindingsTabRoot.newCompActType === "youtube_key"
+                                            onClicked: {
+                                                bindingsTabRoot.newCompActType = "youtube_key"
+                                                bindingsTabRoot.newCompActVal = "f"
+                                            }
+                                        }
+                                        CompactButton {
+                                            text: "프로그램 실행"
+                                            implicitHeight: 28
+                                            accent: bindingsTabRoot.newCompActType === "launch_app"
+                                            onClicked: {
+                                                bindingsTabRoot.newCompActType = "launch_app"
+                                                bindingsTabRoot.newCompActVal = "calc.exe"
+                                            }
+                                        }
+                                        TextField {
+                                            Layout.fillWidth: true
+                                            implicitHeight: 30
+                                            placeholderText: "단축키 / 유튜브키(k,j,l,f,m) / 프로그램 경로 입력"
+                                            text: bindingsTabRoot.newCompActVal
+                                            font.pixelSize: 12
+                                            onTextEdited: bindingsTabRoot.newCompActVal = text
+                                        }
+                                        CompactButton {
+                                            text: "+ 복합 손동작 등록"
+                                            primary: true
+                                            implicitHeight: 32
+                                            onClicked: {
+                                                if (dashboard.registerCompositeGestureSlot(
+                                                    bindingsTabRoot.newCompName,
+                                                    bindingsTabRoot.newCompPosture,
+                                                    bindingsTabRoot.newCompTrigger,
+                                                    bindingsTabRoot.newCompActType,
+                                                    bindingsTabRoot.newCompActVal,
+                                                    0.08,
+                                                    0.55
+                                                )) {
+                                                    bindingsTabRoot.newCompName = ""
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Active Composite Gestures List
+                            Repeater {
+                                model: dashboard.compositeGestureRows
+                                delegate: Rectangle {
+                                    id: cRow
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    implicitHeight: 46
+                                    radius: 8
+                                    color: "white"
+                                    border.color: window.line
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10; anchors.rightMargin: 10
+                                        spacing: 8
+                                        Rectangle {
+                                            radius: 4
+                                            color: "#FEF3C7"
+                                            border.color: "#FCD34D"
+                                            implicitWidth: cTagTxt.implicitWidth + 8
+                                            implicitHeight: 20
+                                            TextLabel {
+                                                id: cTagTxt
+                                                anchors.centerIn: parent
+                                                text: "복합 손동작"
+                                                font.pixelSize: 10
+                                                font.bold: true
+                                                color: "#92400E"
+                                            }
+                                        }
+                                        TextLabel {
+                                            text: cRow.modelData.name
+                                            font.bold: true
+                                            font.pixelSize: 13
+                                        }
+                                        TextLabel {
+                                            text: "[" + cRow.modelData.base_posture_ko + "  +  " + cRow.modelData.trigger_type_ko + "]"
+                                            font.pixelSize: 12
+                                            color: window.muted
+                                        }
+                                        TextLabel {
+                                            text: "→  " + cRow.modelData.detail
+                                            font.pixelSize: 12
+                                            font.bold: true
+                                            color: "#0369A1"
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideRight
+                                        }
+                                        CompactButton {
+                                            text: cRow.modelData.enabled ? "활성" : "꺼짐"
+                                            accent: cRow.modelData.enabled
+                                            implicitHeight: 28
+                                            onClicked: dashboard.saveGestureBinding(
+                                                cRow.modelData.key,
+                                                cRow.modelData.action_type,
+                                                cRow.modelData.action_value,
+                                                !cRow.modelData.enabled
+                                            )
+                                        }
+                                        CompactButton {
+                                            text: "삭제"
+                                            danger: true
+                                            implicitHeight: 28
+                                            onClicked: dashboard.deleteCompositeGestureSlot(cRow.modelData.key)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: 6
                 TextLabel {
                     text: "학습 모드"
                     font.bold: true
                     font.pixelSize: 12
                 }
                 CompactButton {
+                    implicitHeight: 28
+                    leftPadding: 9; rightPadding: 9
                     text: "빠른 학습(권장) · 2회"
                     accent: dashboard.trainingMode === "fast"
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
                     onClicked: dashboard.setTrainingMode("fast")
                 }
                 CompactButton {
-                    text: "정밀 학습(전체 폴드, 오래 걸림) · " + dashboard.thoroughRunCount + "회"
+                    implicitHeight: 28
+                    leftPadding: 9; rightPadding: 9
+                    text: "정밀 학습(전체 폴드) · " + dashboard.thoroughRunCount + "회"
                     accent: dashboard.trainingMode === "thorough"
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
                     onClicked: dashboard.setTrainingMode("thorough")
                 }
-                TextLabel {
-                    Layout.fillWidth: true
-                    Layout.minimumWidth: 0
-                    elide: Text.ElideRight
-                    text: dashboard.trainingModeRunsText
-                    font.pixelSize: 11
-                    color: window.muted
-                }
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
+                Rectangle { width: 1; height: 16; color: window.line }
                 TextLabel {
                     text: "연산 장치"
                     font.bold: true
                     font.pixelSize: 12
                 }
                 CompactButton {
+                    implicitHeight: 28
+                    leftPadding: 9; rightPadding: 9
                     text: dashboard.gpuButtonLabel
                     accent: dashboard.gpuAvailable && dashboard.trainingDevice === "gpu"
                     enabled: dashboard.gpuAvailable && !dashboard.trainingRunning && dashboard.trainingBusy === ""
                     onClicked: dashboard.setTrainingDevice("gpu")
                 }
                 CompactButton {
+                    implicitHeight: 28
+                    leftPadding: 9; rightPadding: 9
                     text: "CPU 학습"
                     accent: !dashboard.gpuAvailable || dashboard.trainingDevice === "cpu"
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
@@ -3461,7 +4837,9 @@ ApplicationWindow {
                 }
                 CompactButton {
                     visible: dashboard.canInstallCudaTorch
-                    text: "GPU 가속 활성화 (CUDA 설치)"
+                    implicitHeight: 28
+                    leftPadding: 9; rightPadding: 9
+                    text: "GPU 가속 설치"
                     accent: true
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
                     onClicked: dashboard.enableGpuAcceleration()
@@ -3470,7 +4848,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
                     elide: Text.ElideRight
-                    text: dashboard.gpuStatusText
+                    text: dashboard.gpuStatusText + "  ·  " + dashboard.trainingModeRunsText
                     font.pixelSize: 11
                     color: dashboard.gpuAvailable ? "#1B7F5A" : window.muted
                 }
@@ -3489,6 +4867,7 @@ ApplicationWindow {
                     color: window.muted
                 }
                 ActionButton {
+                    implicitHeight: 34
                     text: "전체 통합 학습 (" + (dashboard.trainingDevice === "gpu" ? "GPU" : "CPU") + ")"
                     leftPadding: 13; rightPadding: 13
                     primary: true
@@ -3496,12 +4875,14 @@ ApplicationWindow {
                     onClicked: dashboard.startTraining()
                 }
                 ActionButton {
+                    implicitHeight: 34
                     text: "내보내기"
                     leftPadding: 13; rightPadding: 13
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === ""
                     onClicked: dashboard.exportModel()
                 }
                 ActionButton {
+                    implicitHeight: 34
                     text: "허브 설정 · 동기화"
                     leftPadding: 13; rightPadding: 13
                     accent: hubSyncDialog.visible
@@ -3509,6 +4890,7 @@ ApplicationWindow {
                     onClicked: hubSyncDialog.openWithMode("sync")
                 }
                 ActionButton {
+                    implicitHeight: 34
                     text: "허브 업로드"
                     leftPadding: 13; rightPadding: 13
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
@@ -3521,6 +4903,7 @@ ApplicationWindow {
                     }
                 }
                 ActionButton {
+                    implicitHeight: 34
                     text: "허브 받기"
                     leftPadding: 13; rightPadding: 13
                     enabled: !dashboard.trainingRunning && dashboard.trainingBusy === "" && !dashboard.recActive
@@ -3532,7 +4915,8 @@ ApplicationWindow {
                         }
                     }
                 }
-                ActionButton { text: "폴더 열기"; leftPadding: 13; rightPadding: 13; onClicked: dashboard.openExports() }
+                ActionButton { implicitHeight: 34; text: "폴더 열기"; leftPadding: 13; rightPadding: 13; onClicked: dashboard.openExports() }
+            }
             }
         }
     }

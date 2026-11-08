@@ -17,9 +17,17 @@ class Task:
     def label(self):
         return self.target or self.key
 
+    @property
+    def track(self) -> str:
+        if self.free or self.label == "none":
+            return "free"
+        if self.category == "방향 모션" or bool(self.direction) or self.key.startswith(("swipe_", "motion_")):
+            return "motion"
+        return "static"
+
 
 # Keep the original first three tasks/labels compatible with existing recordings.
-TASKS = (
+BASE_TASKS = (
     Task("thumb_ring", "엄지+약지 (우클릭)", "엄지와 약지 끝을 붙인 채 천천히 조금씩 움직이며 유지하세요", action="right_click"),
     Task("thumb_index", "엄지+검지 (스크롤)", "엄지와 검지를 붙인 채 위아래로 천천히 끌어보세요", action="scroll_grab"),
     Task("none", "아무 동작 아님 (반주먹 이동)", "반주먹으로 커서를 움직이듯 손을 이리저리 움직이세요", True, "이동·중립"),
@@ -39,15 +47,82 @@ TASKS = (
     Task("open_move", "손 펴고 이동 (정밀 커서)", "손을 편 채 천천히 여러 방향으로 움직이세요. 손가락을 집지 마세요", True, "이동·중립", "none"),
     Task("fist_move", "주먹 이동 (빠른 커서)", "주먹을 쥐고 여러 방향으로 움직이세요. 엄지만 세우지 마세요", True, "이동·중립", "none"),
 )
+TASKS = BASE_TASKS
+BASE_DISPLAY_KEYS = [
+    "thumb_middle", "thumb_index", "thumb_ring", "thumb_middle_drag", "thumb_index_middle",
+    "thumb_pinky", "palm_side", "v_sign", "rock_sign", "thumbs_up", "swipe_left", "swipe_right",
+    "swipe_tab_left", "swipe_tab_right", "swipe_down", "none", "open_move", "fist_move",
+]
 BY_KEY = {t.key: t for t in TASKS}
-DISPLAY_KEYS = ["thumb_middle", "thumb_index", "thumb_ring", "thumb_middle_drag", "thumb_index_middle",
-                "thumb_pinky", "palm_side", "v_sign", "rock_sign", "thumbs_up", "swipe_left", "swipe_right",
-                "swipe_tab_left", "swipe_tab_right", "swipe_down", "none", "open_move", "fist_move"]
+DISPLAY_KEYS = list(BASE_DISPLAY_KEYS)
 NAMES = {key: BY_KEY[key].name for key in DISPLAY_KEYS}
 CLASSES = ["none", "thumb_index", "thumb_ring"] + list(dict.fromkeys(t.label for t in TASKS if t.label not in {"none", "thumb_index", "thumb_ring"}))
 CATEGORIES = ["전체", "클릭·드래그", "창·모드", "방향 모션", "이동·중립"]
-MOTION_TARGETS = {"back": "swipe_left", "forward": "swipe_right", "tab_prev": "swipe_tab_left",
-                  "tab_next": "swipe_tab_right", "close_window": "swipe_down"}
+BASE_MOTION_TARGETS = {
+    "back": "swipe_left",
+    "forward": "swipe_right",
+    "tab_prev": "swipe_tab_left",
+    "tab_next": "swipe_tab_right",
+    "close_window": "swipe_down",
+}
+MOTION_TARGETS = dict(BASE_MOTION_TARGETS)
+
+
+def is_motion_task(key: str) -> bool:
+    t = BY_KEY.get(key)
+    return bool(t is not None and t.track == "motion")
+
+
+def sync_custom_motions(custom_motions: dict | None = None) -> None:
+    """Synchronize user-registered temporal motion gestures into the global catalog structures in-place."""
+    global TASKS
+    custom_tasks = []
+    if isinstance(custom_motions, dict):
+        for k, m in custom_motions.items():
+            if not isinstance(m, dict) or k in {t.key for t in BASE_TASKS}:
+                continue
+            name = str(m.get("name") or k)
+            instr = str(m.get("instruction") or f"{name} 모션을 한 번 수행한 뒤 멈추세요.")
+            direction = str(m.get("direction") or "right")
+            custom_tasks.append(
+                Task(
+                    key=k,
+                    name=name,
+                    do=instr,
+                    free=False,
+                    category="방향 모션",
+                    target="",
+                    action=k,
+                    direction=direction,
+                )
+            )
+    TASKS = BASE_TASKS + tuple(custom_tasks)
+    BY_KEY.clear()
+    for t in TASKS:
+        BY_KEY[t.key] = t
+
+    # Insert custom motion keys right after built-in motion keys and before free/neutral keys
+    free_tail = ["none", "open_move", "fist_move"]
+    head_keys = [k for k in BASE_DISPLAY_KEYS if k not in free_tail]
+    custom_keys = [t.key for t in custom_tasks]
+    DISPLAY_KEYS.clear()
+    DISPLAY_KEYS.extend(head_keys + custom_keys + free_tail)
+
+    NAMES.clear()
+    for k in DISPLAY_KEYS:
+        if k in BY_KEY:
+            NAMES[k] = BY_KEY[k].name
+
+    CLASSES.clear()
+    CLASSES.extend(
+        ["none", "thumb_index", "thumb_ring"]
+        + list(dict.fromkeys(t.label for t in TASKS if t.label not in {"none", "thumb_index", "thumb_ring"}))
+    )
+
+    MOTION_TARGETS.clear()
+    MOTION_TARGETS.update(BASE_MOTION_TARGETS)
+    for t in custom_tasks:
+        MOTION_TARGETS[t.key] = t.key
 
 
 def tasks_for(focus=""):

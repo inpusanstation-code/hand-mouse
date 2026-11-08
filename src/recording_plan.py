@@ -9,8 +9,10 @@ from pathlib import Path
 
 SCHEMA = "manux-capture-plan/1"
 PLAN_PATH = Path(__file__).resolve().parents[1] / "config" / "recording-plans.json"
+STATIC_ORIENTATIONS = ["손바닥 정면", "손등 정면", "왼쪽으로 기울임", "오른쪽으로 기울임", "손끝 위", "손끝 아래", "옆면"]
+MOTION_ORIENTATIONS = ["기본 속도·보통 폭", "빠르고 짧게 끊어 쓸기", "크고 넓게 쓸기", "동작 고유 손모양 유지"]
 OPTIONS = {
-    "orientation": ["손바닥 정면", "손등 정면", "왼쪽으로 기울임", "오른쪽으로 기울임", "손끝 위", "손끝 아래", "옆면"],
+    "orientation": STATIC_ORIENTATIONS + MOTION_ORIENTATIONS,
     "position": ["중앙", "왼쪽 위", "위", "오른쪽 위", "왼쪽", "오른쪽", "왼쪽 아래", "아래", "오른쪽 아래", "자유 이동"],
     "distance": ["가까이 (약 30cm)", "보통 (약 60cm)", "멀리 (약 100cm)", "직접 지정"],
     "posture": ["바로 앉기", "뒤로 기대기", "몸을 왼쪽으로", "몸을 오른쪽으로", "서 있기", "직접 지정"],
@@ -25,6 +27,10 @@ ORIENTATION_GUIDES = {
     "손끝 위": "손가락 끝이 천장(12시 방향)을 향하도록 똑바로 세운 자세",
     "손끝 아래": "손목에 힘을 빼고 손가락 끝이 아래(6시 방향)로 살짝 처진 자세",
     "옆면": "엄지나 새끼손가락 옆날이 카메라를 향하도록 세운 옆모습 자세",
+    "기본 속도·보통 폭": "손바닥을 억지로 정면 고정하지 말고, 이 모션 고유의 손 모양을 유지한 채 평소 속도와 보통 폭(약 20~30cm)으로 1회 또렷하게 쓸어 멈추세요",
+    "빠르고 짧게 끊어 쓸기": "이 모션의 손 모양을 유지하며 손목·팔을 조금 더 경쾌하고 빠르게 휙 쓸고 끝에서 확실히 멈추세요 (쉬기 때 천천히 복귀)",
+    "크고 넓게 쓸기": "이 모션의 손 모양을 유지하며 시작점부터 끝점까지 이동 폭을 조금 더 넓게(약 30~45cm) 가져가며 1회 쓸어 멈추세요",
+    "동작 고유 손모양 유지": "손바닥 정면을 강제하지 않고, 해당 동작이 요구하는 고유한 손가락·손목 방향을 자연스럽게 유지하세요",
 }
 POSTURE_GUIDES = {
     "바로 앉기": "의자에 편하게 정면으로 앉은 자세",
@@ -38,8 +44,21 @@ TIMINGS = {"reps": (1, 100, 1), "prep": (0.0, 10, 0.0), "hold": (0.5, 60, 15.0),
            "rest": (0.0, 10, 0.0), "free_seconds": (10, 900, 60)}
 
 
-def orientation_guide(orientation: str) -> str:
-    return ORIENTATION_GUIDES.get(str(orientation or ""), "")
+def orientation_guide(orientation: str, focus: str = "") -> str:
+    orient_str = str(orientation or "")
+    if focus:
+        from src.gesture_catalog import BY_KEY, is_motion_task
+        task = BY_KEY.get(focus)
+        if task is not None and is_motion_task(focus):
+            style_desc = ORIENTATION_GUIDES.get(orient_str, "")
+            if orient_str in STATIC_ORIENTATIONS or not style_desc:
+                style_desc = ORIENTATION_GUIDES["기본 속도·보통 폭"]
+            return f"{task.do} · [{style_desc}]"
+        if focus == "palm_side":
+            return "엄지만 손바닥 안으로 접고 네 손가락을 나란히 펴서 옆(가로 방향)으로 향하게 유지하세요 (손바닥 정면이 아닌 가로 손 모양)"
+        if focus == "thumbs_up":
+            return "네 손가락을 자연스럽게 감싸 쥐고 엄지만 위로 곧게 세운 상태를 유지하세요"
+    return ORIENTATION_GUIDES.get(orient_str, "")
 
 
 def posture_guide(posture: str) -> str:
@@ -55,7 +74,109 @@ def condition(**values):
     return base
 
 
-def preset(name="basic"):
+def preset(name="basic", focus=""):
+    from src.gesture_catalog import is_motion_task
+    if focus and is_motion_task(focus):
+        if name == "positions":
+            rows = [
+                condition(
+                    name=f"화면 {p} 구역에서 모션 쓸기",
+                    orientation="기본 속도·보통 폭",
+                    position=p,
+                    reps=6,
+                    prep=0.5,
+                    hold=1.2,
+                    rest=1.0,
+                )
+                for p in ("중앙", "왼쪽", "오른쪽", "위", "아래")
+            ]
+            return {"schema": SCHEMA, "conditions": rows}
+        rows = [
+            condition(
+                name="1코스 · 평소 속도·보통 폭 쓸기 (기본)",
+                orientation="기본 속도·보통 폭",
+                position="자유 이동",
+                posture="바로 앉기",
+                reps=10,
+                prep=0.5,
+                hold=1.2,
+                rest=1.0,
+            ),
+            condition(
+                name="2코스 · 빠르고 간결하게 끊어 쓸기",
+                orientation="빠르고 짧게 끊어 쓸기",
+                position="자유 이동",
+                posture="바로 앉기",
+                reps=10,
+                prep=0.5,
+                hold=1.0,
+                rest=1.0,
+            ),
+            condition(
+                name="3코스 · 크고 넓게 쓸기 · 편한 자세",
+                orientation="크고 넓게 쓸기",
+                position="자유 이동",
+                posture="뒤로 기대기",
+                reps=10,
+                prep=0.5,
+                hold=1.5,
+                rest=1.0,
+            ),
+        ]
+        if name == "diverse":
+            rows += [
+                condition(
+                    name="4코스 · 가까이서 쓸기 (약 30cm)",
+                    orientation="기본 속도·보통 폭",
+                    position="자유 이동",
+                    distance=OPTIONS["distance"][0],
+                    posture="바로 앉기",
+                    reps=8,
+                    prep=0.5,
+                    hold=1.2,
+                    rest=1.0,
+                ),
+                condition(
+                    name="5코스 · 멀리서 쓸기 (약 100cm)",
+                    orientation="크고 넓게 쓸기",
+                    position="자유 이동",
+                    distance=OPTIONS["distance"][2],
+                    posture="뒤로 기대기",
+                    reps=8,
+                    prep=0.5,
+                    hold=1.5,
+                    rest=1.0,
+                ),
+                condition(
+                    name="6코스 · 몸을 옆으로 기댄 채 쓸기",
+                    orientation="기본 속도·보통 폭",
+                    position="자유 이동",
+                    posture="몸을 왼쪽으로",
+                    reps=8,
+                    prep=0.5,
+                    hold=1.2,
+                    rest=1.0,
+                ),
+            ]
+        return {"schema": SCHEMA, "conditions": rows}
+
+    if focus in ("palm_side", "thumbs_up"):
+        label_prefix = "엄지 접고 손 가로" if focus == "palm_side" else "엄지 위로"
+        rows = [
+            condition(name=f"전체 화면 · {label_prefix} 기본 자세 (정면)", orientation="동작 고유 손모양 유지", position="자유 이동", posture="바로 앉기"),
+            condition(name=f"전체 화면 · {label_prefix} · 몸/팔 왼쪽", orientation="동작 고유 손모양 유지", position="자유 이동", posture="몸을 왼쪽으로"),
+            condition(name=f"전체 화면 · {label_prefix} · 편하게 기대기", orientation="동작 고유 손모양 유지", position="자유 이동", posture="뒤로 기대기"),
+        ]
+        if name == "diverse":
+            rows += [
+                condition(name=f"{label_prefix} · 가까이 (30cm)", orientation="동작 고유 손모양 유지", position="자유 이동", distance=OPTIONS["distance"][0]),
+                condition(name=f"{label_prefix} · 멀리 (100cm)", orientation="동작 고유 손모양 유지", position="자유 이동", distance=OPTIONS["distance"][2], posture="뒤로 기대기"),
+                condition(name=f"{label_prefix} · 몸/팔 오른쪽", orientation="동작 고유 손모양 유지", position="자유 이동", posture="몸을 오른쪽으로"),
+            ]
+        elif name == "positions":
+            rows = [condition(name=f"화면 {p} · {label_prefix}", orientation="동작 고유 손모양 유지", position=p) for p in OPTIONS["position"] if p != "자유 이동"]
+        return {"schema": SCHEMA, "conditions": rows}
+
     rows = [condition(name="전체 화면 · 손바닥 정면 (기본)", position="자유 이동"),
             condition(name="전체 화면 · 손목 왼쪽 살짝 회전 (10시 방향)", orientation="왼쪽으로 기울임", position="자유 이동", posture="몸을 왼쪽으로"),
             condition(name="전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향)", orientation="오른쪽으로 기울임", position="자유 이동", posture="몸을 오른쪽으로")]
@@ -117,9 +238,9 @@ def label_condition_key(label):
     return f"legacy-{idx}" if idx is not None else "unassigned"
 
 
-def description(row):
+def description(row, focus: str = ""):
     base = " · ".join(row[k] for k in OPTIONS) + (f" · {row['notes']}" if row.get("notes") else "")
-    guide = orientation_guide(row.get("orientation", ""))
+    guide = orientation_guide(row.get("orientation", ""), focus=focus)
     return f"{base} ({guide})" if guide else base
 
 
@@ -135,6 +256,8 @@ def resolve_condition_group_name(key_or_obj, idx: int = 0, path=PLAN_PATH) -> st
     candidates = []
     for p_name in ("basic", "diverse", "positions"):
         candidates.extend(preset(p_name).get("conditions", []))
+        candidates.extend(preset(p_name, focus="swipe_left").get("conditions", []))
+        candidates.extend(preset(p_name, focus="palm_side").get("conditions", []))
     # Include legacy basic preset positions (중앙/왼쪽/오른쪽) so older recordings resolve cleanly
     candidates.extend([
         condition(name="손바닥 정면 · 중앙", position="중앙"),
@@ -171,17 +294,46 @@ def duration(plan, focus):
     return total
 
 
+def _is_legacy_static_plan_for_task(saved_plan: dict, focus: str) -> bool:
+    """Detect if a motion or sideways gesture still has a legacy '손바닥 정면 / 손목 회전' static preset saved."""
+    from src.gesture_catalog import is_motion_task
+    if not focus or not isinstance(saved_plan, dict):
+        return False
+    rows = saved_plan.get("conditions") or []
+    if not rows:
+        return False
+    if is_motion_task(focus):
+        return any(
+            str(r.get("orientation", "")) in STATIC_ORIENTATIONS
+            or "손바닥 정면" in str(r.get("name", ""))
+            or "손목 왼쪽" in str(r.get("name", ""))
+            for r in rows
+            if isinstance(r, dict)
+        )
+    if focus in ("palm_side", "thumbs_up"):
+        return all(
+            str(r.get("orientation", "")) in ("손바닥 정면", "왼쪽으로 기울임", "오른쪽으로 기울임")
+            and ("손바닥 정면" in str(r.get("name", "")) or "손목 " in str(r.get("name", "")))
+            for r in rows
+            if isinstance(r, dict)
+        )
+    return False
+
+
 def load_plan(focus, path=PLAN_PATH):
     from src.gesture_catalog import BY_KEY
     task = BY_KEY.get(focus or "")
-    default_plan = preset()
-    if task and task.direction:
+    default_plan = preset("basic", focus=focus or "")
+    if task and task.direction and not any(r.get("orientation") in MOTION_ORIENTATIONS for r in default_plan["conditions"]):
         for r in default_plan["conditions"]:
-            r.update({"reps": 10, "prep": 0.5, "hold": 1.5, "rest": 1.0})
+            r.update({"reps": 10, "prep": 0.5, "hold": 1.2, "rest": 1.0})
     if not Path(path).exists():
         return default_plan
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    return normalise(doc.get("plans", {}).get(focus or "all", default_plan))
+    saved = doc.get("plans", {}).get(focus or "all")
+    if saved is None or _is_legacy_static_plan_for_task(saved, focus or ""):
+        return default_plan
+    return normalise(saved)
 
 
 def save_plan(plan, focus, path=PLAN_PATH):

@@ -236,7 +236,596 @@ class MouseController:
         # (x, y) -> speed multiplier in (0, 1]; set by main.py (UITargetMagnet.factor)
         self.slowdown_provider: Optional[Callable[[int, int], float]] = None
 
+        # Velocity ballistics & return-stroke suppression state
+        self._vel_ema: float = 0.0
+        self._effective_gain: float = 0.55
+        self._raw_hand_prev: Optional[Tuple[float, float, float]] = None
+        self._raw_hand_speed: float = 0.0
+        self._raw_hand_delta: Tuple[float, float] = (0.0, 0.0)
+        self._prev_smoothed_speed: float = 0.0
+        self._peak_recent_speed: float = 0.0
+        self._peak_recent_t: float = -1e9
+        self._c2f_until: float = -1e9
+        self._edge_touched_at: float = -1e9
+        self._edge_dir: Tuple[float, float] = (0.0, 0.0)
+        self._edge_reclutch_active: bool = False
+        self._clutch_size_ema: Optional[float] = None
+        self._clutch_size_buf: Deque[float] = deque(maxlen=90)
+        self._clutch_entered_at: float = -1e9
+        self._clutch_exit_cand_since: Optional[float] = None
+        self._ret_fwd_start: Optional[Tuple[float, float]] = None
+        self._ret_fwd_end: Optional[Tuple[float, float]] = None
+        self._ret_fwd_peak_speed: float = 0.0
+        self._ret_fwd_end_t: float = -1e9
+        self._ret_armed_vec: Optional[Tuple[float, float]] = None
+        self._ret_armed_start: Optional[Tuple[float, float]] = None
+        self._ret_armed_peak: float = 0.0
+        self._ret_armed_t: float = -1e9
+        self._ret_pending_t0: float = -1e9
+        self._ret_pending_start_pt: Optional[Tuple[float, float]] = None
+        self._ret_pending_steps: List[Tuple[float, float]] = []
+        self._ret_pending_peak_speed: float = 0.0
+        self._ret_confirmed_at: float = -1e9
+        self._ret_vec: Tuple[float, float] = (0.0, 0.0)
+        self._ret_pause_since: Optional[float] = None
+        self._ret_fwd_relaunch_frames: int = 0
+        self.hand_shape_mode: str = "normal"  # "precise" | "normal" | "fast"
+        self.clutch_state: str = "inactive"   # "inactive" | "active"
+        self.return_state: str = "none"       # "none" | "pending" | "confirmed" | "released"
+
         self.event_log: List[str] = []
+
+    @property
+    def c2f_active(self) -> bool:
+        """True while post-flick coarse-to-fine deceleration assist is active."""
+        return self._clock < self._c2f_until
+
+    def _update_depth_clutch(
+        self,
+        result: GestureResult,
+        config: Dict[str, Any],
+        now: float,
+    ) -> bool:
+        """
+        Layer 1 Explicit Depth / Hand-Size Clutch (`return_suppression` in {"clutch", "clutch_auto"}).
+        - Freezes cursor movement when EMA-smoothed `hand_size` drops below `clutch_depth_enter_ratio`
+          relative to the recent moving-active median (or calibrated `calibrated_hand_size`).
+        - Resumes cursor movement without a jump when `hand_size` rises above `clutch_depth_exit_ratio`
+          (hysteresis) and is held for at least `clutch_min_hold` (~0.15s).
+        - Never activates or stays active during drag (`drag_hold` / `is_dragging`), scroll, or `browse_lock`.
+        """
+        ret_mode = str(config.get("return_suppression", "off")).lower()
+        if ret_mode not in ("clutch", "clutch_auto"):
+            self.clutch_state = "inactive"
+            self._clutch_exit_cand_since = None
+            return False
+
+        if (
+            result.action in ("drag_hold", "drag_toggle")
+            or self.is_dragging
+            or self._scroll_prev is not None
+            or self.scroll_coasting
+            or self._browse_centered
+        ):
+            if self.clutch_state == "active":
+                self.clutch_state = "inactive"
+                self._clutch_exit_cand_since = None
+            return False
+
+        dists = getattr(result, "distances", None) or {}
+        raw_size = float(dists.get("hand_size", 0.0) or 0.0)
+        if raw_size <= 1e-6:
+            return self.clutch_state == "active"
+
+        alpha_s = max(0.05, min(1.0, float(config.get("clutch_size_ema_alpha", 0.30))))
+        self._clutch_size_ema = (
+            raw_size
+            if self._clutch_size_ema is None
+            else self._clutch_size_ema + alpha_s * (raw_size - self._clutch_size_ema)
+        )
+        cur_s = self._clutch_size_ema
+
+        cal_size = float(config.get("calibrated_hand_size", 0.0) or 0.0)
+        if len(self._clutch_size_buf) >= 5:
+            sorted_buf = sorted(self._clutch_size_buf)
+            ref_size = sorted_buf[len(sorted_buf) // 2]
+        elif cal_size > 1e-4:
+            ref_size = cal_size
+        else:
+            ref_size = cur_s
+
+        enter_r = max(0.50, min(0.96, float(config.get("clutch_depth_enter_ratio", 0.80))))
+        exit_r = max(enter_r + 0.01, min(0.99, float(config.get("clutch_depth_exit_ratio", 0.86))))
+        min_hold = max(0.0, float(config.get("clutch_min_hold", 0.15)))
+        max_hold = max(min_hold + 0.2, float(config.get("clutch_max_hold", 1.20)))
+        size_ratio = cur_s / max(1e-6, ref_size)
+        has_ref = len(self._clutch_size_buf) >= 5 or cal_size > 1e-4
+
+        if self.clutch_state == "inactive":
+            if has_ref and size_ratio <= enter_r:
+                self.clutch_state = "active"
+                self._clutch_entered_at = now
+                self._clutch_exit_cand_since = None
+                self.anchor_hand_pos = None
+                self._rel_carry = (0.0, 0.0)
+                self._tremor.reset()
+                if self._path is not None:
+                    self._path.reset()
+                self._after_grab = True
+                return True
+            if result.is_moving:
+                self._clutch_size_buf.append(cur_s)
+            return False
+
+        # Auto re-baseline if hand remains at a new farther working plane beyond `clutch_max_hold`
+        if (now - self._clutch_entered_at) >= max_hold:
+            self.clutch_state = "inactive"
+            self._clutch_exit_cand_since = None
+            self._clutch_size_buf.clear()
+            for _ in range(8):
+                self._clutch_size_buf.append(cur_s)
+            self.anchor_hand_pos = None
+            self._tremor.reset()
+            return False
+
+        # While clutch_state == "active": keep relative anchor and PathSmoother cleared
+        self.anchor_hand_pos = None
+        self._rel_carry = (0.0, 0.0)
+        if self._path is not None:
+            self._path.reset()
+        self._after_grab = True
+
+        if size_ratio >= exit_r:
+            if self._clutch_exit_cand_since is None:
+                self._clutch_exit_cand_since = now
+            if (now - self._clutch_entered_at) >= min_hold and (now - self._clutch_exit_cand_since) >= min_hold:
+                self.clutch_state = "inactive"
+                self._clutch_exit_cand_since = None
+                self.anchor_hand_pos = None
+                self._tremor.reset()
+                return False
+        else:
+            self._clutch_exit_cand_since = None
+
+        return True
+
+    def _velocity_mode_bounds(self, config: Dict[str, Any]) -> Tuple[float, float, float]:
+        """Return `(gain_min, gain_mid, gain_max)` for the active discrete `hand_shape_mode`."""
+        mode = self.hand_shape_mode
+        if mode in ("precise", "open"):
+            g_min = float(config.get("velocity_mode_precise_min", 0.40))
+            g_mid = float(config.get("velocity_mode_precise_mid", 1.8))
+            g_max = float(config.get("velocity_mode_precise_max", 4.0))
+        elif mode in ("fast", "fist"):
+            g_min = float(config.get("velocity_mode_fast_min", 0.75))
+            g_mid = float(config.get("velocity_mode_fast_mid", 3.8))
+            g_max = float(config.get("velocity_mode_fast_max", 9.0))
+        else:
+            g_min = float(config.get("velocity_gain_min", 0.55))
+            g_mid = float(config.get("velocity_gain_mid", 2.8))
+            g_max = float(config.get("velocity_gain_max", 6.5))
+        g_min = max(0.05, g_min)
+        g_mid = max(g_min, g_mid)
+        g_max = max(g_mid, g_max)
+        return g_min, g_mid, g_max
+
+    def _reset_velocity_state(self, config: Optional[Dict[str, Any]] = None) -> None:
+        cfg = config or {}
+        g_min = max(0.05, float(cfg.get("velocity_gain_min", 0.55)))
+        self._vel_ema = 0.0
+        self._effective_gain = g_min
+        self._raw_hand_prev = None
+        self._raw_hand_speed = 0.0
+        self._raw_hand_delta = (0.0, 0.0)
+        self._prev_smoothed_speed = 0.0
+        self._peak_recent_speed = 0.0
+        self._peak_recent_t = -1e9
+        self._c2f_until = -1e9
+        self._edge_touched_at = -1e9
+        self._edge_dir = (0.0, 0.0)
+        self._edge_reclutch_active = False
+        self._clutch_size_ema = None
+        self._clutch_size_buf.clear()
+        self._clutch_entered_at = -1e9
+        self._clutch_exit_cand_since = None
+        self._ret_fwd_start = None
+        self._ret_fwd_end = None
+        self._ret_fwd_peak_speed = 0.0
+        self._ret_fwd_end_t = -1e9
+        self._ret_armed_vec = None
+        self._ret_armed_start = None
+        self._ret_armed_peak = 0.0
+        self._ret_armed_t = -1e9
+        self._ret_pending_t0 = -1e9
+        self._ret_pending_start_pt = None
+        self._ret_pending_steps.clear()
+        self._ret_pending_peak_speed = 0.0
+        self._ret_confirmed_at = -1e9
+        self._ret_vec = (0.0, 0.0)
+        self._ret_pause_since = None
+        self._ret_fwd_relaunch_frames = 0
+        self.clutch_state = "inactive"
+        self.return_state = "none"
+        self.hand_shape_mode = "normal"
+
+    def _update_auto_return_suppression(
+        self,
+        sx: float,
+        sy: float,
+        raw_dx: float,
+        raw_dy: float,
+        step_x: float,
+        step_y: float,
+        dt: float,
+        now: float,
+        config: Dict[str, Any],
+        prev_vel_ema: float,
+        prev_eff_gain: float,
+    ) -> Tuple[float, float]:
+        """
+        Layer 2 Conservative Automatic Return-Stroke Suppression (`return_suppression == "clutch_auto"`).
+        State machine (`self.return_state`): `"none"` -> `"pending"` (2–3 frame / ~85ms deferred-commit buffer)
+        -> `"confirmed"` (cursor frozen, buffer discarded) -> `"released"` (re-anchored with 0 jump).
+        If a `"pending"` candidate stops short or turns back into forward motion, all buffered steps are
+        flushed so fine aiming loses 0 pixels of displacement.
+        Never active during drag, scroll, or `browse_lock`.
+        """
+        ret_mode = str(config.get("return_suppression", "off")).lower()
+        if (
+            ret_mode != "clutch_auto"
+            or self._pointer_source is not None
+            or self.is_dragging
+            or self._scroll_prev is not None
+            or self.scroll_coasting
+            or self._browse_centered
+        ):
+            if self._ret_pending_steps:
+                self._ret_pending_steps.clear()
+            self.return_state = "none"
+            return step_x, step_y
+
+        cur_pt = (sx, sy * self.frame_aspect)
+        prev_pt = (cur_pt[0] - raw_dx, cur_pt[1] - raw_dy)
+        step_dist = math.hypot(raw_dx, raw_dy)
+        step_speed = step_dist / max(1e-3, dt)
+        v_still = max(0.02, float(config.get("velocity_stationary_speed", 0.05)))
+        min_fwd_dist = max(0.02, float(config.get("return_auto_min_fwd_dist", 0.035)))
+        min_fwd_speed = max(0.05, float(config.get("return_auto_min_fwd_speed", 0.16)))
+        post_win = max(0.15, float(config.get("return_auto_post_window", 0.65)))
+        min_ang_deg = max(95.0, min(175.0, float(config.get("return_auto_min_angle_deg", 120.0))))
+        cos_thresh = math.cos(math.radians(min_ang_deg))
+        buf_win = max(0.03, min(0.18, float(config.get("return_auto_buffer_s", 0.085))))
+        confirm_dist = max(0.008, float(config.get("return_auto_confirm_dist", 0.020)))
+        min_spd_ratio = max(0.05, float(config.get("return_auto_min_speed_ratio", 0.15)))
+        rel_pause = max(0.05, float(config.get("return_auto_release_pause", 0.15)))
+        max_freeze = max(0.30, float(config.get("return_auto_max_freeze", 1.10)))
+        center_pt = (0.5, 0.5 * self.frame_aspect)
+
+        def _suppress_ballistics_and_path() -> None:
+            self._vel_ema = prev_vel_ema * 0.85
+            self._effective_gain = prev_eff_gain
+            self.dpi_multiplier = prev_eff_gain
+            self._rel_carry = (0.0, 0.0)
+            if self._path is not None:
+                self._path.reset()
+
+        # 1. Handle CONFIRMED return stroke freeze
+        if self.return_state == "confirmed":
+            _suppress_ballistics_and_path()
+            if self._ret_pending_start_pt is not None:
+                self._ret_vec = (
+                    cur_pt[0] - self._ret_pending_start_pt[0],
+                    cur_pt[1] - self._ret_pending_start_pt[1],
+                )
+            release_now = False
+            release_with_step = False
+
+            if (now - self._ret_confirmed_at) >= max_freeze:
+                release_now = True
+            elif step_speed < v_still or self._raw_hand_speed < v_still:
+                if self._ret_pause_since is None:
+                    self._ret_pause_since = now
+                if (now - self._ret_pause_since) >= rel_pause:
+                    release_now = True
+            else:
+                self._ret_pause_since = None
+                rvx, rvy = self._ret_vec
+                rmag = math.hypot(rvx, rvy)
+                if rmag > 1e-4 and step_dist > 1e-4:
+                    cos_relaunch = (raw_dx * rvx + raw_dy * rvy) / (step_dist * rmag)
+                    if cos_relaunch <= -0.15 and step_speed >= v_still * 1.2:
+                        self._ret_fwd_relaunch_frames += 1
+                        if self._ret_fwd_relaunch_frames >= 2:
+                            release_now = True
+                            release_with_step = True
+                    else:
+                        self._ret_fwd_relaunch_frames = 0
+
+            if release_now:
+                self.return_state = "released"
+                self._ret_armed_vec = None
+                self._ret_fwd_start = cur_pt
+                self._ret_fwd_end = cur_pt
+                self._ret_fwd_peak_speed = step_speed if release_with_step else 0.0
+                self._ret_fwd_end_t = now
+                self._ret_pending_steps.clear()
+                self._ret_pause_since = None
+                self._ret_fwd_relaunch_frames = 0
+                return (step_x, step_y) if release_with_step else (0.0, 0.0)
+            return 0.0, 0.0
+
+        # 2. Handle PENDING deferred-commit buffer (~80ms / 2-3 frames)
+        if self.return_state == "pending":
+            self._ret_pending_steps.append((step_x, step_y))
+            self._ret_pending_peak_speed = max(self._ret_pending_peak_speed, step_speed)
+            p_start = self._ret_pending_start_pt or prev_pt
+            cdx = cur_pt[0] - p_start[0]
+            cdy = cur_pt[1] - p_start[1]
+            cdist = math.hypot(cdx, cdy)
+            elapsed_p = now - self._ret_pending_t0
+
+            fvec = self._ret_armed_vec
+            fstart = self._ret_armed_start
+            if fvec is None or fstart is None:
+                flushed_x = sum(s[0] for s in self._ret_pending_steps)
+                flushed_y = sum(s[1] for s in self._ret_pending_steps)
+                self._ret_pending_steps.clear()
+                self.return_state = "none"
+                return flushed_x, flushed_y
+
+            fmag = max(1e-6, math.hypot(fvec[0], fvec[1]))
+            cos_cand = (fvec[0] * cdx + fvec[1] * cdy) / (fmag * max(1e-6, cdist)) if cdist > 1e-5 else -1.0
+            d_start_before = math.hypot(p_start[0] - fstart[0], p_start[1] - fstart[1])
+            d_start_after = math.hypot(cur_pt[0] - fstart[0], cur_pt[1] - fstart[1])
+            d_cent_before = math.hypot(p_start[0] - center_pt[0], p_start[1] - center_pt[1])
+            d_cent_after = math.hypot(cur_pt[0] - center_pt[0], cur_pt[1] - center_pt[1])
+            toward_origin_or_center = (d_start_after < d_start_before) or (d_cent_after < d_cent_before)
+
+            # Abort pending & flush buffered steps if motion turned forward or stopped as a tiny micro-adjustment
+            if cos_cand > -0.20 or (
+                (step_speed < v_still or elapsed_p > buf_win * 1.4)
+                and cdist < confirm_dist * 0.65
+            ):
+                flushed_x = sum(s[0] for s in self._ret_pending_steps)
+                flushed_y = sum(s[1] for s in self._ret_pending_steps)
+                self._ret_pending_steps.clear()
+                self.return_state = "none"
+                return flushed_x, flushed_y
+
+            spd_ratio = self._ret_pending_peak_speed / max(0.10, self._ret_armed_peak)
+            is_confirmed = (
+                cos_cand <= cos_thresh
+                and toward_origin_or_center
+                and spd_ratio >= min_spd_ratio
+                and (
+                    cdist >= confirm_dist
+                    or (elapsed_p >= buf_win and cdist >= confirm_dist * 0.65 and len(self._ret_pending_steps) >= 2)
+                )
+            )
+            if is_confirmed:
+                _suppress_ballistics_and_path()
+                self.return_state = "confirmed"
+                self._ret_confirmed_at = now
+                self._ret_vec = (cdx, cdy)
+                self._ret_pause_since = None
+                self._ret_fwd_relaunch_frames = 0
+                self._ret_pending_steps.clear()  # Discard buffered return steps!
+                return 0.0, 0.0
+
+            if elapsed_p > buf_win * 1.6:
+                # Did not meet confirmation criteria within buffer window -> flush without loss
+                flushed_x = sum(s[0] for s in self._ret_pending_steps)
+                flushed_y = sum(s[1] for s in self._ret_pending_steps)
+                self._ret_pending_steps.clear()
+                self.return_state = "none"
+                return flushed_x, flushed_y
+
+            _suppress_ballistics_and_path()
+            return 0.0, 0.0
+
+        # 3. State is "none" or "released"
+        if self.return_state == "released":
+            self.return_state = "none"
+
+        # Check if an armed forward stroke sees a qualifying reversal step
+        if (
+            self._ret_armed_vec is not None
+            and self._ret_armed_start is not None
+            and (now - self._ret_armed_t) <= post_win
+            and step_speed >= max(0.04, v_still)
+            and step_dist > 1e-4
+        ):
+            fvec = self._ret_armed_vec
+            fstart = self._ret_armed_start
+            fmag = max(1e-6, math.hypot(fvec[0], fvec[1]))
+            cos_step = (fvec[0] * raw_dx + fvec[1] * raw_dy) / (fmag * step_dist)
+            d_start_before = math.hypot(prev_pt[0] - fstart[0], prev_pt[1] - fstart[1])
+            d_start_after = math.hypot(cur_pt[0] - fstart[0], cur_pt[1] - fstart[1])
+            d_cent_before = math.hypot(prev_pt[0] - center_pt[0], prev_pt[1] - center_pt[1])
+            d_cent_after = math.hypot(cur_pt[0] - center_pt[0], cur_pt[1] - center_pt[1])
+            if cos_step <= cos_thresh and ((d_start_after < d_start_before) or (d_cent_after < d_cent_before)):
+                _suppress_ballistics_and_path()
+                self.return_state = "pending"
+                self._ret_pending_t0 = now
+                self._ret_pending_start_pt = prev_pt
+                self._ret_pending_steps = [(step_x, step_y)]
+                self._ret_pending_peak_speed = step_speed
+                return 0.0, 0.0
+
+        # Track active forward stroke
+        if step_speed >= 0.04:
+            if self._ret_fwd_start is None or (now - self._ret_fwd_end_t) > 0.25:
+                self._ret_fwd_start = prev_pt
+                self._ret_fwd_peak_speed = step_speed
+            else:
+                cur_fdx = cur_pt[0] - self._ret_fwd_start[0]
+                cur_fdy = cur_pt[1] - self._ret_fwd_start[1]
+                cur_fdist = math.hypot(cur_fdx, cur_fdy)
+                if cur_fdist >= 0.025 and step_dist > 0.002:
+                    dot = (cur_fdx * raw_dx + cur_fdy * raw_dy) / (cur_fdist * step_dist)
+                    if dot < -0.25:
+                        self._ret_fwd_start = prev_pt
+                        self._ret_fwd_peak_speed = step_speed
+                self._ret_fwd_peak_speed = max(self._ret_fwd_peak_speed, step_speed)
+
+            self._ret_fwd_end = cur_pt
+            self._ret_fwd_end_t = now
+            fdx = cur_pt[0] - self._ret_fwd_start[0]
+            fdy = cur_pt[1] - self._ret_fwd_start[1]
+            fdist = math.hypot(fdx, fdy)
+            if fdist >= min_fwd_dist and self._ret_fwd_peak_speed >= min_fwd_speed:
+                self._ret_armed_vec = (fdx, fdy)
+                self._ret_armed_start = self._ret_fwd_start
+                self._ret_armed_peak = self._ret_fwd_peak_speed
+                self._ret_armed_t = now
+
+        return step_x, step_y
+
+    def _update_velocity_gain(
+        self,
+        smoothed_speed: float,
+        dt: float,
+        config: Dict[str, Any],
+        *,
+        gain_min_override: Optional[float] = None,
+        gain_mid_override: Optional[float] = None,
+        gain_max_override: Optional[float] = None,
+    ) -> float:
+        """
+        Update EMA hand speed and effective pointer acceleration gain with:
+        - Stationary multiplier freeze when hand speed is below `velocity_stationary_speed`
+        - Discrete 3-state `hand_shape_mode` ("precise" | "normal" | "fast") gain curve bounds
+        - Coarse-to-fine post-flick deceleration assist (`velocity_c2f_*`)
+        - Monotonic C1 S-curve gain (`compute_velocity_gain`)
+        - Bounded slew-rate limiting (`velocity_slew_up`, `velocity_slew_down`)
+        """
+        v_still = max(0.0, float(config.get("velocity_stationary_speed", 0.05)))
+        alpha_v = max(0.05, min(1.0, float(config.get("velocity_ema_alpha", 0.35))))
+        raw_spd = self._raw_hand_speed
+        now = self._clock
+
+        # Stationary freeze: when raw hand motion is below the stationary threshold,
+        # do not update or oscillate the multiplier even if finger curl changes.
+        if raw_spd < v_still or smoothed_speed < v_still * 0.5:
+            self._vel_ema *= max(0.0, 1.0 - alpha_v)
+            self._prev_smoothed_speed = smoothed_speed
+            return self._effective_gain
+
+        mode_min, mode_mid, mode_max = self._velocity_mode_bounds(config)
+        g_min = gain_min_override if gain_min_override is not None else mode_min
+        g_mid = gain_mid_override if gain_mid_override is not None else mode_mid
+        g_max = gain_max_override if gain_max_override is not None else mode_max
+
+        accel = (smoothed_speed - self._prev_smoothed_speed) / max(1e-3, dt)
+        self._prev_smoothed_speed = smoothed_speed
+
+        # Track recent peak speed over a rolling ~0.40s window for coarse-to-fine flick detection
+        if smoothed_speed >= self._peak_recent_speed or (now - self._peak_recent_t) > 0.40:
+            self._peak_recent_speed = smoothed_speed
+            self._peak_recent_t = now
+
+        # Use physical smoothed delta speed for ballistics EMA
+        self._vel_ema = self._vel_ema + alpha_v * (smoothed_speed - self._vel_ema)
+
+        c2f_enabled = bool(config.get("velocity_c2f_enabled", True))
+        c2f_aim = max(v_still, float(config.get("velocity_c2f_aim_speed", 0.32)))
+        if c2f_enabled:
+            c2f_entry = max(c2f_aim, float(config.get("velocity_c2f_entry_speed", 0.45)))
+            c2f_decel = max(0.05, float(config.get("velocity_c2f_decel_thresh", 0.80)))
+            c2f_win = max(0.05, float(config.get("velocity_c2f_window", 0.28)))
+            if (
+                self._peak_recent_speed >= c2f_entry
+                and (now - self._peak_recent_t) <= 0.35
+                and smoothed_speed <= c2f_aim
+                and accel <= -c2f_decel
+            ):
+                self._c2f_until = now + c2f_win
+                # Dampen EMA carry from the flick so aiming starts cleanly
+                self._vel_ema = min(self._vel_ema, smoothed_speed)
+            elif now < self._c2f_until and smoothed_speed > c2f_aim * 1.25 and accel > 0.5:
+                self._c2f_until = -1e9
+
+        target_gain = self.compute_velocity_gain(
+            self._vel_ema,
+            config,
+            gain_min_override=g_min,
+            gain_mid_override=g_mid,
+            gain_max_override=g_max,
+        )
+
+        slew_up = max(0.5, float(config.get("velocity_slew_up", 14.0)))
+        slew_down = max(0.5, float(config.get("velocity_slew_down", 18.0)))
+        if c2f_enabled and now < self._c2f_until and smoothed_speed <= c2f_aim:
+            c2f_scale = max(0.25, min(1.0, float(config.get("velocity_c2f_gain_scale", 0.75))))
+            c2f_boost = max(1.0, float(config.get("velocity_c2f_slew_boost", 2.2)))
+            # Blend target gain toward fine precision floor as speed approaches stationary
+            blend = max(0.0, min(1.0, (smoothed_speed - v_still) / max(1e-6, c2f_aim - v_still)))
+            fine_floor = max(0.05, g_min * c2f_scale)
+            target_gain = min(target_gain, fine_floor + (target_gain - fine_floor) * (0.45 * blend))
+            slew_down *= c2f_boost
+
+        delta = target_gain - self._effective_gain
+        max_up = slew_up * dt
+        max_down = slew_down * dt
+        if delta > max_up:
+            delta = max_up
+        elif delta < -max_down:
+            delta = -max_down
+
+        self._effective_gain = max(0.05, self._effective_gain + delta)
+        return self._effective_gain
+
+    @staticmethod
+    def compute_velocity_gain(
+        speed: float,
+        config: Dict[str, Any],
+        *,
+        gain_min_override: Optional[float] = None,
+        gain_mid_override: Optional[float] = None,
+        gain_max_override: Optional[float] = None,
+    ) -> float:
+        """
+        Compute pointer acceleration gain as a monotonic C1 S-curve function of
+        EMA-smoothed hand speed (in screen-width / frame-width normalized units per second).
+
+        Regimes:
+        1. Ultra-low speed (`speed <= velocity_deadzone`, default 0.02):
+           constant `velocity_gain_min` (default 0.45x) for sub-pixel precision aiming.
+        2. Medium speed (`velocity_deadzone < speed <= velocity_mid_speed`, default 0.02..0.35):
+           concave-up polynomial S-curve segment from `velocity_gain_min` (0.45x) to `velocity_gain_mid` (3.2x).
+        3. High speed (`velocity_mid_speed < speed < velocity_high_speed`, default 0.35..1.35):
+           concave-down saturation segment from `velocity_gain_mid` (3.2x) to `velocity_gain_max` (11.0x),
+           saturating smoothly at `velocity_gain_max` for `speed >= velocity_high_speed`.
+        """
+        g_min = max(
+            0.05,
+            float(gain_min_override if gain_min_override is not None else config.get("velocity_gain_min", 0.55)),
+        )
+        g_mid = max(
+            g_min,
+            float(gain_mid_override if gain_mid_override is not None else config.get("velocity_gain_mid", 2.8)),
+        )
+        g_max = max(
+            g_mid,
+            float(gain_max_override if gain_max_override is not None else config.get("velocity_gain_max", 6.5)),
+        )
+
+        v_dead = max(0.0, float(config.get("velocity_deadzone", 0.02)))
+        v_mid = max(v_dead + 1e-6, float(config.get("velocity_mid_speed", 0.40)))
+        v_high = max(v_mid + 1e-6, float(config.get("velocity_high_speed", 1.30)))
+
+        spd = max(0.0, float(speed))
+        if spd <= v_dead:
+            return g_min
+        if spd <= v_mid:
+            u = (spd - v_dead) / (v_mid - v_dead)
+            f1 = 0.5 * u * u * (3.0 - u)
+            return g_min + (g_mid - g_min) * f1
+        if spd >= v_high:
+            return g_max
+        w = (spd - v_mid) / (v_high - v_mid)
+        f2 = 0.5 * w * (3.0 - w * w)
+        return g_mid + (g_max - g_mid) * f2
 
     def map_to_screen_absolute(
         self,
@@ -273,8 +862,12 @@ class MouseController:
     ) -> Tuple[int, int]:
         """Trackpad-style fine control with pointer acceleration."""
         smoothing = max(0.05, min(1.0, float(config.get("smoothing", 0.35))))
+        is_vel_scheme = (
+            str(config.get("movement_scheme", "legacy_shape")).lower() == "velocity"
+            and self._pointer_source is None
+        )
         if config.get("tremor_filter", False):
-            smoothing = 1.0  # the tremor filter already smooths; stacking both adds lag
+            smoothing = 1.0  # OneEuroFilter already smooths; stacking EMA adds phase lag
         g_min = max(0.0, float(config.get("relative_gain_min", 0.35)))
         g_max = max(g_min, float(config.get("relative_gain_max", 1.2)))
         v_lo = max(0.0, float(config.get("relative_accel_speed_low", 0.1)))
@@ -290,6 +883,8 @@ class MouseController:
             self._rel_carry = (0.0, 0.0)
             self._rel_t = now
             self._smoothed_pos = self._rel_pos
+            if is_vel_scheme:
+                self.dpi_multiplier = self._effective_gain
             return self.last_screen_pos
 
         ax, ay = self.anchor_hand_pos
@@ -301,6 +896,46 @@ class MouseController:
         self._rel_t = now
         dx = sx - ax
         dy = (sy - ay) * self.frame_aspect  # physical units (frame widths)
+
+        # Workspace edge re-clutch assist: when the hand reaches the camera frame border
+        # during a pointing stroke and reverses inward toward the center, re-anchor the
+        # hand without pulling the cursor back from the edge. Never active during drag,
+        # scroll, or browse_lock.
+        if (
+            is_vel_scheme
+            and config.get("edge_reclutch_enabled", True)
+            and not self.is_dragging
+            and self._scroll_prev is None
+            and not self.scroll_coasting
+            and not self._browse_centered
+        ):
+            edge_m = max(0.01, min(0.25, float(config.get("edge_reclutch_margin", 0.06))))
+            rel_m = max(edge_m + 0.01, min(0.35, float(config.get("edge_reclutch_release_margin", 0.12))))
+            raw_pt = self._raw_hand_prev if self._raw_hand_prev is not None else (hx, hy, now)
+            rx_pt, ry_pt = raw_pt[0], raw_pt[1]
+            r_dx, r_dy = self._raw_hand_delta
+            border_dist = min(rx_pt, 1.0 - rx_pt, ry_pt, 1.0 - ry_pt)
+            out_x, out_y = rx_pt - 0.5, ry_pt - 0.5
+            out_dot = out_x * r_dx + out_y * (r_dy / max(1e-6, self.frame_aspect))
+            if border_dist <= edge_m and out_dot > 1e-4:
+                self._edge_touched_at = now
+                self._edge_dir = (out_x, out_y)
+                self._edge_reclutch_active = False
+            elif (
+                (now - self._edge_touched_at) <= 0.45
+                and border_dist <= rel_m
+                and (self._edge_dir[0] * r_dx + self._edge_dir[1] * (r_dy / max(1e-6, self.frame_aspect))) < -1e-4
+            ):
+                self._edge_reclutch_active = True
+                if self._path is not None:
+                    self._path.reset()
+                self._rel_carry = (0.0, 0.0)
+                return self.last_screen_pos
+            else:
+                self._edge_reclutch_active = False
+        else:
+            self._edge_reclutch_active = False
+
         pivot = getattr(self, "elbow_pivot", None)   # src/elbow_pivot.py, set by the runtime that feeds it
         bent = None
         if self._pointer_source is None and pivot is not None and config.get("elbow_pivot", False):
@@ -313,6 +948,15 @@ class MouseController:
             # Palm / fist cursor: the measured up/down and left/right of this user's hand (src/palm_axes.py) become screen
             # vertical / horizontal, e.g. a forearm swinging about an elbow on the chair no longer moves diagonally.
             dx, dy = apply_axes(dx, dy, config["palm_axes"], float(config.get("palm_axes_strength", 0.6)))
+
+        raw_dx, raw_dy = dx, dy
+        prev_vel_ema = self._vel_ema
+        prev_eff_gain = self._effective_gain
+        pre_smooth_speed = math.hypot(dx, dy) / dt
+        if is_vel_scheme:
+            eff_gain = self._update_velocity_gain(pre_smooth_speed, dt, config)
+            self.dpi_multiplier = eff_gain
+
         if (self._pointer_source is None and config.get("path_smoothing", False) and not self.is_dragging
                 and self.dpi_multiplier >= float(config.get("path_min_multiplier", 1.15))):
             # Fist / half-fist cursor: straight lines and smooth curves only (src/path_smoother.py), the wobble that
@@ -322,19 +966,44 @@ class MouseController:
             dx, dy = self._path.step(now, dx, dy)
         elif self._path is not None:
             self._path.reset()
+
         speed = math.hypot(dx, dy) / dt
-        t = max(0.0, min(1.0, (speed - v_lo) / (v_hi - v_lo)))
-        mult = self.dpi_multiplier
-        if self.is_dragging and mult > 1.0 and config.get("drag_precision", True):
-            # Dragging (drawing, writing) needs fine control at slow hand speed, a long drag across the screen needs the big
-            # multiplier at fast hand speed: 1x when the hand is slow, the full multiplier when it is fast (2026-11-04: the
-            # hand moved at 0.1 frame widths/s while drawing in Paint, with the full 15x the strokes were jagged scribbles).
-            d_min = max(1.0, float(config.get("drag_precision_min", 2.5)))
-            d_lo = max(0.0, float(config.get("drag_precision_low", 0.3)))
-            d_hi = max(d_lo + 1e-6, float(config.get("drag_precision_high", 1.2)))
-            td = max(0.0, min(1.0, (speed - d_lo) / (d_hi - d_lo)))
-            mult = max(1.0, min(mult, d_min) + (mult - min(mult, d_min)) * td)
-        gain = (g_min + (g_max - g_min) * t) * mult
+        if is_vel_scheme:
+            v_dead = max(0.0, float(config.get("velocity_deadzone", 0.02)))
+            v_still = max(v_dead, float(config.get("velocity_stationary_speed", 0.05)))
+            g_min_vel, _, _ = self._velocity_mode_bounds(config)
+            if self._raw_hand_speed < v_dead and pre_smooth_speed < v_dead:
+                step_gain = g_min_vel * 0.5
+            elif self._raw_hand_speed < v_still:
+                step_gain = min(self._effective_gain, g_min_vel)
+            else:
+                step_gain = self._effective_gain
+            magnet_cap = float(config.get("ui_magnet_max_gain", 1.8))
+            is_fine_aim = self.hand_shape_mode in ("precise", "open") or (now < self._c2f_until)
+            if (
+                self.slowdown_provider is not None
+                and (is_fine_aim or step_gain <= magnet_cap)
+                and config.get("ui_magnet_enabled", True)
+            ):
+                m_factor = float(self.slowdown_provider(*self.last_screen_pos))
+                if is_fine_aim and m_factor < 1.0:
+                    p_scale = max(0.3, min(1.0, float(config.get("ui_magnet_precision_scale", 0.85))))
+                    m_factor = max(0.1, m_factor * p_scale)
+                step_gain *= m_factor
+            gain = step_gain
+        else:
+            t = max(0.0, min(1.0, (speed - v_lo) / (v_hi - v_lo)))
+            mult = self.dpi_multiplier
+            if self.is_dragging and mult > 1.0 and config.get("drag_precision", True):
+                # Dragging (drawing, writing) needs fine control at slow hand speed, a long drag across the screen needs the big
+                # multiplier at fast hand speed: 1x when the hand is slow, the full multiplier when it is fast (2026-11-04: the
+                # hand moved at 0.1 frame widths/s while drawing in Paint, with the full 15x the strokes were jagged scribbles).
+                d_min = max(1.0, float(config.get("drag_precision_min", 2.5)))
+                d_lo = max(0.0, float(config.get("drag_precision_low", 0.3)))
+                d_hi = max(d_lo + 1e-6, float(config.get("drag_precision_high", 1.2)))
+                td = max(0.0, min(1.0, (speed - d_lo) / (d_hi - d_lo)))
+                mult = max(1.0, min(mult, d_min) + (mult - min(mult, d_min)) * td)
+            gain = (g_min + (g_max - g_min) * t) * mult
 
         # The fast hand shapes multiply hand noise and quick flicks (up to 30x): logged 2026-11-04, one frame moved the cursor 500-1000 px
         # while the hand moved ~60 px, which looks like a jump without a path. A frame may move the cursor at most cursor_max_step of the
@@ -352,6 +1021,19 @@ class MouseController:
             step_x, step_y = step_x * k, step_y * k
         else:
             self._rel_carry = (0.0, 0.0)
+        step_x, step_y = self._update_auto_return_suppression(
+            sx,
+            sy,
+            raw_dx,
+            raw_dy,
+            step_x,
+            step_y,
+            dt,
+            now,
+            config,
+            prev_vel_ema,
+            prev_eff_gain,
+        )
         px, py = self.screens.clamp(self._rel_pos[0] + step_x, self._rel_pos[1] + step_y)
         self._rel_pos = (px, py)
         self._smoothed_pos = self._rel_pos
@@ -367,14 +1049,53 @@ class MouseController:
         smoothing = max(0.05, min(1.0, float(config.get("smoothing", 0.35))))
         active_margin = float(config.get("active_margin", 0.15))
 
+        hx_raw, hy_raw = float(hand_pt[0]), float(hand_pt[1])
+        if self._raw_hand_prev is not None:
+            r_dt = max(1e-3, min(0.2, now - self._raw_hand_prev[2]))
+            r_dx = hx_raw - self._raw_hand_prev[0]
+            r_dy = (hy_raw - self._raw_hand_prev[1]) * self.frame_aspect
+            self._raw_hand_delta = (r_dx, r_dy)
+            self._raw_hand_speed = math.hypot(r_dx, r_dy) / r_dt
+        else:
+            self._raw_hand_delta = (0.0, 0.0)
+            self._raw_hand_speed = 0.0
+        self._raw_hand_prev = (hx_raw, hy_raw, now)
+
+        is_vel_scheme = (
+            str(config.get("movement_scheme", "legacy_shape")).lower() == "velocity"
+            and self._pointer_source is None
+        )
         if config.get("tremor_filter", False):
-            hand_pt = self._tremor(
-                hand_pt,
-                now,
-                min_cutoff=float(config.get("tremor_min_cutoff", 1.5)),
-                beta=float(config.get("tremor_beta", 8.0)),
-                deadzone=float(config.get("tremor_deadzone", 0.002)),
-            )
+            if is_vel_scheme and config.get("velocity_adaptive_filter", True):
+                v_still = max(1e-3, float(config.get("velocity_stationary_speed", 0.05)))
+                is_fine = self.hand_shape_mode in ("precise", "open") or (now < self._c2f_until)
+                min_cut = float(
+                    config.get("velocity_filter_c2f_cutoff", 0.80)
+                    if is_fine
+                    else config.get("velocity_filter_min_cutoff", 1.1)
+                )
+                beta_val = float(config.get("velocity_filter_beta", 14.0))
+                base_dz = float(config.get("tremor_deadzone", 0.002))
+                if self._raw_hand_speed <= v_still:
+                    dz_val = base_dz
+                else:
+                    # Smoothly shed deadband above stationary speed so fast flicks have zero deadzone lag
+                    dz_val = base_dz * max(0.0, 1.0 - (self._raw_hand_speed - v_still) / (2.0 * v_still))
+                hand_pt = self._tremor(
+                    hand_pt,
+                    now,
+                    min_cutoff=min_cut,
+                    beta=beta_val,
+                    deadzone=dz_val,
+                )
+            else:
+                hand_pt = self._tremor(
+                    hand_pt,
+                    now,
+                    min_cutoff=float(config.get("tremor_min_cutoff", 1.5)),
+                    beta=float(config.get("tremor_beta", 8.0)),
+                    deadzone=float(config.get("tremor_deadzone", 0.002)),
+                )
 
         if mode == "relative":
             self._after_grab = False
@@ -850,8 +1571,12 @@ class MouseController:
         if math.hypot(dx, dy) > tol:
             self._dbl_until = -1e9  # clearly moving away: release the hold now
             self.anchor_hand_pos = None  # relative re-anchors here (no jump)
+            self._raw_hand_prev = None
+            self._raw_hand_speed = 0.0
             return False                 # absolute simply resumes its mapping
         self.anchor_hand_pos = None
+        self._raw_hand_prev = None
+        self._raw_hand_speed = 0.0
         return True
 
     # ------------------------------------------------------------------ record & fling
@@ -1027,11 +1752,16 @@ class MouseController:
             if not self.is_playing:
                 self._mouse_up()
             self._prev_action = "none"
+            self.clutch_state = "inactive"
+            self._clutch_exit_cand_since = None
+            self.return_state = "none"
         else:
             self._scroll_resume = self._scroll_prev is not None
         self._tick_scroll_inertia(cfg, now)
         self.anchor_hand_pos = None
         self.anchor_screen_pos = None
+        self._raw_hand_prev = None
+        self._raw_hand_speed = 0.0
         self._tick_playback(now)
         return self.last_screen_pos
 
@@ -1074,6 +1804,8 @@ class MouseController:
         self.anchor_hand_pos = None
         self.anchor_screen_pos = None
         self._smoothed_pos = None
+        self._raw_hand_prev = None
+        self._raw_hand_speed = 0.0
         self._tremor.reset()
         self._move_os_cursor(int(x), int(y), immediate=True)
 
@@ -1084,25 +1816,39 @@ class MouseController:
 
     @staticmethod
     def foreground_info() -> Dict[str, Any]:
-        """What Alt+F4 would hit: window class, title, whether it is this app. For the safety check and the log."""
-        info: Dict[str, Any] = {"cls": "", "title": "", "own": False, "ok": False}
+        """What Alt+F4 or app-specific bindings would hit: window class, title, process, and whether it is this app."""
+        info: Dict[str, Any] = {"cls": "", "title": "", "title_full": "", "process": "", "own": False, "ok": False}
         if sys.platform != "win32":
             return info
         try:
             import ctypes
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
             hwnd = user32.GetForegroundWindow()
             if not hwnd:
                 return info
-            buf = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, buf, 256)
+            buf = ctypes.create_unicode_buffer(512)
+            user32.GetClassNameW(hwnd, buf, 512)
             info["cls"] = buf.value
-            user32.GetWindowTextW(hwnd, buf, 256)
+            user32.GetWindowTextW(hwnd, buf, 512)
+            info["title_full"] = buf.value
             info["title"] = buf.value[:40]
             pid = ctypes.c_ulong(0)
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             info["own"] = pid.value == os.getpid()
             info["ok"] = (not info["own"]) and info["cls"] not in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+            if pid.value:
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+                if hproc:
+                    try:
+                        pbuf = ctypes.create_unicode_buffer(512)
+                        plen = ctypes.c_ulong(512)
+                        if kernel32.QueryFullProcessImageNameW(hproc, 0, pbuf, ctypes.byref(plen)):
+                            raw_path = pbuf.value
+                            info["process"] = os.path.basename(raw_path)
+                    finally:
+                        kernel32.CloseHandle(hproc)
         except Exception:
             pass
         return info
@@ -1114,18 +1860,45 @@ class MouseController:
         return bool(self.last_close_info["ok"])
 
     def send_motion_action(self, action_id: str) -> bool:
-        """Send one command of motion mode (back / forward / tab_prev / tab_next). Unknown ids are refused."""
+        """Send one command of motion mode (back / forward / tab_prev / tab_next or custom motion binding)."""
+        from src.gesture_catalog import MOTION_TARGETS
         from src.motion_mode import ACTION_KEYS
         keys = ACTION_KEYS.get(action_id)
-        if keys is None:
+        gesture_key = MOTION_TARGETS.get(action_id, action_id)
+        try:
+            from src.action_bindings import DEFAULT_GESTURE_BINDINGS, get_action_registry
+            reg = get_action_registry()
+            has_custom = gesture_key in reg.custom_motions or gesture_key in reg.bindings
+        except Exception:
+            reg = None
+            has_custom = False
+
+        if keys is None and not has_custom:
             return False
         if action_id == "close_window" and not self.dry_run and not self._safe_to_close_foreground():
             self.event_log.append("motion:close_window_refused")
             return False
+
         self.event_log.append(f"motion:{action_id}")
-        if not self.dry_run:
-            pyautogui.hotkey(*keys, _pause=False)
-        return True
+        if reg is not None and has_custom:
+            fg = self.foreground_info() if not self.dry_run else {}
+            resolved = reg.resolve_effective_action(gesture_key, fg)
+            default_b = DEFAULT_GESTURE_BINDINGS.get(gesture_key, {})
+            is_overridden = (
+                bool(resolved.get("matched_app"))
+                or gesture_key in reg.custom_motions
+                or resolved.get("action_type") != default_b.get("action_type")
+                or resolved.get("action_value") != default_b.get("action_value")
+            )
+            if is_overridden:
+                ok, _badge = reg.execute_resolved_action(resolved, dry_run=self.dry_run, mouse_controller=None)
+                return bool(ok)
+
+        if keys is not None:
+            if not self.dry_run:
+                pyautogui.hotkey(*keys, _pause=False)
+            return True
+        return False
 
     def close(self) -> None:
         self._pump_stop.set()
@@ -1163,6 +1936,7 @@ class MouseController:
         self._cancel_playback()
         self._prev_action = "none"
         self._pointer_source = None
+        self._reset_velocity_state()
         self._tremor.reset()
         self._abs_monitor = None  # absolute mode re-picks the monitor under the cursor
 
@@ -1191,11 +1965,24 @@ class MouseController:
             action = "none"
         self._lost_since = None
         self.interpolation = bool(cfg.get("cursor_interpolation", False))
-        self.dpi_multiplier = float(getattr(result, "dpi_multiplier", 1.0) or 1.0)
-        # Aim assist: slow the cursor near clickable UI (fine moves only: a fist is a fast travel)
-        if (self.slowdown_provider is not None and action == "move_cursor"
-                and self.dpi_multiplier <= 1.5 and cfg.get("ui_magnet_enabled", True)):
-            self.dpi_multiplier *= self.slowdown_provider(*self.last_screen_pos)
+        scheme = str(cfg.get("movement_scheme", "legacy_shape")).lower()
+        raw_shape = str(getattr(result, "hand_shape", "") or "")
+        if raw_shape in ("precise", "normal", "fast"):
+            self.hand_shape_mode = raw_shape
+        elif raw_shape == "open":
+            self.hand_shape_mode = "precise" if scheme == "velocity" else "normal"
+        elif raw_shape == "fist":
+            self.hand_shape_mode = "fast"
+        elif raw_shape == "half":
+            self.hand_shape_mode = "normal"
+        if scheme == "velocity":
+            self.dpi_multiplier = self._effective_gain
+        else:
+            self.dpi_multiplier = float(getattr(result, "dpi_multiplier", 1.0) or 1.0)
+            # Aim assist: slow the cursor near clickable UI (fine moves only: a fist is a fast travel)
+            if (self.slowdown_provider is not None and action == "move_cursor"
+                    and self.dpi_multiplier <= 1.5 and cfg.get("ui_magnet_enabled", True)):
+                self.dpi_multiplier *= self.slowdown_provider(*self.last_screen_pos)
         if not result.is_moving:
             self._abs_prev = None
 
@@ -1227,11 +2014,24 @@ class MouseController:
         if self._hold_dragging and action != "drag_hold":
             self._mouse_up()
 
+        # Layer 1 Explicit Depth / Hand-Size Clutch (`return_suppression` in {"clutch", "clutch_auto"}):
+        # Freezes cursor movement when hand is pulled back toward body (`hand_size` shrinks below entry ratio),
+        # and re-anchors smoothly without a jump once pushed forward above exit ratio for `clutch_min_hold`.
+        clutched = self._update_depth_clutch(result, cfg, now)
+
         # When not in hand-following movement, clear relative clutch anchor
-        if not result.is_moving or action == "grab":
+        if not result.is_moving or action == "grab" or clutched:
             self._tremor.reset()
             self.anchor_hand_pos = None
             self.anchor_screen_pos = None
+            self._raw_hand_prev = None
+            self._raw_hand_speed = 0.0
+            if self._ret_pending_steps:
+                self._ret_pending_steps.clear()
+            if self.return_state == "confirmed":
+                self.return_state = "released"
+            elif self.return_state == "pending":
+                self.return_state = "none"
             if str(cfg.get("movement_mode", "relative")).lower() == "relative":
                 self._smoothed_pos = None
 
@@ -1252,6 +2052,8 @@ class MouseController:
         elif self.is_playing:
             # Replaying the recorded path: hand movement is ignored until it finishes
             self._tick_playback(now)
+        elif clutched and action == "move_cursor":
+            pass  # Layer 1 depth clutch active: cursor frozen in place
         elif (
             index_tip is None and result.is_moving and result.cursor_point is not None and action != "drag_hold"
             and self._double_click_hold(result, cfg, now)

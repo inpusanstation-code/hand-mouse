@@ -12,13 +12,16 @@ from uuid import uuid4
 import numpy as np
 import torch
 
-from src.gesture_catalog import BY_KEY, CLASSES
+from src.action_bindings import get_action_registry
+from src.gesture_catalog import BY_KEY, CLASSES, is_motion_task
 from src.gesture_models import load_single, publish_bank, training_lock
+from src.motion_mode import train_motion_templates_from_recordings
 from src.recorder import finished_recordings, public_source
 from src.tcn_features import FEATURES, FEATURE_VERSION
 
 
 def selected_labels(keys):
+    get_action_registry()  # ensure custom temporal motions are synced into BY_KEY / CLASSES
     labels = []
     for key in keys:
         if key not in BY_KEY:
@@ -87,6 +90,7 @@ def run(args, training):
                 classes = ["none", label]
                 conds = sorted({int(c) for s in eval_selected for c, y in zip(s["cond"], s["y"]) if c >= 0 and y >= 0})
                 xa, ya, ca = training.pick_with_conds(selected, conds)
+                _, _, wa = training.pick_with_weights(selected, conds)
                 xa_eval, ya_eval = training.pick(eval_selected, conds)
                 held = training.resolve_held_out_conds(conds, opts)
                 training.emit(
@@ -101,7 +105,7 @@ def run(args, training):
                 evaluated_folds: list[int] = []
                 for fold, test in enumerate(held, 1):
                     train_conds = [c for c in conds if c != test]
-                    x, y = training.pick(selected, train_conds)
+                    x, y, w_fold = training.pick_with_weights(selected, train_conds)
                     if test not in conds or not len(y) or len(set(y)) != 2:
                         training.emit("note", text=f"{label}: 조건 {test} 제외 평가는 학습 자료 부족으로 보류합니다.")
                         continue
@@ -114,22 +118,28 @@ def run(args, training):
                         classes=classes,
                         window_stride=opts["window_stride"],
                         device=opts["effective_device"],
+                        sample_weights=w_fold,
                     )
                     sp_fold_spec = None
-                    try:
-                        xs_fold, ys_fold = pick_spatial_from_sessions(sessions, train_conds)
-                        if len(ys_fold) >= 2 and (ys_fold == CLASSES.index(label)).any():
-                            training.emit("substage", text=f"선택 동작 평가 {fold}/{len(held)} · Spatial MLP 보조 모델 학습 중…")
-                            sp_fold_spec, _ = train_binary_spatial_specialist(
-                                xs_fold,
-                                ys_fold,
-                                classes=CLASSES,
-                                target_label=label,
-                                independent=True,
-                                device=opts["effective_device"],
+                    if not is_motion_task(label):
+                        try:
+                            xs_fold, ys_fold, gs_fold, ws_fold = pick_spatial_from_sessions(
+                                sessions, train_conds, return_groups=True, return_weights=True
                             )
-                    except Exception:
-                        sp_fold_spec = None
+                            if len(ys_fold) >= 2 and (ys_fold == CLASSES.index(label)).any():
+                                training.emit("substage", text=f"선택 동작 평가 {fold}/{len(held)} · Spatial MLP 보조 모델 학습 중…")
+                                sp_fold_spec, _ = train_binary_spatial_specialist(
+                                    xs_fold,
+                                    ys_fold,
+                                    classes=CLASSES,
+                                    target_label=label,
+                                    independent=True,
+                                    device=opts["effective_device"],
+                                    groups=gs_fold,
+                                    weights_all=ws_fold,
+                                )
+                        except Exception:
+                            sp_fold_spec = None
                     for session in eval_selected:
                         prob = training.predict(model, session["x"])
                         if sp_fold_spec is not None:
@@ -153,27 +163,47 @@ def run(args, training):
                     classes=classes,
                     window_stride=opts["window_stride"],
                     device=opts["effective_device"],
+                    sample_weights=wa,
                 )
                 # Train dedicated per-gesture binary Spatial MLP (`["none", label]`) for this gesture
                 sp_spec = None
                 sp_spec_doc = None
-                try:
-                    xs_all_sp, ys_all_sp = pick_spatial_from_sessions(sessions, conds)
-                    if len(ys_all_sp) >= 2 and (ys_all_sp == CLASSES.index(label)).any():
-                        training.emit("substage", text="선택 동작 Spatial MLP (0-lag 보조 모델) 학습 및 ONNX 저장 중…")
-                        sp_spec, _ = train_binary_spatial_specialist(
-                            xs_all_sp,
-                            ys_all_sp,
-                            classes=CLASSES,
-                            target_label=label,
-                            independent=True,
-                            device=opts["effective_device"],
+                motion_traj_doc = None
+                if is_motion_task(label):
+                    try:
+                        training.emit("substage", text="시계열 모션 동작 전용 궤적·속도 프로파일 (MotionTrajectory) 템플릿 학습 중…")
+                        rec_dirs = {p.parent for p in paths}
+                        rec_folder = next(iter(rec_dirs)) if rec_dirs else (Path(__file__).resolve().parents[1] / "recordings")
+                        m_res = train_motion_templates_from_recordings(
+                            rec_dir=rec_folder,
+                            target_keys=[label],
+                            output_path=args.output_dir / "motion_templates.json",
                         )
-                        staged_spatial[label] = sp_spec
-                        sp_spec_doc = sp_spec.to_dict()
-                except Exception:
-                    sp_spec = None
-                    sp_spec_doc = None
+                        motion_traj_doc = (m_res.get("templates") or {}).get(label)
+                    except Exception:
+                        motion_traj_doc = None
+                else:
+                    try:
+                        xs_all_sp, ys_all_sp, gs_all_sp, ws_all_sp = pick_spatial_from_sessions(
+                            sessions, conds, return_groups=True, return_weights=True
+                        )
+                        if len(ys_all_sp) >= 2 and (ys_all_sp == CLASSES.index(label)).any():
+                            training.emit("substage", text="선택 동작 Spatial MLP (0-lag 보조 모델) 학습 및 ONNX 저장 중…")
+                            sp_spec, _ = train_binary_spatial_specialist(
+                                xs_all_sp,
+                                ys_all_sp,
+                                classes=CLASSES,
+                                target_label=label,
+                                independent=True,
+                                device=opts["effective_device"],
+                                groups=gs_all_sp,
+                                weights_all=ws_all_sp,
+                            )
+                            staged_spatial[label] = sp_spec
+                            sp_spec_doc = sp_spec.to_dict()
+                    except Exception:
+                        sp_spec = None
+                        sp_spec_doc = None
                 model, final_results, boost_info = training.adaptive_boost_postures(
                     model,
                     xa,
@@ -211,6 +241,7 @@ def run(args, training):
                     "per_gesture": training.per_gesture(results, per_class, accuracy, classes, final_results=final_results, adaptive_boost=boost_info),
                     "per_task": training.per_gesture(results, per_class, accuracy, classes, by_task=True, final_results=final_results, adaptive_boost=boost_info),
                     "spatial_mlp": sp_spec_doc,
+                    "motion_trajectory": motion_traj_doc,
                 }
                 if not args.no_export:
                     path = folder / f"{label}-{uuid4().hex}.onnx"
@@ -238,12 +269,32 @@ def run(args, training):
                 except Exception:
                     pass
                 publish_bank(folder, staged)
-                # Update only the selected gestures' specialist MLPs in spatial_mlp.json (preserving unselected gestures)
+                # Update selected gestures' specialist MLPs in spatial_mlp.json and refresh existing specialists with new negatives
                 try:
                     sp_out_path = args.output_dir / "spatial_mlp.json"
                     if sp_out_path.is_file() and staged_spatial:
                         sp_existing = SpatialMlpModel.load(sp_out_path)
                         merged_specs = dict(sp_existing.specialists)
+                        try:
+                            xs_ref, ys_ref, gs_ref, ws_ref = pick_spatial_from_sessions(
+                                sessions, return_groups=True, return_weights=True
+                            )
+                            if len(ys_ref) >= 2:
+                                for ex_lbl in list(merged_specs.keys()):
+                                    if ex_lbl not in staged_spatial and ex_lbl in CLASSES and (ys_ref == CLASSES.index(ex_lbl)).any():
+                                        ex_spec, _ = train_binary_spatial_specialist(
+                                            xs_ref,
+                                            ys_ref,
+                                            classes=CLASSES,
+                                            target_label=ex_lbl,
+                                            independent=True,
+                                            device=opts["effective_device"],
+                                            groups=gs_ref,
+                                            weights_all=ws_ref,
+                                        )
+                                        merged_specs[ex_lbl] = ex_spec
+                        except Exception:
+                            pass
                         merged_specs.update(staged_spatial)
                         sp_updated = SpatialMlpModel(
                             sp_existing.w1,

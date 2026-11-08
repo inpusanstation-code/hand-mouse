@@ -719,3 +719,502 @@ def clean_recording(
         fh.write(json.dumps(end_record, ensure_ascii=False, separators=(",", ":")) + "\n")
     part_path.replace(out_path)
     return out_path
+
+
+@dataclass
+class FrameQualityScore:
+    """Per-frame input quality score in [0.0, 1.0] for runtime gating and training weighting."""
+
+    score: float
+    reason: str
+    joint_jump: float = 0.0
+    scale_ratio: float = 1.0
+    confidence: float = 1.0
+    edge_margin: float = 0.5
+    near_tracking_loss: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "score": round(float(self.score), 4),
+            "reason": self.reason,
+            "joint_jump": round(float(self.joint_jump), 4),
+            "scale_ratio": round(float(self.scale_ratio), 4),
+            "confidence": round(float(self.confidence), 4),
+            "edge_margin": round(float(self.edge_margin), 4),
+            "near_tracking_loss": bool(self.near_tracking_loss),
+        }
+
+
+def compute_frame_quality_score(
+    landmarks: Any,
+    prev_landmarks: Any = None,
+    *,
+    dt: float = 0.033,
+    confidence: float = 1.0,
+    near_tracking_loss: bool = False,
+) -> FrameQualityScore:
+    """Compute per-frame input quality score in `[0.0, 1.0]` from 4 diagnostic signals:
+    1. `joint_jump`: maximum 2D landmark displacement since the previous valid frame
+    2. `scale_ratio`: sudden relative hand-size change (`max(palm_t/palm_{t-1}, palm_{t-1}/palm_t)`)
+    3. `confidence`: detector/tracker hand confidence score
+    4. `edge_margin`: minimum distance of any landmark to the `[0, 1]` screen boundary
+    """
+    pts = _valid_points(landmarks)
+    if pts is None:
+        return FrameQualityScore(
+            score=0.0,
+            reason="missing_hand",
+            confidence=0.0,
+            edge_margin=0.0,
+            near_tracking_loss=True,
+        )
+
+    conf = float(np.clip(confidence if confidence is not None else 1.0, 0.0, 1.0))
+    palm = _palm_size(pts)
+    span = _hand_span(pts)
+    xs, ys = pts[:, 0], pts[:, 1]
+    edge_margin = float(min(np.min(xs), np.min(ys), 1.0 - np.max(xs), 1.0 - np.max(ys)))
+
+    joint_jump = 0.0
+    scale_ratio = 1.0
+    prev_pts = _valid_points(prev_landmarks)
+    if prev_pts is not None and 0.0 < dt <= 0.25:
+        diffs_2d = np.linalg.norm(pts[:, :2] - prev_pts[:, :2], axis=1)
+        joint_jump = float(np.max(diffs_2d))
+        prev_palm = max(_palm_size(prev_pts), 1e-4)
+        cur_palm = max(palm, 1e-4)
+        scale_ratio = float(max(cur_palm / prev_palm, prev_palm / cur_palm))
+    elif prev_pts is not None and dt > 0.25:
+        near_tracking_loss = True
+
+    penalty = 0.0
+    reasons: list[tuple[float, str]] = []
+
+    # 1. Joint jump penalty (normal med=0.0055, pre-loss p90=0.053, post-reentry med=0.078)
+    if joint_jump > 0.048:
+        p_jump = min(0.70, ((joint_jump - 0.048) / 0.095) * 0.65)
+        if joint_jump > 0.135:
+            p_jump = max(p_jump, 0.62)
+        penalty += p_jump
+        reasons.append((p_jump, "joint_jump"))
+
+    # 2. Hand size sudden change or abnormal palm size penalty (normal med=1.009, pre-loss p90=1.159)
+    p_scale = 0.0
+    if scale_ratio > 1.14:
+        p_scale = min(0.65, ((scale_ratio - 1.14) / 0.30) * 0.60)
+        if scale_ratio > 1.38:
+            p_scale = max(p_scale, 0.58)
+    if palm < 0.014 or palm > 0.68 or span < 0.02 or span > 0.98:
+        p_scale = max(p_scale, 0.60)
+    if p_scale > 0.0:
+        penalty += p_scale
+        reasons.append((p_scale, "scale_spike"))
+
+    # 3. Tracker confidence penalty (pre-loss p10=0.865)
+    if conf < 0.85:
+        p_conf = min(0.65, ((0.85 - conf) / 0.35) * 0.60)
+        if conf < 0.55:
+            p_conf = max(p_conf, 0.60)
+        penalty += p_conf
+        reasons.append((p_conf, "low_confidence"))
+
+    # 4. Screen edge proximity penalty
+    if edge_margin < 0.020:
+        p_edge = min(0.45, ((0.020 - edge_margin) / 0.030) * 0.35)
+        penalty += p_edge
+        reasons.append((p_edge, "edge_proximity"))
+
+    # 5. Pre/post tracking loss proximity penalty
+    if near_tracking_loss:
+        p_loss = 0.28 if (joint_jump > 0.030 or scale_ratio > 1.08 or conf < 0.90) else 0.15
+        penalty += p_loss
+        reasons.append((p_loss, "near_tracking_loss"))
+
+    score = float(np.clip(1.0 - penalty, 0.0, 1.0))
+    if not reasons:
+        primary_reason = "ok"
+    else:
+        reasons.sort(key=lambda item: item[0], reverse=True)
+        primary_reason = reasons[0][1]
+
+    return FrameQualityScore(
+        score=score,
+        reason=primary_reason,
+        joint_jump=joint_jump,
+        scale_ratio=scale_ratio,
+        confidence=conf,
+        edge_margin=edge_margin,
+        near_tracking_loss=near_tracking_loss,
+    )
+
+
+def compute_sequence_quality_scores(
+    frames: list[dict[str, Any]],
+    *,
+    loss_window: int = 2,
+) -> tuple[np.ndarray, np.ndarray, list[FrameQualityScore]]:
+    """Compute per-frame quality scores and training sample weights across a frame sequence.
+
+    Frames within ``loss_window`` frames before or after a missing-hand dropout or frame gap (`dt > 0.12s`)
+    are flagged with `near_tracking_loss=True` and downweighted in training `sample_weights`.
+    """
+    n = len(frames)
+    scores = np.zeros(n, dtype=np.float32)
+    weights = np.ones(n, dtype=np.float32)
+    details: list[FrameQualityScore] = []
+    if n == 0:
+        return scores, weights, details
+
+    pts_list = [_valid_points(f.get("lm")) for f in frames]
+    has_hand = [p is not None for p in pts_list]
+    times = [float(f.get("t", i / 30.0)) for i, f in enumerate(frames)]
+
+    near_loss_mask = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if not has_hand[i]:
+            near_loss_mask[max(0, i - loss_window) : min(n, i + loss_window + 1)] = True
+        elif i > 0 and has_hand[i - 1] and (times[i] - times[i - 1]) > 0.12:
+            near_loss_mask[max(0, i - loss_window) : min(n, i + loss_window + 1)] = True
+
+    prev_pts: np.ndarray | None = None
+    prev_t: float | None = None
+    for i, f in enumerate(frames):
+        pts = pts_list[i]
+        t_i = times[i]
+        conf = float(f.get("score", 1.0) if f.get("score") is not None else 1.0)
+        dt = (t_i - prev_t) if (prev_t is not None and t_i > prev_t) else 0.033
+        fq = compute_frame_quality_score(
+            pts,
+            prev_pts,
+            dt=dt,
+            confidence=conf,
+            near_tracking_loss=bool(near_loss_mask[i]),
+        )
+        details.append(fq)
+        scores[i] = fq.score
+        if pts is None:
+            weights[i] = 0.0
+        else:
+            w = float(np.clip(fq.score, 0.15, 1.0))
+            if near_loss_mask[i]:
+                w = min(w, 0.25)
+            weights[i] = w
+            prev_pts = pts
+            prev_t = t_i
+
+    return scores, weights, details
+
+
+def analyze_lost_mid_frame_logs(failures_dir: Path | str) -> dict[str, Any]:
+    """Forensic analysis across `*-lost_mid_frame.json` failure logs in `failures_dir`."""
+    fdir = Path(failures_dir)
+    all_files = sorted(fdir.glob("*.json"))
+    lost_files = sorted(fdir.glob("*-lost_mid_frame.json"))
+
+    handedness_filter_drop = 0
+    camera_fps_drop = 0
+    size_change_20pct = 0
+    low_score_below_085 = 0
+    lost_ms_list: list[float] = []
+
+    normal_jumps, pre_jumps, post_jumps = [], [], []
+    normal_scales, pre_scales, post_scales = [], [], []
+    normal_scores, pre_scores = [], []
+    normal_edges, pre_edges = [], []
+    normal_q, pre_q, post_q = [], [], []
+
+    for fp in lost_files:
+        doc = json.loads(fp.read_text(encoding="utf-8"))
+        summ = doc.get("summary") or {}
+        lost_ms_list.append(float(summ.get("lost_ms", 0.0)))
+        if int(summ.get("raw_hands_during_loss", 0)) > 0:
+            handedness_filter_drop += 1
+        if int(summ.get("camera_drops_in_window", 0)) > 0:
+            camera_fps_drop += 1
+        sc = float(summ.get("size_change_0.4s", 1.0))
+        if sc < 0.80 or sc > 1.20:
+            size_change_20pct += 1
+        if float(summ.get("score_min_0.4s", 1.0)) < 0.85:
+            low_score_below_085 += 1
+
+        frames = doc.get("frames") or []
+        loss_indices = [i for i, fr in enumerate(frames) if not fr.get("hand")]
+        if not loss_indices:
+            continue
+        first_loss = loss_indices[0]
+        last_loss = first_loss
+        while last_loss + 1 < len(frames) and not frames[last_loss + 1].get("hand"):
+            last_loss += 1
+
+        for k in range(max(1, first_loss - 3), first_loss):
+            if frames[k].get("lm") and frames[k - 1].get("lm"):
+                dt = max(1e-3, float(frames[k].get("t", 0.0)) - float(frames[k - 1].get("t", 0.0)))
+                fq = compute_frame_quality_score(
+                    frames[k]["lm"],
+                    frames[k - 1]["lm"],
+                    dt=dt,
+                    confidence=float(frames[k].get("score", 1.0)),
+                    near_tracking_loss=True,
+                )
+                pre_jumps.append(fq.joint_jump)
+                pre_scales.append(fq.scale_ratio)
+                pre_scores.append(fq.confidence)
+                pre_edges.append(fq.edge_margin)
+                pre_q.append(fq.score)
+
+        if first_loss > 0 and last_loss + 1 < len(frames):
+            if frames[first_loss - 1].get("lm") and frames[last_loss + 1].get("lm"):
+                fq_post = compute_frame_quality_score(
+                    frames[last_loss + 1]["lm"],
+                    frames[first_loss - 1]["lm"],
+                    dt=0.05,
+                    confidence=float(frames[last_loss + 1].get("score", 1.0)),
+                    near_tracking_loss=True,
+                )
+                post_jumps.append(fq_post.joint_jump)
+                post_scales.append(fq_post.scale_ratio)
+                post_q.append(fq_post.score)
+
+        for k in range(1, max(1, first_loss - 10)):
+            if frames[k].get("lm") and frames[k - 1].get("lm"):
+                dt = max(1e-3, float(frames[k].get("t", 0.0)) - float(frames[k - 1].get("t", 0.0)))
+                fq_norm = compute_frame_quality_score(
+                    frames[k]["lm"],
+                    frames[k - 1]["lm"],
+                    dt=dt,
+                    confidence=float(frames[k].get("score", 1.0)),
+                    near_tracking_loss=False,
+                )
+                normal_jumps.append(fq_norm.joint_jump)
+                normal_scales.append(fq_norm.scale_ratio)
+                normal_scores.append(fq_norm.confidence)
+                normal_edges.append(fq_norm.edge_margin)
+                normal_q.append(fq_norm.score)
+
+    def _stats(arr: list[float]) -> dict[str, float]:
+        if not arr:
+            return {"count": 0}
+        a = np.asarray(arr, dtype=np.float64)
+        return {
+            "count": int(len(a)),
+            "min": round(float(np.min(a)), 4),
+            "p10": round(float(np.percentile(a, 10)), 4),
+            "median": round(float(np.median(a)), 4),
+            "p90": round(float(np.percentile(a, 90)), 4),
+            "max": round(float(np.max(a)), 4),
+        }
+
+    return {
+        "total_failure_logs": len(all_files),
+        "lost_mid_frame_logs": len(lost_files),
+        "cause_breakdown": {
+            "handedness_filter_drop": handedness_filter_drop,
+            "camera_fps_drop": camera_fps_drop,
+            "size_change_over_20pct": size_change_20pct,
+            "confidence_below_085": low_score_below_085,
+        },
+        "lost_ms": _stats(lost_ms_list),
+        "joint_jump": {
+            "normal": _stats(normal_jumps),
+            "pre_loss_3f": _stats(pre_jumps),
+            "post_reentry_1f": _stats(post_jumps),
+        },
+        "scale_ratio": {
+            "normal": _stats(normal_scales),
+            "pre_loss_3f": _stats(pre_scales),
+            "post_reentry_1f": _stats(post_scales),
+        },
+        "confidence": {
+            "normal": _stats(normal_scores),
+            "pre_loss_3f": _stats(pre_scores),
+        },
+        "edge_margin": {
+            "normal": _stats(normal_edges),
+            "pre_loss_3f": _stats(pre_edges),
+        },
+        "quality_score": {
+            "normal": _stats(normal_q),
+            "pre_loss_3f": _stats(pre_q),
+            "post_reentry_1f": _stats(post_q),
+        },
+    }
+
+
+def find_confident_learning_candidates(
+    sessions: list[dict[str, Any]],
+    classes: list[str],
+    *,
+    output_path: Path | str | None = None,
+    max_candidates: int = 250,
+) -> dict[str, Any]:
+    """Identify suspected label-error / high-loss frames via Confident Learning out-of-sample probabilities.
+
+    Never deletes samples automatically; writes a human-reviewable report (`models/confident_learning_candidates.json`)
+    with per-class self-confidence thresholds, the Confident Joint matrix, and ranked candidate frames.
+    """
+    from src.spatial_mlp import ensure_session_spatial_features, train_spatial_mlp
+
+    num_classes = len(classes)
+    records_meta: list[tuple[int, int]] = []
+    xs_list: list[np.ndarray] = []
+    ys_list: list[np.ndarray] = []
+    cond_list: list[np.ndarray] = []
+
+    for s_idx, s in enumerate(sessions):
+        sf = ensure_session_spatial_features(s)
+        y = np.asarray(s["y"], dtype=np.int64)
+        cond = np.asarray(s["cond"], dtype=np.int64)
+        valid = (y >= 0) & (y < num_classes) & np.any(sf != 0.0, axis=1)
+        idx_valid = np.flatnonzero(valid)
+        if len(idx_valid) == 0:
+            continue
+        xs_list.append(sf[idx_valid])
+        ys_list.append(y[idx_valid])
+        cond_list.append(cond[idx_valid])
+        for f_i in idx_valid:
+            records_meta.append((s_idx, int(f_i)))
+
+    if not xs_list:
+        return {"total_evaluated": 0, "candidates": []}
+
+    x_all = np.concatenate(xs_list, axis=0)
+    y_all = np.concatenate(ys_list, axis=0)
+    c_all = np.concatenate(cond_list, axis=0)
+    n_total = len(y_all)
+    oos_probs = np.zeros((n_total, num_classes), dtype=np.float64)
+
+    unique_conds = sorted({int(c) for c in c_all if int(c) >= 0})
+    if len(unique_conds) >= 3:
+        # 5-fold group cross-validation across condition groups for out-of-sample probabilities
+        n_folds = min(5, len(unique_conds))
+        fold_groups = [unique_conds[i::n_folds] for i in range(n_folds)]
+        for held_conds in fold_groups:
+            te_mask = np.isin(c_all, held_conds)
+            tr_mask = ~te_mask
+            if not np.any(te_mask) or not np.any(tr_mask):
+                continue
+            model_f, _ = train_spatial_mlp(
+                x_all,
+                y_all,
+                classes=classes,
+                precomputed_split=(tr_mask, te_mask),
+                compute_random_comparison=False,
+            )
+            oos_probs[te_mask] = model_f.predict_proba(x_all[te_mask])
+        unassigned_mask = c_all < 0
+        if np.any(unassigned_mask):
+            model_full, _ = train_spatial_mlp(
+                x_all,
+                y_all,
+                classes=classes,
+                groups=c_all,
+                split_mode="group_leave_out",
+                compute_random_comparison=False,
+            )
+            oos_probs[unassigned_mask] = model_full.predict_proba(x_all[unassigned_mask])
+    else:
+        model_full, _ = train_spatial_mlp(
+            x_all,
+            y_all,
+            classes=classes,
+            groups=c_all,
+            split_mode="group_leave_out",
+            compute_random_comparison=False,
+        )
+        oos_probs = model_full.predict_proba(x_all)
+
+    # Per-class expected self-confidence threshold t_c (Northcutt et al.)
+    class_thresholds: dict[str, float] = {}
+    t_vec = np.zeros(num_classes, dtype=np.float64)
+    for c_idx, cls_name in enumerate(classes):
+        cls_mask = y_all == c_idx
+        if np.any(cls_mask):
+            t_c = float(np.mean(oos_probs[cls_mask, c_idx]))
+        else:
+            t_c = 0.5
+        t_vec[c_idx] = max(0.25, min(0.92, t_c))
+        class_thresholds[cls_name] = round(float(t_vec[c_idx]), 4)
+
+    # Confident Joint matrix C[given_label, predicted_true_label]
+    confident_joint = np.zeros((num_classes, num_classes), dtype=np.int64)
+    candidates: list[dict[str, Any]] = []
+
+    for idx in range(n_total):
+        given_c = int(y_all[idx])
+        probs_i = oos_probs[idx]
+        pred_c = int(np.argmax(probs_i))
+        pred_prob = float(probs_i[pred_c])
+        self_prob = float(probs_i[given_c])
+
+        if pred_prob >= t_vec[pred_c]:
+            confident_joint[given_c, pred_c] += 1
+
+        if pred_c != given_c and pred_prob >= t_vec[pred_c] and self_prob < 0.35:
+            ce_loss = float(-np.log(max(self_prob, 1e-6)))
+            margin = float(pred_prob - self_prob)
+            s_idx, f_idx = records_meta[idx]
+            s = sessions[s_idx]
+            rec_name = Path(str(s.get("path", f"session_{s_idx}"))).name
+            frame = s["frames"][f_idx]
+            lab = frame.get("label") or {}
+            q_scores = s.get("quality_scores")
+            q_val = float(q_scores[f_idx]) if q_scores is not None and f_idx < len(q_scores) else 1.0
+
+            given_name = classes[given_c]
+            pred_name = classes[pred_c]
+            if q_val < 0.55:
+                issue_kind = "low_input_quality_artifact"
+            elif given_name != "none" and pred_name == "none":
+                issue_kind = "unpinched_or_missed_execution"
+            elif given_name == "none" and pred_name != "none":
+                issue_kind = "lingering_gesture_in_neutral"
+            else:
+                issue_kind = "adjacent_finger_confusion"
+
+            candidates.append({
+                "recording": rec_name,
+                "frame_index": f_idx,
+                "t": round(float(frame.get("t", 0.0)), 3),
+                "condition": int(c_all[idx]),
+                "phase": str(lab.get("phase") or ""),
+                "raw_label": str(lab.get("raw_target") or lab.get("target") or given_name),
+                "given_label": given_name,
+                "suggested_label": pred_name,
+                "self_confidence": round(self_prob, 4),
+                "suggested_confidence": round(pred_prob, 4),
+                "confidence_margin": round(margin, 4),
+                "cross_entropy_loss": round(ce_loss, 4),
+                "input_quality_score": round(q_val, 4),
+                "issue_kind": issue_kind,
+            })
+
+    candidates.sort(key=lambda item: (item["confidence_margin"], item["cross_entropy_loss"]), reverse=True)
+    by_kind: dict[str, int] = {}
+    by_pair: dict[str, int] = {}
+    for cand in candidates:
+        k = cand["issue_kind"]
+        by_kind[k] = by_kind.get(k, 0) + 1
+        pair_key = f"{cand['given_label']} -> {cand['suggested_label']}"
+        by_pair[pair_key] = by_pair.get(pair_key, 0) + 1
+
+    report_doc = {
+        "schema": "manux-confident-learning/1",
+        "policy": "human_review_only_no_auto_delete",
+        "total_evaluated_frames": int(n_total),
+        "total_flagged_candidates": len(candidates),
+        "flagged_ratio": round(len(candidates) / max(1, n_total), 4),
+        "class_self_confidence_thresholds": class_thresholds,
+        "confident_joint": {
+            classes[i]: {classes[j]: int(confident_joint[i, j]) for j in range(num_classes)}
+            for i in range(num_classes)
+        },
+        "counts_by_issue_kind": by_kind,
+        "counts_by_confusion_pair": dict(sorted(by_pair.items(), key=lambda kv: kv[1], reverse=True)[:15]),
+        "top_candidates": candidates[:max_candidates],
+    }
+    if output_path is not None:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(report_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report_doc
+

@@ -101,6 +101,60 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "tremor_deadzone": 0.002,
     "active_margin": 0.30,
     "movement_mode": "relative",
+    "movement_scheme": "legacy_shape",   # "legacy_shape" | "velocity"
+    "return_suppression": "off",         # "off" | "clutch" | "clutch_auto"
+    "velocity_gain_min": 0.55,
+    "velocity_gain_mid": 2.8,
+    "velocity_gain_max": 6.5,
+    "velocity_deadzone": 0.02,
+    "velocity_stationary_speed": 0.05,
+    "velocity_mid_speed": 0.40,
+    "velocity_high_speed": 1.30,
+    "velocity_ema_alpha": 0.35,
+    "velocity_slew_up": 14.0,
+    "velocity_slew_down": 18.0,
+    "shape_mode_curl_smooth": 0.25,
+    "shape_mode_precise_enter": 1.50,
+    "shape_mode_precise_exit": 1.34,
+    "shape_mode_fast_enter": 0.90,
+    "shape_mode_fast_exit": 1.08,
+    "shape_mode_min_hold": 0.20,
+    "velocity_mode_precise_min": 0.40,
+    "velocity_mode_precise_mid": 1.8,
+    "velocity_mode_precise_max": 4.0,
+    "velocity_mode_fast_min": 0.75,
+    "velocity_mode_fast_mid": 3.8,
+    "velocity_mode_fast_max": 9.0,
+    "velocity_c2f_enabled": True,
+    "velocity_c2f_entry_speed": 0.45,
+    "velocity_c2f_aim_speed": 0.32,
+    "velocity_c2f_decel_thresh": 0.80,
+    "velocity_c2f_window": 0.28,
+    "velocity_c2f_gain_scale": 0.75,
+    "velocity_c2f_slew_boost": 2.2,
+    "velocity_adaptive_filter": True,
+    "velocity_filter_min_cutoff": 1.1,
+    "velocity_filter_c2f_cutoff": 0.80,
+    "velocity_filter_beta": 14.0,
+    "ui_magnet_max_gain": 1.8,
+    "ui_magnet_precision_scale": 0.85,
+    "edge_reclutch_enabled": True,
+    "edge_reclutch_margin": 0.06,
+    "edge_reclutch_release_margin": 0.12,
+    "clutch_size_ema_alpha": 0.30,
+    "clutch_depth_enter_ratio": 0.80,
+    "clutch_depth_exit_ratio": 0.86,
+    "clutch_min_hold": 0.15,
+    "clutch_max_hold": 1.20,
+    "return_auto_min_fwd_dist": 0.035,
+    "return_auto_min_fwd_speed": 0.16,
+    "return_auto_post_window": 0.65,
+    "return_auto_min_angle_deg": 120.0,
+    "return_auto_buffer_s": 0.085,
+    "return_auto_confirm_dist": 0.020,
+    "return_auto_min_speed_ratio": 0.15,
+    "return_auto_release_pause": 0.15,
+    "return_auto_max_freeze": 1.10,
     "relative_gain_min": 0.35,
     "relative_gain_max": 1.2,
     "relative_accel_speed_low": 0.1,
@@ -443,6 +497,12 @@ class GestureEngine:
         # Usual pointing direction of the open hand (radians, 0 = up in the image), learned slowly.
         self._usual_dir: Optional[float] = None
         self._usual_t: Optional[float] = None
+        # Discrete 3-state hand-shape mode ("precise" | "normal" | "fast") for movement_scheme="velocity"
+        self._shape_mode: str = "normal"
+        self._shape_mode_cand: Optional[str] = None
+        self._shape_mode_cand_since: float = -1e9
+        self._shape_mode_changed_at: float = -1e9
+        self._shape_mode_curl_s: Optional[float] = None
 
     @property
     def is_pinched(self) -> bool:
@@ -566,6 +626,8 @@ class GestureEngine:
         self._desktop_since = None
         self._desktop_armed = True
         self._curl_s = None
+        self._shape_mode_cand = None
+        self._shape_mode_curl_s = None
 
     @staticmethod
     def _dist_3d(a: Point3D, b: Point3D) -> float:
@@ -619,6 +681,68 @@ class GestureEngine:
         t = max(0.0, min(1.0, (c_open - curl) / (c_open - c_fist)))
         t = t ** max(0.1, float(self.config.get("shape_dpi_curve", 1.0)))
         return lo * (hi / lo) ** t
+
+    def _update_shape_mode(self, mean_curl: float, is_fist: bool, now: float) -> str:
+        """
+        Discrete 3-state hand-shape mode selector ("precise" | "normal" | "fast")
+        with entry/exit curl hysteresis and minimum hold time (`shape_mode_min_hold`).
+        Used when `movement_scheme == "velocity"` so hand shape selects the velocity
+        gain curve bounds without acting as a noisy continuous accelerator pedal.
+        """
+        k_mode = max(0.05, min(1.0, float(self.config.get("shape_mode_curl_smooth", 0.25))))
+        self._shape_mode_curl_s = (
+            mean_curl
+            if self._shape_mode_curl_s is None
+            else self._shape_mode_curl_s + k_mode * (mean_curl - self._shape_mode_curl_s)
+        )
+        c = self._shape_mode_curl_s
+
+        precise_enter = float(self.config.get("shape_mode_precise_enter", 1.50))
+        precise_exit = float(self.config.get("shape_mode_precise_exit", 1.34))
+        fast_enter = float(self.config.get("shape_mode_fast_enter", 0.90))
+        fast_exit = float(self.config.get("shape_mode_fast_exit", 1.08))
+        min_hold = max(0.0, float(self.config.get("shape_mode_min_hold", 0.20)))
+
+        cur = self._shape_mode
+        if cur == "precise":
+            if is_fist or c <= fast_enter:
+                desired = "fast"
+            elif c <= precise_exit:
+                desired = "normal"
+            else:
+                desired = "precise"
+        elif cur == "fast":
+            if not is_fist and c >= precise_enter:
+                desired = "precise"
+            elif not is_fist and c >= fast_exit:
+                desired = "normal"
+            else:
+                desired = "fast"
+        else:
+            if is_fist or c <= fast_enter:
+                desired = "fast"
+            elif c >= precise_enter:
+                desired = "precise"
+            else:
+                desired = "normal"
+
+        if desired == cur:
+            self._shape_mode_cand = None
+            return cur
+
+        if self._shape_mode_cand != desired:
+            self._shape_mode_cand = desired
+            self._shape_mode_cand_since = now
+
+        if (
+            (now - self._shape_mode_cand_since) >= min_hold
+            and (now - self._shape_mode_changed_at) > max(min_hold, 2.5 * min_hold)
+        ):
+            self._shape_mode = desired
+            self._shape_mode_changed_at = now
+            self._shape_mode_cand = None
+
+        return self._shape_mode
 
     def finger_curl_ratios(self, pts: Sequence[Point3D]) -> Tuple[float, ...]:
         """
@@ -781,6 +905,8 @@ class GestureEngine:
             self._drag_since = None
             self._secondary_since.clear()
             action = str(self._gesture_cfg("fist").get("action", "move_cursor"))
+            is_vel = str(self.config.get("movement_scheme", "legacy_shape")).lower() == "velocity"
+            fist_shape = self._update_shape_mode(sum(ratios) / 4.0, True, now) if is_vel else "fist"
             return GestureResult(
                 active_gesture="fist",
                 action=action,
@@ -789,7 +915,7 @@ class GestureEngine:
                 distances=distances,
                 is_moving=action in MOVING_ACTIONS,
                 dpi_multiplier=max(0.1, float(self.config.get("fist_dpi_multiplier", 30.0))),
-                hand_shape="fist",
+                hand_shape=fist_shape,
             )
 
         # 0.5 Show desktop (Win+D): thumb tucked across the palm, the other four fingers
@@ -1491,6 +1617,11 @@ class GestureEngine:
         holding = (now - self._scroll_released_at) < float(self.config.get("scroll_cursor_hold", 0.35))
         if not near_pinch and not holding and self._is_enabled("no_pinch"):
             action = str(self._gesture_cfg("no_pinch").get("action", "move_cursor"))
+            is_vel = str(self.config.get("movement_scheme", "legacy_shape")).lower() == "velocity"
+            if is_vel:
+                shape_label = self._update_shape_mode(mean_curl, False, now)
+            else:
+                shape_label = "fist" if shape_mult >= 0.9 * self._fist_mult() else "half" if curled else "open"
             return GestureResult(
                 active_gesture="no_pinch",
                 action=action,
@@ -1499,7 +1630,7 @@ class GestureEngine:
                 distances=distances,
                 is_moving=action in MOVING_ACTIONS,
                 dpi_multiplier=shape_mult if (curled and not self._index_pinched and not self._secondary_since) else 1.0,
-                hand_shape=("fist" if shape_mult >= 0.9 * self._fist_mult() else "half" if curled else "open"),
+                hand_shape=shape_label,
             )
 
         return GestureResult(

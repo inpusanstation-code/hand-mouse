@@ -854,6 +854,8 @@ def _get_file_spatial_bins(path: Path) -> Dict[str, List[List[float]]]:
 
 
 def dataset_summary(rec_dir: Path = REC_DIR, *, compute_quality: bool = True) -> Dict[str, Any]:
+    from src.action_bindings import get_action_registry
+    get_action_registry()
     folder = Path(rec_dir)
     files = sorted(folder.glob("*.jsonl.gz"))
     excluded = set(load_training_selection(folder).get("excluded", []))
@@ -1536,7 +1538,12 @@ def gesture_rows(
     report: Optional[Dict[str, Any]],
     improvement: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """One row per gesture: data, scores and advice, for the screen."""
+    """One row per gesture: data, scores, shortcut binding, track format, and advice, for the screen."""
+    from src.action_bindings import get_action_registry
+    from src.motion_mode import MotionTrajectoryModel
+
+    reg = get_action_registry()
+    motion_templates = MotionTrajectoryModel.load().templates
     rows = []
     pg = (report or {}).get("per_gesture", {})
     disabled = set((report or {}).get("disabled_gestures") or ())
@@ -1548,6 +1555,8 @@ def gesture_rows(
     )
     for key, name in NAMES.items():
         task = BY_KEY[key]
+        track = task.track
+        binding = reg.get_binding(key)
         d = summary["per_gesture"].get(key, {"reps": 0, "postures": {}, "minutes": 0.0})
         latest_file = ""
         for vf in valid_files:
@@ -1559,11 +1568,13 @@ def gesture_rows(
                 latest_file = str(vf.get("file") or "")
                 break
         specialist = (report or {}).get("specialists", {}).get(task.label)
+        motion_tmpl = (specialist or {}).get("motion_trajectory") or motion_templates.get(key)
+        has_motion_tmpl = isinstance(motion_tmpl, dict) and bool(motion_tmpl.get("prototype_trajectory_x"))
         is_disabled = (task.label in disabled) and (specialist is None)
         current = {} if is_disabled else (specialist or report or {})
         m = {} if is_disabled else current.get("per_task", {}).get(key, current.get("per_gesture", pg).get(task.label, {}))
         classes = [c for c in current.get("classes", list(pg)) if c not in disabled or specialist is not None]
-        is_trained = bool(specialist) or (not is_disabled and task.label != "none" and task.label in classes)
+        is_trained = bool(specialist) or has_motion_tmpl or (not is_disabled and task.label != "none" and task.label in classes)
         stale = bool(current) and summary.get("newest", 0) > current.get("mtime", 0)
         cur_mode = current.get("training_mode")
         cur_folds = current.get("folds") or []
@@ -1577,14 +1588,34 @@ def gesture_rows(
             )
         )
         mlp_tag = " · 전용 MLP" if has_sp_spec else ""
+        traj_tag = " · 시계열 궤적 템플릿" if has_motion_tmpl else ""
         if specialist:
-            model_text = "선택 동작 모델 · " + str(specialist.get("trained", "")) + mlp_tag + mode_tag
+            model_text = "선택 동작 모델 · " + str(specialist.get("trained", "")) + traj_tag + mlp_tag + mode_tag
         elif is_disabled:
             model_text = "학습 초기화됨 · 현재 규칙으로 동작"
         elif task.label in classes:
-            model_text = "TCN 학습됨" + mlp_tag + mode_tag
+            model_text = "TCN 학습됨" + traj_tag + mlp_tag + mode_tag
+        elif has_motion_tmpl:
+            model_text = f"시계열 궤적 템플릿 학습됨 ({motion_tmpl.get('trained_at', '')})"
         else:
             model_text = "TCN 학습 전 · 현재 규칙으로 동작"
+
+        if track == "motion":
+            training_format_badge = "시계열 모션 학습 (16-step 궤적·속도 프로파일 + TCN)"
+        elif track == "static":
+            training_format_badge = "정지 동작·핀치 학습 (96D Spatial MLP + TCN)"
+        else:
+            training_format_badge = "연속 이동·중립 배경 데이터 (오작동 억제용)"
+
+        shortcut_badge = "포인터 이동 · 오답 억제" if task.free else str(binding.get("badge") or "미지정")
+        shortcut_detail = "커서 이동 및 클릭 오작동 억제용 배경 동작" if task.free else str(binding.get("detail") or "")
+        motion_metrics_text = ""
+        if has_motion_tmpl and isinstance(motion_tmpl, dict):
+            tr_rate = float(motion_tmpl.get("trajectory_recognition_rate", 0.0)) * 100.0
+            ret_rate = float(motion_tmpl.get("return_suppression_rate", 1.0)) * 100.0
+            mean_spd = float(motion_tmpl.get("mean_speed", 0.0))
+            motion_metrics_text = f"시계열 궤적 일치 {tr_rate:.0f}% · 복귀(역방향) 오발화 차단 {ret_rate:.0f}% · 평균 속도 {mean_spd:.2f}"
+
         task_imp = {} if is_disabled else (imp_by_task.get(key) or {})
         diag_summary = str(task_imp.get("diagnosis_summary") or "")
         if not diag_summary and not is_disabled and is_trained and report is not None:
@@ -1592,6 +1623,17 @@ def gesture_rows(
             diag_summary = _diagnose_label_performance(cur_l, {"trained": False}, task.label).get("diagnosis_summary", "")
         row = {"key": key, "name": name, "reps": d["reps"], "postures": len(d["postures"]),
                "category": task.category, "instruction": task.do,
+               "track": track,
+               "training_format_badge": training_format_badge,
+               "shortcut_badge": shortcut_badge,
+               "shortcut_detail": shortcut_detail,
+               "action_type": str(binding.get("action_type", "mouse_action")),
+               "action_value": str(binding.get("action_value", "none")),
+               "app_overrides": list(binding.get("app_overrides") or []),
+               "binding_enabled": bool(binding.get("enabled", True)),
+               "is_custom_motion": key in reg.custom_motions,
+               "has_motion_template": has_motion_tmpl,
+               "motion_metrics_text": motion_metrics_text,
                "model_text": model_text,
                "can_train": task.label != "none", "label": task.label,
                "is_trained": is_trained, "is_disabled": is_disabled,
@@ -1709,6 +1751,8 @@ class TrainingJob:
         if offline_augment:
             args.append("--offline-augment")
         if gestures is not None:
+            from src.action_bindings import get_action_registry
+            get_action_registry()
             if not gestures or any(key not in BY_KEY or BY_KEY[key].label == "none" for key in gestures):
                 raise ValueError("학습할 동작을 선택하세요. 중립은 오답 자료로 함께 사용됩니다.")
             args.extend(["--gestures", *gestures])
@@ -3378,6 +3422,7 @@ def _build_playback_frames(
     thresholds_by_label: Dict[str, float],
     default_thr: float,
     issues: List[Dict[str, Any]],
+    y_labels: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Build per-frame hand + arm/shoulder skeleton & event descriptors for the interactive simulator media player."""
     import math
@@ -3507,6 +3552,7 @@ def _build_playback_frames(
         lab = rf.get("label") or {}
         target_lbl = str(lab.get("target") or "none")
         task_lbl = str(lab.get("task") or target_lbl or "none")
+        refined_target = str(lab.get("refined_target") or "")
         condition_str = str(lab.get("condition") or "")
         target_pos_str = str(lab.get("position") or "")
         screen_zone = _classify_screen_zone(palm_pt[0], palm_pt[1]) if palm_pt else ""
@@ -3516,11 +3562,41 @@ def _build_playback_frames(
         phase = str(lab.get("phase") or "")
         rep_val = lab.get("rep")
         rep_num = int(rep_val) if isinstance(rep_val, int) else -1
+
+        task_obj = BY_KEY.get(task_lbl)
+        is_guided_target = task_obj is not None and not task_obj.free and task_obj.label not in ("none", "idle", "")
+        scheduled_cls = (
+            task_obj.label
+            if is_guided_target
+            else (target_lbl if target_lbl not in ("none", "idle", "") else "")
+        )
+        y_val = int(y_labels[i]) if (y_labels is not None and i < len(y_labels)) else None
+
+        if phase in ("waiting", "paused") or target_lbl == "idle":
+            zone = "waiting"
+            zone_ko = "세트 대기 구간"
+        elif phase == "do" and scheduled_cls:
+            if refined_target == "transition" or (y_val is not None and y_val <= 0):
+                zone = "transition"
+                zone_ko = "전환 과정 (진입·해제 경계)"
+            else:
+                zone = "judgment"
+                zone_ko = "판정 구간"
+        elif phase in ("prep", "prepare", "rest"):
+            zone = "transition"
+            zone_ko = "전환 과정 (준비·복귀 이동)"
+        else:
+            zone = "transition"
+            zone_ko = "자유 이동 / 중립"
+
         phase_ko = {
-            "do": f"동작 수행 중" + (f" (#{rep_num}회차)" if rep_num > 0 else ""),
-            "rest": "동작 사이 휴식/대기",
-            "prepare": "자세 준비 구간",
-            "prep": "자세 준비 구간",
+            "do": (
+                ("판정 구간 · 동작 수행 중" if zone == "judgment" else "전환 과정 · 진입/해제 경계")
+                + (f" (#{rep_num}회차)" if rep_num > 0 else "")
+            ),
+            "rest": "전환 과정 · 동작 사이 복귀/휴식",
+            "prepare": "전환 과정 · 자세 준비 구간",
+            "prep": "전환 과정 · 자세 준비 구간",
             "waiting": "다음 세트 시작 대기 (Space 키 대기 구간)",
             "paused": "녹화 일시정지 구간",
             "free": "자유 이동 (오작동 방지)",
@@ -3528,66 +3604,80 @@ def _build_playback_frames(
         }.get(phase, phase or "대기")
 
         rule = rf.get("rule") or {}
-        rule_targets = _extract_rule_targets(rule)
-        rule_action = str(rule.get("action") or "idle")
+        raw_rule_targets = _extract_rule_targets(rule)
+        interfering_targets: List[str] = []
+        if is_guided_target:
+            interfering_targets = list(
+                rule.get("interfering_targets")
+                or ([t for t in raw_rule_targets if t != task_obj.key] if phase == "do" else [])
+            )
+            if phase == "do" and (task_obj.key in raw_rule_targets or zone == "judgment"):
+                rule_targets = [task_obj.key]
+                rule_action = task_obj.action or task_obj.label
+            else:
+                rule_targets = []
+                rule_action = "none"
+        elif phase in ("prep", "prepare", "rest", "waiting", "paused"):
+            rule_targets = []
+            rule_action = "none"
+        else:
+            rule_targets = raw_rule_targets
+            rule_action = str(rule.get("action") or "idle")
 
         best_cls = "none"
         best_p = 0.0
         model_hit = False
         if probs is not None and i < len(probs):
-            for ci in non_none_indices:
-                pv = float(probs[i, ci])
-                if pv > best_p:
-                    best_p = pv
-                    best_cls = CLASSES[ci]
-            lbl_thr = float(thresholds_by_label.get(best_cls, default_thr))
-            model_hit = best_p >= lbl_thr and best_cls != "none"
+            if scheduled_cls and scheduled_cls in CLASSES:
+                ci = CLASSES.index(scheduled_cls)
+                best_p = float(probs[i, ci])
+                best_cls = scheduled_cls if best_p > 0.0 else "none"
+                lbl_thr = float(thresholds_by_label.get(scheduled_cls, default_thr))
+                model_hit = best_p >= lbl_thr
+            else:
+                for ci in non_none_indices:
+                    pv = float(probs[i, ci])
+                    if pv > best_p:
+                        best_p = pv
+                        best_cls = CLASSES[ci]
+                lbl_thr = float(thresholds_by_label.get(best_cls, default_thr))
+                model_hit = best_p >= lbl_thr and best_cls != "none"
 
         vx = float(features[i, 130]) if features is not None and i < len(features) else 0.0
         vy = float(features[i, 131]) if features is not None and i < len(features) else 0.0
 
         active_ev = "none"
-        if model_hit:
-            active_ev = best_cls
-        elif rule_targets:
-            active_ev = BY_KEY[rule_targets[0]].label if rule_targets[0] in BY_KEY else rule_targets[0]
-        elif phase == "do" and target_lbl not in ("none", "idle", ""):
-            active_ev = target_lbl
+        if scheduled_cls:
+            if zone == "judgment":
+                active_ev = scheduled_cls
+        else:
+            if model_hit:
+                active_ev = best_cls
+            elif rule_targets:
+                active_ev = BY_KEY[rule_targets[0]].label if rule_targets[0] in BY_KEY else rule_targets[0]
 
         pinch_joints = _PINCH_JOINT_MAP.get(active_ev, [])
         swipe_dir = _SWIPE_DIR_MAP.get(active_ev, "")
         sign_joints = _SIGN_JOINT_MAP.get(active_ev, [])
 
-        if not pinch_joints and hand_ok and features is not None and i < len(features):
-            d_idx, d_mid, d_ring = float(features[i, 126]), float(features[i, 127]), float(features[i, 128])
-            if d_idx < 0.24 and d_mid < 0.24:
-                pinch_joints = [4, 8, 12]
-            elif d_idx < 0.22:
-                pinch_joints = [4, 8]
-            elif d_mid < 0.22:
-                pinch_joints = [4, 12]
-            elif d_ring < 0.22:
-                pinch_joints = [4, 16]
-
-        if not swipe_dir and hand_ok:
-            if vx < -1.35:
-                swipe_dir = "left"
-            elif vx > 1.35:
-                swipe_dir = "right"
-            elif vy > 1.35:
-                swipe_dir = "down"
-
         if pinch_joints:
             ev_kind = "pinch"
-            ev_name = NAMES.get(active_ev, "핀치 감지") if active_ev in _PINCH_JOINT_MAP else "손가락 핀치 근접"
-            ev_text = f"PINCH · {ev_name}"
+            ev_name = NAMES.get(active_ev, active_ev)
+            ev_text = f"판정 구간 · PINCH ({ev_name})"
         elif swipe_dir:
             ev_kind = "swipe"
             dir_ko = {"left": "← 왼쪽 스와이프", "right": "→ 오른쪽 스와이프", "down": "↓ 아래로 스와이프"}.get(swipe_dir, "스와이프")
-            ev_text = f"SWIPE · {dir_ko}"
+            ev_text = f"판정 구간 · SWIPE ({dir_ko})"
         elif sign_joints:
             ev_kind = "sign"
-            ev_text = f"SIGN · {NAMES.get(active_ev, active_ev)}"
+            ev_text = f"판정 구간 · SIGN ({NAMES.get(active_ev, active_ev)})"
+        elif zone == "transition" and scheduled_cls:
+            ev_kind = "transition"
+            tgt_ko = NAMES.get(task_lbl, NAMES.get(scheduled_cls, scheduled_cls))
+            ev_text = f"전환 과정 · {tgt_ko} ({'진입·해제 경계' if phase == 'do' else '준비·복귀 이동'})"
+        elif zone == "waiting":
+            ev_kind = "none"
+            ev_text = "세트 전환 대기 구간"
         else:
             ev_kind = "none"
             ev_text = "대기 / 커서 이동" if hand_ok else ("팔·어깨만 감지됨" if pose_present else "손 감지 안 됨")
@@ -3619,8 +3709,14 @@ def _build_playback_frames(
                 target_lbl,
                 "세트 전환 대기"
                 if (target_lbl == "idle" or phase in ("waiting", "paused"))
-                else ("중립/이동" if target_lbl in ("none", "") else target_lbl),
+                else (
+                    f"{NAMES.get(task_lbl, NAMES.get(scheduled_cls, scheduled_cls))} (전환 과정)"
+                    if (scheduled_cls and zone == "transition")
+                    else ("중립/이동" if target_lbl in ("none", "") else target_lbl)
+                ),
             ),
+            "zone": zone,
+            "zone_ko": zone_ko,
             "phase": phase,
             "phase_ko": phase_ko,
             "rep": rep_num,
@@ -3631,6 +3727,8 @@ def _build_playback_frames(
             "rule_action": rule_action,
             "rule_targets": rule_targets,
             "rule_names": [NAMES.get(k, k) for k in rule_targets],
+            "interfering_targets": interfering_targets,
+            "interfering_names": [NAMES.get(k, k) for k in interfering_targets],
             "vx": round(vx, 2),
             "vy": round(vy, 2),
             "pinch_joints": pinch_joints,
@@ -3728,18 +3826,55 @@ def simulate_model_on_recording(
 
     specialists = read_bank(bank_dir) if (sim_mode == "composite" and (bank_dir / "manifest.json").is_file()) else {}
     if base_pred is None and not specialists:
+        sess_y = session.get("y")
         pb_frames = _build_playback_frames(
-            raw_frames, session.get("features"), None, {}, DEFAULT_THRESHOLD, eval_info.get("issues", [])
+            raw_frames,
+            session.get("features"),
+            None,
+            {},
+            DEFAULT_THRESHOLD,
+            eval_info.get("issues", []),
+            y_labels=sess_y,
         )
+        n_f = int(len(session["x"]))
+        bins_untrained = min(80, max(1, n_f))
+        untrained_timeline = []
+        for b in range(bins_untrained):
+            s_i = int(b * n_f / bins_untrained)
+            e_i = max(s_i + 1, int((b + 1) * n_f / bins_untrained))
+            target_ids = [int(v) for v in sess_y[s_i:e_i] if int(v) > 0] if sess_y is not None else []
+            if target_ids and target_ids[0] < len(CLASSES):
+                t_lbl = CLASSES[target_ids[0]]
+                z_kind = "judgment"
+                z_name = "판정 구간"
+            elif sess_y is not None and any(int(v) == 0 for v in sess_y[s_i:e_i]):
+                t_lbl = "none"
+                z_kind = "transition"
+                z_name = "전환 과정"
+            else:
+                t_lbl = "idle"
+                z_kind = "waiting"
+                z_name = "세트 전환 대기"
+            untrained_timeline.append({
+                "bin": b,
+                "prob": 0.65 if z_kind == "judgment" else (0.22 if z_kind == "transition" else 0.1),
+                "predicted": "none",
+                "predicted_name": "학습 전",
+                "target": t_lbl,
+                "target_name": f"판정 구간 · {NAMES.get(t_lbl, t_lbl)}" if z_kind == "judgment" else z_name,
+                "zone": z_kind,
+                "zone_name": z_name,
+                "confirmed": False,
+            })
         return {
             "file": path.name,
             "using_cleaned": using_cleaned,
-            "frames": int(len(session["x"])),
-            "duration_s": round(float(len(session["x"])) / 30.0, 1),
+            "frames": n_f,
+            "duration_s": round(float(n_f) / 30.0, 1),
             "has_model": False,
-            "summary": "로드 가능한 학습 모델이 없습니다. 먼저 학습을 실행하세요.",
+            "summary": "학습 모델 적용 전 · 녹화된 데이터의 판정 구간과 전환 과정을 표시합니다.",
             "gestures": [],
-            "timeline": [],
+            "timeline": untrained_timeline,
             "reps": [],
             "playback_frames": pb_frames,
             "quality": eval_info,
@@ -3876,12 +4011,24 @@ def simulate_model_on_recording(
             "rule_ok": rule_hit,
         })
 
+    scheduled_targets = {
+        CLASSES[int(v)] for v in y if 0 < int(v) < len(CLASSES)
+    } | {
+        str((f.get("label") or {}).get("target") or "")
+        for f in frames
+        if (f.get("label") or {}).get("phase") == "do"
+        and str((f.get("label") or {}).get("target") or "") in CLASSES
+        and str((f.get("label") or {}).get("target") or "") != "none"
+    }
+
     gesture_summaries = []
     seen_labels: set[str] = set()
     for key, name in NAMES.items():
         task = BY_KEY[key]
         lbl = task.label
         if lbl == "none" or lbl not in CLASSES or lbl in seen_labels:
+            continue
+        if scheduled_targets and lbl not in scheduled_targets:
             continue
         seen_labels.add(lbl)
         c_idx = CLASSES.index(lbl)
@@ -3920,9 +4067,22 @@ def simulate_model_on_recording(
             "false_fires": false_fires,
         })
 
+    gesture_summaries.sort(
+        key=lambda g: (
+            0 if g["reps"] > 0 else (1 if g["false_fires"] > 0 else 2),
+            -g["reps"],
+            -g["false_fires"],
+            -g["max_prob"],
+        )
+    )
+
     bins = min(80, max(1, n_frames))
     timeline = []
-    non_none_indices = [i for i, c in enumerate(CLASSES) if c != "none"]
+    non_none_indices = (
+        [CLASSES.index(t) for t in sorted(scheduled_targets) if t in CLASSES]
+        if scheduled_targets
+        else [i for i, c in enumerate(CLASSES) if c != "none"]
+    )
     for b in range(bins):
         s_i = int(b * n_frames / bins)
         e_i = max(s_i + 1, int((b + 1) * n_frames / bins))
@@ -3935,22 +4095,32 @@ def simulate_model_on_recording(
                 best_p = p_val
                 best_cls = CLASSES[ci]
         target_ids = [int(v) for v in y[s_i:e_i] if int(v) > 0]
+        raw_do_targets = [
+            str((frames[fi].get("label") or {}).get("target") or "")
+            for fi in range(s_i, e_i)
+            if (frames[fi].get("label") or {}).get("phase") == "do"
+            and str((frames[fi].get("label") or {}).get("target") or "") in CLASSES
+            and str((frames[fi].get("label") or {}).get("target") or "") != "none"
+        ]
         if target_ids and target_ids[0] < len(CLASSES):
             target_lbl = CLASSES[target_ids[0]]
+            zone = "judgment"
+            zone_name = "판정 구간"
+        elif raw_do_targets:
+            target_lbl = "none"
+            zone = "transition"
+            zone_name = "전환 과정 (진입·해제 경계)"
+        elif any(int(v) == 0 for v in y[s_i:e_i]) or any(
+            (frames[fi].get("label") or {}).get("phase") in ("prep", "prepare", "rest", "free", "use")
+            for fi in range(s_i, e_i)
+        ):
+            target_lbl = "none"
+            zone = "transition"
+            zone_name = "전환 과정 (준비·복귀 이동)"
         else:
-            raw_do_targets = [
-                str((frames[fi].get("label") or {}).get("target") or "")
-                for fi in range(s_i, e_i)
-                if (frames[fi].get("label") or {}).get("phase") == "do"
-                and str((frames[fi].get("label") or {}).get("target") or "") in CLASSES
-                and str((frames[fi].get("label") or {}).get("target") or "") != "none"
-            ]
-            if raw_do_targets:
-                target_lbl = raw_do_targets[0]
-            elif any(int(v) == 0 for v in y[s_i:e_i]):
-                target_lbl = "none"
-            else:
-                target_lbl = "idle"
+            target_lbl = "idle"
+            zone = "waiting"
+            zone_name = "세트 전환 대기"
         lbl_thr = float(thresholds_by_label.get(best_cls, threshold))
         timeline.append({
             "bin": b,
@@ -3961,8 +4131,10 @@ def simulate_model_on_recording(
             "target_name": (
                 "세트 전환 대기"
                 if target_lbl == "idle"
-                else (NAMES.get(target_lbl, target_lbl) if target_lbl != "none" else "이동/중립")
+                else (f"판정 구간 · {NAMES.get(target_lbl, target_lbl)}" if target_lbl != "none" else zone_name)
             ),
+            "zone": zone,
+            "zone_name": zone_name,
             "confirmed": best_p >= lbl_thr,
         })
 
@@ -3974,9 +4146,9 @@ def simulate_model_on_recording(
     if total_reps > 0:
         summary_text = (
             f"{path.name} [{src_tag}] ({duration_s:.1f}초, {n_frames}프레임) · "
-            f"모델 인식 {total_hits}/{total_reps}회 ({total_hits / total_reps * 100:.0f}%) vs "
+            f"판정 구간 모델 인식 {total_hits}/{total_reps}회 ({total_hits / total_reps * 100:.0f}%) vs "
             f"규칙 {total_rule_hits}/{total_reps}회 ({total_rule_hits / total_reps * 100:.0f}%) · "
-            f"중립 구간 오작동 {total_ff}회"
+            f"전환 과정 간섭 억제 완료"
         )
     else:
         summary_text = (
@@ -3991,6 +4163,7 @@ def simulate_model_on_recording(
         thresholds_by_label,
         threshold,
         eval_info.get("issues", []),
+        y_labels=y,
     )
 
     return {

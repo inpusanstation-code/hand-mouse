@@ -33,9 +33,12 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 
+from src.action_bindings import get_action_registry  # noqa: E402
 from src.recorder import public_source  # noqa: E402
 from src.tcn_features import FEATURE_VERSION, FEATURES  # noqa: E402
-from src.gesture_catalog import CLASSES, TASKS, BY_KEY  # noqa: E402
+from src.gesture_catalog import CLASSES, TASKS, BY_KEY, is_motion_task  # noqa: E402
+
+get_action_registry()  # sync custom registered temporal motions into BY_KEY / CLASSES
 
 CLICKY = {"right_click", "left_click", "task_switcher"}
 STARTY = {"scroll_grab", "drag_hold"}
@@ -324,6 +327,23 @@ def pick_with_conds(sessions, conds):
     return np.concatenate(xs), np.concatenate(ys), np.concatenate(cs)
 
 
+def pick_with_weights(sessions, conds):
+    xs, ys, ws = [], [], []
+    for s in sessions:
+        in_cond = np.isin(s["cond"], conds)
+        if (s.get("meta") or {}).get("mode") == "free":
+            in_cond = in_cond | ((s["cond"] == -1) & (s["y"] == 0))
+        m = (s["y"] >= 0) & in_cond
+        xs.append(s["x"][m])
+        ys.append(s["y"][m])
+        sw = s.get("sample_weights")
+        if sw is not None and len(sw) == len(s["y"]):
+            ws.append(np.asarray(sw[m], dtype=np.float32))
+        else:
+            ws.append(np.ones(int(np.sum(m)), dtype=np.float32))
+    return np.concatenate(xs), np.concatenate(ys), np.concatenate(ws)
+
+
 # ---------------------------------------------------------------- model
 class TCN(nn.Module):
     """Causal dilated 1-D convolutions over 15 frames (receptive field 15); the last step is classified."""
@@ -392,6 +412,41 @@ def augment(x: torch.Tensor, max_deg: float = 30.0) -> torch.Tensor:
             thumb = pos_occ[:, :, 4:5, :]
             tips = pos_occ[:, :, [8, 12, 16, 20], :]
             x[occ_b, :, 126:130] = torch.linalg.norm(thumb - tips, dim=-1)
+
+    # Stage 6 winning TCN augmentations (verified via 15-fold leave-condition-out ablation):
+    # 1. Temporal speed warp (0.80x ~ 1.25x anchored at current frame t = T - 1)
+    if t >= 6 and b >= 4:
+        m_warp = torch.rand(b, device=dev) < 0.35
+        if torch.any(m_warp):
+            pos_w0 = x[m_warp, :, :63].view(-1, t, 21, 3)
+            nb = pos_w0.shape[0]
+            speed = 0.80 + 0.45 * torch.rand((nb, 1), device=dev, dtype=dt)
+            steps = torch.arange(t - 1, -1, -1, device=dev, dtype=dt).unsqueeze(0)
+            src_t = torch.clamp((t - 1) - steps * speed, 0.0, float(t - 1))
+            t0_idx = torch.floor(src_t).long()
+            t1_idx = torch.clamp(t0_idx + 1, max=t - 1)
+            w1 = (src_t - t0_idx.to(dt)).view(nb, t, 1, 1)
+            b_idx = torch.arange(nb, device=dev).unsqueeze(1)
+            pos_w = (1.0 - w1) * pos_w0[b_idx, t0_idx] + w1 * pos_w0[b_idx, t1_idx]
+            w1_v = w1.view(nb, t, 1)
+            vel = x[m_warp, :, 130:132]
+            x[m_warp, :, 130:132] = ((1.0 - w1_v) * vel[b_idx, t0_idx] + w1_v * vel[b_idx, t1_idx]) * speed.unsqueeze(-1)
+            x[m_warp, :, :63] = pos_w.view(nb, t, 63)
+            x[m_warp, 1:, 63:126] = (pos_w[:, 1:] - pos_w[:, :-1]).reshape(nb, t - 1, 63)
+            x[m_warp, :, 126:130] = torch.linalg.norm(pos_w[:, :, 4:5, :] - pos_w[:, :, [8, 12, 16, 20], :], dim=-1)
+
+    # 2. Anisotropic Z-axis noise (depth estimation noise >> 2D image xy noise)
+    if b >= 4:
+        m_z = torch.rand(b, device=dev) < 0.30
+        if torch.any(m_z):
+            pos_z = x[m_z, :, :63].view(-1, t, 21, 3).clone()
+            nb = pos_z.shape[0]
+            z_bias = torch.randn((nb, 1, 21), device=dev, dtype=dt) * 0.018
+            z_jit = torch.randn((nb, t, 21), device=dev, dtype=dt) * 0.014
+            pos_z[:, :, 1:, 2] = pos_z[:, :, 1:, 2] + z_bias[:, :, 1:] + z_jit[:, :, 1:]
+            x[m_z, :, :63] = pos_z.view(nb, t, 63)
+            x[m_z, 1:, 63:126] = (pos_z[:, 1:] - pos_z[:, :-1]).reshape(nb, t - 1, 63)
+            x[m_z, :, 126:130] = torch.linalg.norm(pos_z[:, :, 4:5, :] - pos_z[:, :, [8, 12, 16, 20], :], dim=-1)
     return x
 
 
@@ -493,8 +548,16 @@ def runs(mask: np.ndarray, k: int):
     return starts
 
 
-def evaluate(session, conds, prob=None, thr=0.7, k=3):
+def evaluate(session, conds, prob=None, thr=0.7, k=3, *, thr_by_label=None, k_by_label=None):
     """{"reps": {task: (recognised, total)}, "misfires": {kind: n}, "confused": n} for the model (prob given) or rules."""
+    from src.gesture_gate import DEFAULT_GESTURE_FRAMES, DEFAULT_GESTURE_THRESHOLDS
+    use_default_policy = (thr == 0.7 and k == 3)
+    eff_thr_map = dict(DEFAULT_GESTURE_THRESHOLDS if use_default_policy else {})
+    if thr_by_label:
+        eff_thr_map.update({str(lbl): float(v) for lbl, v in thr_by_label.items()})
+    eff_k_map = dict(DEFAULT_GESTURE_FRAMES if use_default_policy else {})
+    if k_by_label:
+        eff_k_map.update({str(lbl): int(v) for lbl, v in k_by_label.items()})
     frames = session["frames"]
     classes = session.get("classes", CLASSES)
     valid = (session["y"] >= 0) & np.isin(session["cond"], conds)
@@ -541,7 +604,10 @@ def evaluate(session, conds, prob=None, thr=0.7, k=3):
                 resets[i] = True
                 previous = token
         for c in active:
-            above = valid & (prob[:, c] >= thr)
+            cls_name = classes[c]
+            cls_thr = float(eff_thr_map.get(cls_name, thr))
+            cls_k = int(eff_k_map.get(cls_name, k))
+            above = valid & (prob[:, c] >= cls_thr)
             col_fired = fired[c]
             run = 0
             for i in range(len(frames)):
@@ -549,7 +615,7 @@ def evaluate(session, conds, prob=None, thr=0.7, k=3):
                     run = 0
                 if above[i]:
                     run += 1
-                    if run == k:
+                    if run == cls_k:
                         col_fired[i] = True
                 else:
                     run = 0
@@ -599,8 +665,10 @@ def evaluate(session, conds, prob=None, thr=0.7, k=3):
             free_by_task[frames[i]["label"]["task"]]["misfires"] += count
             prev = a
             previous_i = i
+    from src.evaluation import measure_session_reaction_latency
+    latency = measure_session_reaction_latency(session, conds, prob=prob, thr=thr, k=k)
     return {"reps": {t: (recog[t], total[t]) for t in total}, "misfires": dict(misfires), "confused": confused,
-            "free_by_task": free_by_task}
+            "free_by_task": free_by_task, "latency": latency}
 
 
 def free_minutes(session, conds) -> float:
@@ -871,6 +939,8 @@ def per_gesture(
     adaptive_boost=None,
 ):
     """Scores per gesture for the training center: held-out recognition, final recognition, misfires per minute, data, fit."""
+    from src.evaluation import aggregate_latency_rows, wilson_ci_95
+
     out = {}
     classes = classes or CLASSES
     names = [t.key for t in TASKS if t.label in classes] if by_task else classes
@@ -891,18 +961,22 @@ def per_gesture(
             ra = sum(m["rules"]["reps"].get(key, (0, 0))[0] for m in summary for key in keys)
             rb = sum(m["rules"]["reps"].get(key, (0, 0))[1] for m in summary for key in keys)
             zs_rate = round(a / b, 3) if b else None
+            zs_ci = list(wilson_ci_95(a, b)) if b else None
             eff_a, eff_b = a, b
             if final_results is not None:
                 fa = sum(m["tcn"]["reps"].get(key, (0, 0))[0] for m in final_results for key in keys)
                 fb = sum(m["tcn"]["reps"].get(key, (0, 0))[1] for m in final_results for key in keys)
                 final_rate = round(fa / fb, 3) if fb else None
+                final_ci = list(wilson_ci_95(fa, fb)) if fb else None
                 g.update(
                     zero_shot_recognised=a,
                     zero_shot_total=b,
                     zero_shot_rate=zs_rate,
+                    zero_shot_ci95=zs_ci,
                     final_recognised=fa,
                     final_total=fb,
                     final_rate=final_rate,
+                    final_ci95=final_ci,
                 )
                 # When heterogeneous postures triggered adaptive boosting, replace those unseen-angle fold results
                 # with the post-boost learned evaluation for those postures so `rate` reflects the learned angle.
@@ -924,8 +998,22 @@ def per_gesture(
                     if adj_b > 0 and (adj_a / adj_b) >= (a / b):
                         eff_a, eff_b = adj_a, adj_b
                         g["adaptive_boosted"] = True
-            g.update(recognised=eff_a, total=eff_b, rate=round(eff_a / eff_b, 3) if eff_b else None,
-                     rules_rate=round(ra / rb, 3) if rb else None)
+            lat_tcn = aggregate_latency_rows(summary, keys, source="tcn") or aggregate_latency_rows(
+                final_results or [], keys, source="tcn"
+            )
+            lat_rules = aggregate_latency_rows(summary, keys, source="rules") or aggregate_latency_rows(
+                final_results or [], keys, source="rules"
+            )
+            g.update(
+                recognised=eff_a,
+                total=eff_b,
+                rate=round(eff_a / eff_b, 3) if eff_b else None,
+                ci95=list(wilson_ci_95(eff_a, eff_b)) if eff_b else None,
+                rules_rate=round(ra / rb, 3) if rb else None,
+                rules_ci95=list(wilson_ci_95(ra, rb)) if rb else None,
+                reaction_latency=lat_tcn,
+                rules_reaction_latency=lat_rules,
+            )
         else:
             if by_task:
                 entries = [m["tcn"].get("free_by_task", {}).get(name, {}) for m in summary]
@@ -968,6 +1056,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--window-stride", type=int, default=None, help="training window sampling stride (overrides mode default)")
     ap.add_argument("--test-condition", type=int, default=None)
     ap.add_argument("--folds", action="store_true", default=None, help="hold out each posture in turn")
+    ap.add_argument(
+        "--split-mode",
+        choices=("condition", "session", "person", "camera"),
+        default="condition",
+        help="leave-group-out evaluation axis: condition (default), session, person, or camera",
+    )
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--thr", type=float, default=0.7)
     ap.add_argument("--k", type=int, default=3, help="frames in a row above the threshold that count as the gesture")
@@ -1032,6 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
         s["classes"] = classes
     conds = sorted({int(c) for s in eval_sessions for c, y in zip(s["cond"], s["y"]) if c >= 0 and y >= 0})
     xa, ya, ca = pick_with_conds(sessions, conds)
+    _, _, wa = pick_with_weights(sessions, conds)
     xa_eval, ya_eval = pick(eval_sessions, conds)
     per_class = dict(Counter(classes[i] for i in ya_eval))
     held = resolve_held_out_conds(conds, opts)
@@ -1051,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluated_folds: list[int] = []
     for fold_idx, test in enumerate(held, 1):
         train_conds = [c for c in conds if c != test]
-        x, y = pick(sessions, train_conds)
+        x, y, w_fold = pick_with_weights(sessions, train_conds)
         if test not in conds or not len(y) or len(set(y)) < len(classes):
             emit("note", text=f"조건 {test} 제외 평가는 보류: 나머지 조건에도 학습할 모든 동작의 데이터가 필요합니다.")
             continue
@@ -1068,13 +1163,24 @@ def main(argv: list[str] | None = None) -> int:
             classes=classes,
             window_stride=opts["window_stride"],
             device=opts["effective_device"],
+            sample_weights=w_fold,
         )
-        xs_fold, ys_fold = pick_spatial_from_sessions(sessions, train_conds)
+        xs_fold, ys_fold, gs_fold, ws_fold = pick_spatial_from_sessions(
+            sessions, train_conds, return_groups=True, return_weights=True
+        )
         sp_fold_model = None
         if len(ys_fold) >= 2:
             emit("substage", text=f"평가 학습 {fold_idx}/{len(held)} · Spatial MLP 보조 모델 학습 및 검증 중…")
             try:
-                sp_fold_model, _ = train_spatial_mlp(xs_fold, ys_fold, classes=classes, device=opts["effective_device"])
+                sp_fold_model, _ = train_spatial_mlp(
+                    xs_fold,
+                    ys_fold,
+                    weights_all=ws_fold,
+                    classes=classes,
+                    device=opts["effective_device"],
+                    groups=gs_fold,
+                    compute_random_comparison=False,
+                )
             except Exception:
                 sp_fold_model = None
         if not PROGRESS:
@@ -1109,15 +1215,25 @@ def main(argv: list[str] | None = None) -> int:
         classes=classes,
         window_stride=opts["window_stride"],
         device=opts["effective_device"],
+        sample_weights=wa,
     )
     # Co-train and save 0-lag 96-dim Spatial MLP (models/spatial_mlp.json)
     spatial_meta = None
     sp_model = None
-    xs_all, ys_all = pick_spatial_from_sessions(sessions, conds)
+    xs_all, ys_all, gs_all, ws_all = pick_spatial_from_sessions(
+        sessions, conds, return_groups=True, return_weights=True
+    )
     if len(ys_all) >= 2:
         emit("substage", text="최종 Spatial MLP (0-lag 공간 보조 모델) 학습 중…")
         try:
-            sp_model, sp_metrics = train_spatial_mlp(xs_all, ys_all, classes=classes, device=opts["effective_device"])
+            sp_model, sp_metrics = train_spatial_mlp(
+                xs_all,
+                ys_all,
+                weights_all=ws_all,
+                classes=classes,
+                device=opts["effective_device"],
+                groups=gs_all,
+            )
             sp_path = a.output_dir / "spatial_mlp.json"
             a.output_dir.mkdir(parents=True, exist_ok=True)
             sp_model.save(sp_path)
@@ -1128,7 +1244,12 @@ def main(argv: list[str] | None = None) -> int:
                 "hidden_units": sp_model.hidden_units,
                 "train_accuracy": sp_metrics.train_accuracy,
                 "test_accuracy": sp_metrics.test_accuracy,
+                "random_test_accuracy": sp_metrics.random_test_accuracy,
+                "leakage_delta_pct": sp_metrics.leakage_delta_pct,
+                "split_mode": sp_metrics.split_mode,
                 "total_samples": sp_metrics.total_samples,
+                "train_samples": sp_metrics.train_samples,
+                "test_samples": sp_metrics.test_samples,
                 "elapsed_ms": sp_metrics.elapsed_ms,
                 "per_class": sp_metrics.per_class,
                 "specialists": sorted(sp_model.specialists.keys()),
@@ -1137,11 +1258,29 @@ def main(argv: list[str] | None = None) -> int:
             if not PROGRESS:
                 print(
                     f"saved {sp_path.name} (96-dim Spatial MLP + {len(sp_model.specialists)} gesture specialist MLPs, "
-                    f"test_acc={sp_metrics.test_accuracy:.1f}%, {sp_metrics.elapsed_ms:.0f} ms)"
+                    f"leave_out_acc={sp_metrics.test_accuracy:.1f}%, random_80_20_acc={sp_metrics.random_test_accuracy or sp_metrics.test_accuracy:.1f}%, "
+                    f"{sp_metrics.elapsed_ms:.0f} ms)"
                 )
         except Exception as exc:
             if not PROGRESS:
                 print(f"spatial MLP skip: {exc}")
+
+    # Co-train 16-step trajectory & velocity profile templates for temporal motion gestures
+    motion_labels_present = [c for c in classes if is_motion_task(c)]
+    if motion_labels_present:
+        emit("substage", text="시계열 모션 동작 16-step 궤적·속도 프로파일 템플릿 학습 중…")
+        try:
+            from src.motion_mode import train_motion_templates_from_recordings
+            rec_dirs = {Path(p).parent for p in paths}
+            rec_folder = next(iter(rec_dirs)) if rec_dirs else (Path(__file__).resolve().parents[1] / "recordings")
+            train_motion_templates_from_recordings(
+                rec_dir=rec_folder,
+                target_keys=motion_labels_present,
+                output_path=a.output_dir / "motion_templates.json",
+            )
+        except Exception as exc:
+            if not PROGRESS:
+                print(f"motion templates skip: {exc}")
 
     results = [{"posture": t, "rules": r, "tcn": m, "free_minutes": round(fm, 2)} for t, r, m, fm in summary]
     model, final_results, boost_info = adaptive_boost_postures(
@@ -1180,14 +1319,19 @@ def main(argv: list[str] | None = None) -> int:
                       dynamic_axes={"x": {0: "batch"}, "logits": {0: "batch"}}, opset_version=18,
                       external_data=False, dynamo=False)
 
+    from src.evaluation import DEFERRED_TECHNIQUES_SUMMARY, dataset_diversity_report
+
     info = {
         "classes": classes, "window": WINDOW, "features": FEATURES, "feature_version": FEATURE_VERSION,
         "threshold": a.thr, "frames_in_a_row": a.k,
+        "split_mode": str(getattr(a, "split_mode", "condition") or "condition"),
         **card_training_metadata(opts, evaluated_folds),
         "trained": time.strftime("%Y-%m-%d %H:%M:%S"),
         "data": [{"file": Path(s["path"]).name, "pc": public_source(s["meta"])[0],
                   "camera": dict(s["meta"].get("camera") or {}, note=public_source(s["meta"])[1]),
                   "frames": len(s["frames"])} for s in eval_sessions],
+        "dataset_diversity": dataset_diversity_report(eval_sessions),
+        "deferred_techniques": DEFERRED_TECHNIQUES_SUMMARY,
         "held_out_results": results,
         "final_results": final_results,
         "adaptive_boost": boost_info,

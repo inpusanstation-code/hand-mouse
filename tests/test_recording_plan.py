@@ -238,3 +238,38 @@ def test_orientation_guide_explains_left_and_right_tilt_clearly(tmp_path):
     assert "10~11시" in run_view["condition_detail"]
 
 
+def test_motion_and_side_gestures_never_prompt_palm_front_and_use_motion_courses(tmp_path):
+    from src.recording_plan_editor import RecordingPlanEditor
+
+    path = tmp_path / "plans.json"
+    # Even if a legacy static "손바닥 정면" plan was previously saved for swipe_tab_left or palm_side:
+    legacy = plans.preset("basic")
+    path.write_text(
+        json.dumps({"plans": {"swipe_tab_left": legacy, "palm_side": legacy}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    editor = RecordingPlanEditor(path)
+    editor.open("swipe_tab_left")
+    assert editor.isMotionTask is True
+    assert "시계열 모션 녹화 설정" in editor.title
+    assert "손바닥 정면" not in editor.choices["orientation"]
+    assert all(r["orientation"] in plans.MOTION_ORIENTATIONS for r in editor.rows)
+    assert all("손바닥 정면" not in r["name"] for r in editor.rows)
+    assert "손바닥이 카메라를 정면으로" not in editor.orientationGuide
+    assert "엄지를 접고 네 손가락을 펴 왼쪽으로" in editor.orientationGuide
+
+    # Switching presets on a motion task stays in motion course format
+    editor.usePreset("diverse")
+    assert len(editor.rows) == 6
+    assert all(r["orientation"] in plans.MOTION_ORIENTATIONS for r in editor.rows)
+
+    # Side-facing posture (palm_side) also avoids "손바닥 정면"
+    editor.open("palm_side")
+    assert editor.isMotionTask is False
+    assert all(r["orientation"] == "동작 고유 손모양 유지" for r in editor.rows)
+    assert "손바닥이 카메라를 정면으로" not in editor.orientationGuide
+    assert "가로" in editor.orientationGuide
+
+
+

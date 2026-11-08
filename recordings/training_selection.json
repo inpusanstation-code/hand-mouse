@@ -1,5 +1,7 @@
 {
-  "excluded": [],
+  "excluded": [
+    "20261109-002442-8aa2d639-home-pc-free.jsonl.gz"
+  ],
   "augmentation": {
     "enabled": true,
     "strength": "normal",

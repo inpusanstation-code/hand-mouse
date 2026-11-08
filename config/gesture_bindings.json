@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "bindings": {
+    "thumb_middle": {
+      "gesture_key": "thumb_middle",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "left_click",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "thumb_ring": {
+      "gesture_key": "thumb_ring",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "right_click",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "thumb_index": {
+      "gesture_key": "thumb_index",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "scroll_grab",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "thumb_middle_drag": {
+      "gesture_key": "thumb_middle_drag",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "drag_hold",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "thumb_index_middle": {
+      "gesture_key": "thumb_index_middle",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "drag_hold",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "thumb_pinky": {
+      "gesture_key": "thumb_pinky",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "task_switcher",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "palm_side": {
+      "gesture_key": "palm_side",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "show_desktop",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "v_sign": {
+      "gesture_key": "v_sign",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "toggle_control",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "rock_sign": {
+      "gesture_key": "rock_sign",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "close_window",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "thumbs_up": {
+      "gesture_key": "thumbs_up",
+      "track": "static",
+      "action_type": "mouse_action",
+      "action_value": "toggle_motion",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "swipe_left": {
+      "gesture_key": "swipe_left",
+      "track": "motion",
+      "action_type": "hotkey",
+      "action_value": "alt+left",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "swipe_right": {
+      "gesture_key": "swipe_right",
+      "track": "motion",
+      "action_type": "hotkey",
+      "action_value": "alt+right",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "swipe_tab_left": {
+      "gesture_key": "swipe_tab_left",
+      "track": "motion",
+      "action_type": "hotkey",
+      "action_value": "ctrl+shift+tab",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "swipe_tab_right": {
+      "gesture_key": "swipe_tab_right",
+      "track": "motion",
+      "action_type": "hotkey",
+      "action_value": "ctrl+tab",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "swipe_down": {
+      "gesture_key": "swipe_down",
+      "track": "motion",
+      "action_type": "mouse_action",
+      "action_value": "close_window",
+      "enabled": true,
+      "app_overrides": []
+    }
+  },
+  "composite_gestures": {},
+  "custom_motions": {}
+}

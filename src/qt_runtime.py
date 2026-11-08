@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 
+from src.action_bindings import CompositeGestureDetector, DEFAULT_GESTURE_BINDINGS, get_action_registry
 from src.failure_log import FailureRecorder
 from src.finger_kinematics import CausalFingerTracker
 from src.close_sign import CloseSign
@@ -100,6 +101,7 @@ class Snapshot:
     motion: Optional[Tuple[bool, float, str, float, float]] = None  # on, seconds left (0 = no timeout), last command, entering 0..1, leaving 0..1
     palm_axes: Tuple[bool, str, float, str, bool] = (False, "", 0.0, "", False)  # wizard running, prompt, progress, note, correction saved
     rec: Optional[Dict[str, Any]] = None  # dataset recording view: mode, prompt, sub, progress, overall, waiting, frames, file
+    gate_status: Optional[Dict[str, Any]] = None  # Stage 7: calibrated confidence & rejection reason from GestureGate
 
 
 def tracking_view(test: TrackingTest, cursor) -> Dict[str, Any]:
@@ -162,6 +164,7 @@ class QtRuntime:
         self.close_sign = CloseSign(engine.config)
         self.toggle_sign = ToggleSign(engine.config)
         self.finger_tracker = CausalFingerTracker()
+        self.composite_detector = CompositeGestureDetector(get_action_registry())
         self._guided_rep_token = None
         self._close_notice, self._close_notice_until = "", 0.0
         self._motion_seen = 0
@@ -268,6 +271,19 @@ class QtRuntime:
         self.engine.reset()
         self._recent_until = 0.0
 
+    def _record_negative_candidate(self, now: float, source: str, note: str = "") -> None:
+        g_stat = self.gate.status_summary() if self.gate is not None else {}
+        recent_act = getattr(self, "_recent_action", "") if now < getattr(self, "_recent_until", 0.0) + 2.0 else None
+        self.failures.record_negative_candidate(
+            now,
+            source=source,
+            suspected_action=recent_act,
+            suspected_gesture=g_stat.get("top_gesture", ""),
+            calibrated_confidence=g_stat.get("calibrated_confidence"),
+            rejection_reason=g_stat.get("rejection_reason", ""),
+            note=note,
+        )
+
     def _drain(self, now: float) -> None:
         while True:
             try:
@@ -276,6 +292,8 @@ class QtRuntime:
                 return
             kind = cmd[0]
             if kind == "pause":
+                if not self.paused and now < getattr(self, "_recent_until", 0.0) + 1.0:
+                    self._record_negative_candidate(now, "user_cancelled", "Paused immediately after action")
                 self._pause()
             elif kind == "tracking_start" and self.test is None:
                 self.mouse.release_all()
@@ -287,8 +305,14 @@ class QtRuntime:
             elif kind == "failure_mark":
                 if self._rec is not None:
                     self._rec.event(now, "mark")
+                self._record_negative_candidate(now, "f_key", "Manual failure mark button")
                 if self.failures.trigger(now, "manual"):
-                    self._say("실패 기록: 앞뒤 3초를 저장합니다")
+                    self._say("실패·오작동 부정 후보 기록 (자동 재학습 미투입)")
+            elif kind == "return_block_mark":
+                if self._rec is not None:
+                    self._rec.event(now, "return_blocked_fp")
+                if self.failures.mark_return_block_fp(now, note="Manual return block false-positive mark"):
+                    self._say("이동 차단 오탐 기록 (복귀 억제 오작동)")
             elif kind == "rec_discard":
                 self._discard_recording(now)
             elif kind == "key":
@@ -298,6 +322,8 @@ class QtRuntime:
         engine, mouse, camera = self.engine, self.mouse, self.camera
         if key in (27, ord(" ")):
             was_paused = self.paused
+            if not was_paused and now < getattr(self, "_recent_until", 0.0) + 1.0:
+                self._record_negative_candidate(now, "user_cancelled", "Key pause immediately after action")
             self._pause()
             self.paused = key == 27 or not was_paused or self.ui.stage != "main"
             self._say("Mouse Control PAUSED" if self.paused else "Mouse Control RESUMED")
@@ -309,8 +335,14 @@ class QtRuntime:
         elif key in (ord("f"), ord("F")):
             if self._rec is not None:
                 self._rec.event(now, "mark")
+            self._record_negative_candidate(now, "f_key", "User pressed F key")
             if self.failures.trigger(now, "manual"):
-                self._say("실패 기록: 앞뒤 3초를 저장합니다")
+                self._say("실패·오작동 부정 후보 기록 (자동 재학습 미투입)")
+        elif key in (ord("g"), ord("G")):
+            if self._rec is not None:
+                self._rec.event(now, "return_blocked_fp")
+            if self.failures.mark_return_block_fp(now, note="User pressed G key (return block false positive)"):
+                self._say("이동 차단 오탐 기록 (G 키)")
         elif key in (ord("n"), ord("N")):
             mouse.release_all()
             target = mouse.cycle_monitor()
@@ -485,8 +517,12 @@ class QtRuntime:
                 cv2.circle(frame, (px, py), 10, (49, 35, 17), -1, cv2.LINE_AA)
                 cv2.putText(frame, str(number), (px - 5, py + 5), cv2.FONT_HERSHEY_SIMPLEX, .46, color, 1, cv2.LINE_AA)
         elif detections and not index_mode and not motion_active and not close_hold and not toggle_hold and not palm_calibrating:
+            glab = None
+            gtask = None
             if self._guided is not None:
+                from src.gesture_catalog import BY_KEY
                 glab = self._guided.label(t0)
+                gtask = BY_KEY.get(glab.get("task"))
                 gtok = (glab.get("task"), glab.get("set"), glab.get("rep"), glab.get("phase") == "do")
                 if gtok != self._guided_rep_token:
                     self._guided_rep_token = gtok
@@ -508,19 +544,80 @@ class QtRuntime:
                     engine._middle_hold_pinched = False
             hand = detections[0]
             result = engine.process(hand.landmarks)
+            self._guided_obs_targets = None
+            draw_pinched = engine.pinched_fingers
+            if self._guided is not None and glab is not None:
+                obs_targets = self._capture_rules.observe(t0, hand, result, glab)
+                self._guided_obs_targets = obs_targets
+                if gtask is not None and not gtask.free and gtask.label != "none":
+                    if glab.get("phase") == "do" and gtask.key in obs_targets:
+                        result.action = gtask.action or gtask.label
+                        if gtask.label in ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle"):
+                            result.active_gesture = f"{gtask.label}_pinch"
+                            draw_pinched = (
+                                {"index", "middle"}
+                                if gtask.label == "thumb_index_middle"
+                                else {gtask.label.replace("thumb_", "")}
+                            )
+                        else:
+                            result.active_gesture = gtask.label
+                            draw_pinched = set()
+                    else:
+                        result.action = "none"
+                        result.active_gesture = "none"
+                        draw_pinched = set()
+                elif glab.get("phase") in ("prep", "rest", "waiting", "paused"):
+                    result.action = "none"
+                    result.active_gesture = "none"
+                    draw_pinched = set()
             rule_action = result.action
-            if gate is not None:
+            if gate is not None and not guided_recording:
                 result = gate.filter(t0, result)
                 if gate.last_note:
                     self._say(gate.last_note, 1.2)
                     gate.last_note = ""
             self._rule_action = rule_action
             if not self.paused and not guided_recording:      # guided recording: rules judge, the mouse stays still
+                comp_hit = self.composite_detector.step(
+                    t0, hand.landmarks, result.active_gesture, draw_pinched, mouse.frame_aspect
+                )
+                if comp_hit is not None:
+                    reg = get_action_registry()
+                    fg = mouse.foreground_info() if not mouse.dry_run else {}
+                    resolved = reg.resolve_effective_action(comp_hit["key"], fg)
+                    ok, badge = reg.execute_resolved_action(resolved, dry_run=mouse.dry_run, mouse_controller=mouse)
+                    if ok:
+                        self._say(f"복합 동작 [{comp_hit['name']}] → {badge}", 1.5)
+                        self._recent_action, self._recent_until = comp_hit["key"], time.perf_counter() + 0.8
+                        result.action = "none"
+                elif result.action in ("left_click", "right_click", "show_desktop", "task_switcher"):
+                    action_to_key = {
+                        "left_click": "thumb_middle",
+                        "right_click": "thumb_ring",
+                        "show_desktop": "palm_side",
+                        "task_switcher": "thumb_pinky",
+                    }
+                    gkey = action_to_key[result.action]
+                    reg = get_action_registry()
+                    fg = mouse.foreground_info() if not mouse.dry_run else {}
+                    resolved = reg.resolve_effective_action(gkey, fg)
+                    default_b = DEFAULT_GESTURE_BINDINGS.get(gkey, {})
+                    if (
+                        bool(resolved.get("matched_app"))
+                        or resolved.get("action_type") != default_b.get("action_type")
+                        or resolved.get("action_value") != default_b.get("action_value")
+                        or not reg.get_binding(gkey).get("enabled", True)
+                    ):
+                        ok, badge = reg.execute_resolved_action(resolved, dry_run=mouse.dry_run, mouse_controller=mouse)
+                        if ok:
+                            self._say(f"매핑 실행: {badge}", 1.2)
+                        self._recent_action, self._recent_until = result.action, time.perf_counter() + 0.8
+                        result.action = "none"
                 mouse.apply(result, engine.config)
                 if result.action in ONE_SHOT:
                     self._recent_action, self._recent_until = result.action, time.perf_counter() + .8
             HandTracker.draw_hand(frame, hand.landmarks, pinch_guides(
-                result.distances, engine.config, engine.pinched_fingers,
+                result.distances, engine.config, draw_pinched,
                 action=result.action, gesture=result.active_gesture))
             if self._draw_cursor_anchor:
                 self._draw_cursor_anchor(frame, hand.landmarks, engine.palm_anchor_point(hand.landmarks),
@@ -578,6 +675,7 @@ class QtRuntime:
                         self._close_notice if time.perf_counter() < self._close_notice_until else ""),
             palm_axes=self._palm_view(t0),
             rec=self._rec_view(t0),
+            gate_status=self.gate.status_summary() if (self.gate is not None and ui.tcn_gate) else None,
         )
         self._pending_failures = self._pending_recent = None
         self._pending_message = ""
@@ -606,7 +704,7 @@ class QtRuntime:
             if self.toggle_sign.progress(t0) > 0 or self.toggle_sign.last_pose:
                 self.toggle_sign.update(t0, None)
             return False
-        blocked = self.paused and not self._intent("v_sign", t0)
+        blocked = False
         if not self.paused:
             quiet = self.toggle_sign.cfg("toggle_sign_quiet")
             for g in (self.engine, self.pointer.gestures):
@@ -616,7 +714,18 @@ class QtRuntime:
                     blocked = True
             blocked = blocked or bool(self.mouse.is_dragging or self.mouse.scroll_coasting)
         was_holding = self.toggle_sign.holding(t0)
-        event = self.toggle_sign.update(t0, detections[0].landmarks, blocked=blocked)
+        v_model_ok = bool(
+            self.gate is not None
+            and self.ui.tcn_gate
+            and "v_sign" in getattr(self.gate, "classes", ())
+            and self.gate.allows("v_sign", t0)
+        )
+        event = self.toggle_sign.update(
+            t0,
+            detections[0].landmarks,
+            blocked=blocked,
+            model_confirmed=v_model_ok,
+        )
         if event is not None:
             self.mouse.release_all()
             self.engine.reset()
@@ -920,12 +1029,55 @@ class QtRuntime:
                     "gated": result.action if self.gate is not None and ui_gate_on(self) else None,
                     "dpi": round(float(getattr(result, "dpi_multiplier", 1.0) or 1.0), 2),
                     "curl": round(float(self.engine._curl_s), 3) if self.engine._curl_s is not None else None,
-                    "size": round(float(dd.get("hand_size", 0.0)), 4)}
+                    "size": round(float(dd.get("hand_size", 0.0)), 4),
+                    "mode": getattr(result, "hand_shape_mode", "normal"),
+                    "clutch": getattr(self.mouse, "clutch_state", "inactive"),
+                    "return": getattr(self.mouse, "return_state", "none")}
             if self._guided is not None:
                 from types import SimpleNamespace
-                observed = SimpleNamespace(action=rule["action"], active_gesture=result.active_gesture)
+                from src.gesture_catalog import BY_KEY
+                from src.capture_rules import detect_interfering_signals
+                gtask = BY_KEY.get(label.get("task"))
+                raw_action = rule["action"]
+                raw_gesture = result.active_gesture
+                observed = SimpleNamespace(action=raw_action, active_gesture=raw_gesture)
                 rule["evaluated"] = True
-                rule["targets"] = self._capture_rules.observe(t0, hand, observed, label)
+                rule["raw_action"] = raw_action
+                rule["raw_gesture"] = raw_gesture
+                obs_targets = getattr(self, "_guided_obs_targets", None)
+                if obs_targets is None:
+                    obs_targets = self._capture_rules.observe(t0, hand, observed, label)
+                if gtask is not None and not gtask.free and gtask.label != "none":
+                    lm_hand = hand.landmarks if hand else None
+                    rule["interfering_targets"] = (
+                        detect_interfering_signals(lm_hand, observed, gtask.key)
+                        if label.get("phase") == "do"
+                        else []
+                    )
+                    if label.get("phase") == "do":
+                        rule["targets"] = [t for t in obs_targets if t == gtask.key]
+                        if gtask.key in rule["targets"]:
+                            rule["action"] = gtask.action or gtask.label
+                            rule["gesture"] = (
+                                f"{gtask.label}_pinch"
+                                if gtask.label in ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle")
+                                else gtask.label
+                            )
+                        else:
+                            rule["action"] = "none"
+                            rule["gesture"] = "none"
+                    else:
+                        rule["targets"] = []
+                        rule["action"] = "none"
+                        rule["gesture"] = "none"
+                elif label.get("phase") in ("prep", "rest", "waiting", "paused"):
+                    rule["interfering_targets"] = []
+                    rule["targets"] = []
+                    rule["action"] = "none"
+                    rule["gesture"] = "none"
+                else:
+                    rule["interfering_targets"] = []
+                    rule["targets"] = list(obs_targets)
         self._rec.frame(t0, hand, pose, label, rule, self.mouse.last_screen_pos)
 
     def _rec_view(self, t0: float) -> Optional[Dict[str, Any]]:
@@ -1033,10 +1185,19 @@ class QtRuntime:
                 self._motion_last = "창 닫기? 한 번 더 아래로"
                 self._say("창을 닫을까요? 3초 안에 손을 올렸다 한 번 더 아래로 쓸면 닫습니다", 3.0)
             elif event.kind == "swipe":
-                from src.gesture_catalog import MOTION_TARGETS
-                confirmed = self._intent(MOTION_TARGETS.get(event.action, ""), t0)
+                from src.gesture_catalog import BY_KEY, MOTION_TARGETS
+                target_key = MOTION_TARGETS.get(event.action, event.action)
+                confirmed = self._intent(target_key, t0)
                 sent = confirmed and self.mouse.send_motion_action(event.action)
-                self._motion_last = ACTION_LABELS.get(event.action, event.action) if sent else ("TCN 동작 확인 안 됨" if not confirmed else "닫을 수 없는 창")
+                if sent:
+                    if event.action in ACTION_LABELS:
+                        self._motion_last = ACTION_LABELS[event.action]
+                    elif target_key in BY_KEY:
+                        self._motion_last = BY_KEY[target_key].name
+                    else:
+                        self._motion_last = event.action
+                else:
+                    self._motion_last = "TCN 동작 확인 안 됨" if not confirmed else "닫을 수 없는 창"
                 self._say(f"모션: {self._motion_last}", 1.5)
             if self.failures.trigger(t0, f"motion_{event.kind}", note=json.dumps(event.info, ensure_ascii=False)):
                 pass
@@ -1064,6 +1225,9 @@ class QtRuntime:
             "hold": getattr(g, "last_hold", None),   # thumb+index: (hold dist, release thr, tip dist)
             "d": {k: round(float(v), 3) for k, v in d.items()} if isinstance(d, dict) and d else None,
             "click_style": ui_style(self.ui) if index_mode else None,
+            "clutch_state": getattr(self.mouse, "clutch_state", "inactive"),
+            "return_state": getattr(self.mouse, "return_state", "none"),
+            "hand_shape_mode": getattr(result, "hand_shape_mode", "normal") if not index_mode else None,
         }
         # Win+D fired: keep the seconds before it (a firing used to leave no record unless another event was near)
         if action == "show_desktop":
@@ -1138,13 +1302,25 @@ class QtRuntime:
         if test is None:
             return None
         pos = self.mouse.last_screen_pos
-        test.update(t0, pos, hand=bool(detections), active=index_mode and not self.paused and not ui.calibrating,
-                    fps=self.camera.fps, detect_ms=self.tracker.last_detect_ms)
+        test.update(
+            t0, pos,
+            hand=bool(detections),
+            active=(index_mode or True) and not self.paused and not ui.calibrating,
+            fps=self.camera.fps,
+            detect_ms=self.tracker.last_detect_ms,
+            clutch_state=getattr(self.mouse, "clutch_state", "inactive"),
+            return_state=getattr(self.mouse, "return_state", "none"),
+            hand_shape_mode=getattr(self.engine, "_shape_mode", "normal"),
+        )
         if test.done and not getattr(test, "saved", False):
             test.saved = True
             primary = self.mouse.screens.primary
+            scheme = str(self.engine.config.get("movement_scheme", "legacy_shape"))
+            ret_supp = str(self.engine.config.get("return_suppression", "off"))
             run = {
                 "anchor": ui.anchor, "sensitivity_pct": ui.sensitivity,
+                "movement_scheme": scheme, "return_suppression": ret_supp,
+                "condition": f"{scheme}+{ret_supp}",
                 "direction_calibrated": ui.axes is not None, "control_hand": ui.control_hand,
                 "camera_source": self.camera.config.source, "monitor_px": f"{primary.width}x{primary.height}",
                 "monitors": len(self.mouse.screens), "dry_run": self.dry_run,

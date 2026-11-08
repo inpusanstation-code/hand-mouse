@@ -889,6 +889,131 @@ def test_diagnose_label_performance_and_adaptive_boost_summary(tmp_path):
     assert any("타 동작 혼동" in r for r in tm["diagnosis_reasons"])
 
 
+def test_simulator_target_recording_switch_updates_frames_and_result(monkeypatch):
+    """Verify switching simulator recordings never leaves simulationResult or playback frames stuck on the old file."""
+    import time
+    from src.qt_dashboard import QtDashboard
+
+    fake_eval_calls = []
+    fake_sim_calls = []
+
+    def fake_eval(filename, force_recheck=False, rec_dir=None):
+        fake_eval_calls.append(filename)
+        return {
+            "file": filename,
+            "headline": f"{filename} 평가 완료",
+            "active_status": "pass",
+            "cleaned_exists": False,
+            "issues": [],
+            "target_gestures_text": f"목표:{filename}",
+        }
+
+    def fake_sim(filename, use_cleaned=True, model_id="", rec_dir=None, model=None):
+        fake_sim_calls.append((filename, bool(use_cleaned)))
+        return {
+            "file": filename,
+            "using_cleaned": bool(use_cleaned),
+            "summary": f"{filename} 시뮬레이션 완료",
+            "target_gestures_text": f"목표:{filename}",
+            "gestures": [{"key": "thumb_index", "name": "검지 핀치", "reps": 3, "trained": True}],
+            "timeline": [{"bin": 0, "prob": 0.9, "target": "thumb_index", "confirmed": True}],
+            "reps": [],
+            "playback_frames": [
+                {"frame": 0, "target_name": f"동작:{filename}", "palm": [0.5, 0.5], "event_kind": "pinch"},
+                {"frame": 1, "target_name": f"동작:{filename}", "palm": [0.6, 0.6], "event_kind": "none"},
+            ],
+            "quality": fake_eval(filename),
+        }
+
+    monkeypatch.setattr(tc, "evaluate_recording_in_simulator", fake_eval)
+    monkeypatch.setattr(tc, "simulate_model_on_recording", fake_sim)
+    monkeypatch.setattr(tc, "get_augmentation_settings", lambda *a, **kw: {"enabled": True, "strength": "normal", "factor": 2})
+
+    ui = QtDashboard()
+    ui.training_files = [{"file": "rec_a.jsonl.gz"}, {"file": "rec_b.jsonl.gz"}]
+
+    # Run initial simulation on rec_a
+    ui.runSimulation("rec_a.jsonl.gz", True)
+    deadline = time.time() + 3.0
+    while ui.training_busy and time.time() < deadline:
+        time.sleep(0.01)
+    assert ui.simulationResult["file"] == "rec_a.jsonl.gz"
+    assert ui.getSimPlaybackFrame(0)["target_name"] == "동작:rec_a.jsonl.gz"
+
+    # Now switch to rec_b even if evaluateSimRecording + runSimulation are called back-to-back
+    ui.evaluateSimRecording("rec_b.jsonl.gz")
+    ui.runSimulation("rec_b.jsonl.gz", False)
+    deadline = time.time() + 3.0
+    while (ui.training_busy or ui._pending_sim_request) and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert ui.selectedSimFile == "rec_b.jsonl.gz"
+    assert ui.simulationResult["file"] == "rec_b.jsonl.gz"
+    assert ui.simulationResult["using_cleaned"] is False
+    assert ui.sim_eval["file"] == "rec_b.jsonl.gz"
+    assert ui.getSimPlaybackFrame(0)["target_name"] == "동작:rec_b.jsonl.gz"
+
+
+def test_target_centric_guided_recording_judgment_vs_transition_and_no_specialist_dilution(tmp_path):
+    """Verify V-sign probability is not diluted by competing specialists and guided playback/timeline only tracks target judgment vs transition."""
+    import numpy as np
+    from types import SimpleNamespace
+    from src.capture_rules import CaptureRules
+    from src.recorder import SessionRecorder
+    from src.spatial_mlp import blend_tcn_and_spatial_probs
+    from tests.test_toggle_sign import vsign
+
+    # 1. Cross-specialist firing must never dilute v_sign below threshold via row_sum division
+    cls = ["none", "thumb_ring", "thumb_pinky", "v_sign"]
+    tcn_p = np.array([[0.0, 0.99, 0.99, 1.0]], dtype=np.float64)
+    sp_p = np.array([[0.0, 0.99, 0.99, 1.0]], dtype=np.float64)
+    blended = blend_tcn_and_spatial_probs(tcn_p, cls, sp_p, cls)
+    assert float(blended[0, cls.index("v_sign")]) >= 0.95
+
+    # 2. During guided `v_sign` capture, interfering pinch actions from folded fingers are never emitted
+    rules = CaptureRules({})
+    hand_v = SimpleNamespace(landmarks=vsign(), world=[(p.x, p.y, p.z) for p in vsign()], handedness="Right", score=0.99)
+    interfering_result = SimpleNamespace(action="right_click", active_gesture="thumb_ring_pinch")
+    obs_do = rules.observe(1.0, hand_v, interfering_result, {"task": "v_sign", "target": "v_sign", "phase": "do", "set": 0, "rep": 1})
+    assert obs_do == ["v_sign"]
+    obs_rest = rules.observe(1.5, hand_v, interfering_result, {"task": "v_sign", "target": "none", "phase": "rest", "set": 0, "rep": 1})
+    assert obs_rest == []
+
+    # 3. Simulator playback & timeline distinguish 판정 구간 (judgment) vs 전환 과정 (transition) without interfering signals
+    rec = SessionRecorder(tmp_path, "guided", {"focus": "v_sign"}, now=0.0)
+    for i in range(24):
+        in_do = 6 <= i < 18
+        lbl = {
+            "target": "v_sign" if in_do else "none",
+            "task": "v_sign",
+            "phase": "do" if in_do else "rest",
+            "rep": 1 if in_do else -1,
+        }
+        # Even if raw recording contained an interfering rule target, simulator strips non-target interference
+        raw_rule = {"evaluated": True, "action": "right_click", "gesture": "thumb_ring_pinch", "targets": ["thumb_ring", "v_sign"] if in_do else ["thumb_ring"]}
+        rec.frame(100.0 + i * 0.04, hand=hand_v, label=lbl, rule=raw_rule)
+    rec.close()
+
+    sim = tc.simulate_model_on_recording(rec.path.name, rec_dir=tmp_path)
+    for pf in sim["playback_frames"]:
+        assert pf["hand_present"] is True
+        assert len(pf["lm"]) == 21
+        assert "thumb_ring" not in pf["rule_targets"]
+        assert "손가락 핀치 근접" not in pf["event_text"]
+        if pf["phase"] == "do":
+            assert pf["zone"] == "judgment"
+            assert pf["event_kind"] == "sign"
+            assert "판정 구간" in pf["event_text"]
+            assert "thumb_ring" in pf["interfering_targets"]
+        else:
+            assert pf["zone"] == "transition"
+            assert pf["event_kind"] == "transition"
+            assert "전환 과정" in pf["event_text"]
+    assert any(b.get("zone") == "judgment" for b in sim["timeline"])
+    assert any(b.get("zone") == "transition" for b in sim["timeline"])
+
+
+
 
 
 
