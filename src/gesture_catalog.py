@@ -68,6 +68,23 @@ BASE_MOTION_TARGETS = {
 MOTION_TARGETS = dict(BASE_MOTION_TARGETS)
 
 
+# Unit vectors (image coordinates: +x right, +y down) for every direction a motion can be registered with
+_D = 0.7071067811865476
+DIRECTION_VECTORS = {
+    "left": (-1.0, 0.0), "right": (1.0, 0.0), "up": (0.0, -1.0), "down": (0.0, 1.0),
+    "diag_up_left": (-_D, -_D), "diag_up_right": (_D, -_D),
+    "diag_down_left": (-_D, _D), "diag_down_right": (_D, _D),
+}
+
+
+def direction_speed(direction: str, vx: float, vy: float):
+    """Velocity along a motion's direction (positive = the intended way). None for an unknown direction."""
+    v = DIRECTION_VECTORS.get(direction)
+    if v is None:
+        return None
+    return v[0] * float(vx) + v[1] * float(vy)
+
+
 def is_motion_task(key: str) -> bool:
     t = BY_KEY.get(key)
     return bool(t is not None and t.track == "motion")

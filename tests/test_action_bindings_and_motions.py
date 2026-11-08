@@ -274,6 +274,9 @@ def test_qt_dashboard_train_motion_templates_slot_handles_zero_and_existing_reco
         trained_keys = []
         refreshed = False
 
+        def _set_busy_task(self, title, step="", progress=-1.0):
+            self.training_busy = title
+
         def trainSelectedGesture(self, key):
             self.trained_keys.append(key)
 
@@ -282,29 +285,73 @@ def test_qt_dashboard_train_motion_templates_slot_handles_zero_and_existing_reco
 
     dash = _DummyDash()
     # 1) When 0 recordings exist for swipe_tab_left, does not raise AttributeError and gives clear message
-    res0 = qt_dashboard.QtDashboard.trainMotionTemplatesSlot(dash, "swipe_tab_left")
+    # (the slot runs the template step on a worker thread; its UI-thread half is _finish_motion_templates)
+    from src.motion_mode import train_motion_templates_from_recordings as real_train
+    res0 = qt_dashboard.QtDashboard._finish_motion_templates(
+        dash, "swipe_tab_left", real_train(rec_dir=rec_dir, target_keys=["swipe_tab_left"],
+                                           output_path=tmp_path / "templates.json"), "")
     assert res0 is False
     assert "오류" not in dash.training_note
     assert "현재 0회" in dash.training_note
     assert dash.trained_keys == []
 
     # 2) When recordings exist for swipe_tab_left, trains trajectory template and calls trainSelectedGesture
-    monkeypatch.setattr(
-        "src.motion_mode.train_motion_templates_from_recordings",
-        lambda rec_dir=None, target_keys=None: {
-            "ok": True,
-            "trained_count": 1,
-            "templates": {
-                "swipe_tab_left": {
-                    "name": "모션 · 탭 왼쪽(이전 탭) 쓸기",
-                    "trajectory_recognition_rate": 1.0,
-                    "return_suppression_rate": 1.0,
-                }
-            },
+    trained = {
+        "ok": True,
+        "trained_count": 1,
+        "templates": {
+            "swipe_tab_left": {
+                "name": "모션 · 탭 왼쪽(이전 탭) 쓸기",
+                "trajectory_recognition_rate": 1.0,
+                "return_suppression_rate": 1.0,
+            }
         },
-    )
-    res1 = qt_dashboard.QtDashboard.trainMotionTemplatesSlot(dash, "swipe_tab_left")
+    }
+    res1 = qt_dashboard.QtDashboard._finish_motion_templates(dash, "swipe_tab_left", trained, "")
     assert res1 is True
     assert dash.trained_keys == ["swipe_tab_left"]
     assert "시계열 모션 궤적 템플릿 학습 완료" in dash.training_note
 
+
+
+def test_motion_template_training_runs_off_the_ui_thread(monkeypatch):
+    """Reading every recording took ~15 s on the UI thread (window froze); now a worker does it."""
+    import threading
+    from src import qt_dashboard
+
+    seen = {}
+
+    def slow_train(rec_dir=None, target_keys=None):
+        seen["thread"] = threading.current_thread()
+        return {"trained_count": 0, "templates": {}}
+
+    monkeypatch.setattr("src.motion_mode.train_motion_templates_from_recordings", slow_train)
+
+    class _Sig:
+        def __init__(self):
+            self.args = None
+            self.done = threading.Event()
+
+        def emit(self, *a):
+            self.args = a
+            self.done.set()
+
+    class _Timer:
+        def start(self):
+            pass
+
+    class _Dash:
+        training_busy = ""
+        training_job = type("J", (), {"running": False})()
+        motionTemplatesDone = _Sig()
+        training_timer = _Timer()
+
+        def _set_busy_task(self, title, step="", progress=-1.0):
+            self.training_busy = title
+
+    d = _Dash()
+    assert qt_dashboard.QtDashboard.trainMotionTemplatesSlot(d, "swipe_tab_left") is True
+    assert d.training_busy                                  # busy banner while the worker reads files
+    assert d.motionTemplatesDone.done.wait(5)
+    assert seen["thread"] is not threading.main_thread()
+    assert d.motionTemplatesDone.args[0] == "swipe_tab_left" and d.motionTemplatesDone.args[2] == ""

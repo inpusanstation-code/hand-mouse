@@ -648,6 +648,29 @@ class ActionBindingRegistry:
     # ------------------------------------------------------------------
     # Composite Hand Gesture Registration (e.g., Pinch + Swipe / Hold)
     # ------------------------------------------------------------------
+    def _new_gesture_key(self, typed: str, auto: str, prefix: str, kind: str) -> str:
+        """Key for a newly registered gesture that never replaces an existing one.
+
+        A key the user typed must be free (a built-in or an earlier registration is refused);
+        an automatic key (from posture + direction) gets _2, _3, ... when it is taken."""
+        def taken(k: str) -> bool:
+            from src.gesture_catalog import BASE_TASKS
+            return (k in DEFAULT_GESTURE_BINDINGS or k in self.custom_motions or k in self.composite_gestures
+                    or any(t.key == k for t in BASE_TASKS))
+
+        typed = str(typed or "").strip().lower().replace(" ", "_")
+        if typed:
+            if typed in DEFAULT_GESTURE_BINDINGS or taken(typed):
+                raise ValueError(f"'{typed}'는 이미 있는 동작 키입니다. 다른 키를 쓰거나 비워 두세요.")
+            key = typed if typed.startswith(prefix) or (kind == "motion" and typed.startswith("swipe_")) else f"{prefix}{typed}"
+            if taken(key):
+                raise ValueError(f"'{key}'는 이미 있는 {('모션' if kind == 'motion' else '복합 손동작')} 키입니다.")
+            return key
+        key, n = auto, 2
+        while taken(key):
+            key, n = f"{auto}_{n}", n + 1
+        return key
+
     def register_composite_gesture(
         self,
         key: str,
@@ -663,11 +686,7 @@ class ActionBindingRegistry:
         cooldown: float = 0.65,
         app_overrides: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        clean_key = str(key or "").strip().lower().replace(" ", "_")
-        if not clean_key:
-            clean_key = f"comp_{base_posture}_{trigger_type}"
-        if not clean_key.startswith("comp_"):
-            clean_key = f"comp_{clean_key}"
+        clean_key = self._new_gesture_key(key, f"comp_{base_posture}_{trigger_type}", "comp_", "composite")
         posture_ko = POSTURE_NAMES_KO.get(base_posture, base_posture)
         trig_ko = TRIGGER_NAMES_KO.get(trigger_type, trigger_type)
         display_name = str(name or "").strip() or f"{posture_ko} + {trig_ko}"
@@ -728,11 +747,7 @@ class ActionBindingRegistry:
         require_motion_mode: bool = True,
         app_overrides: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        clean_key = str(key or "").strip().lower().replace(" ", "_")
-        if not clean_key:
-            clean_key = f"motion_{posture}_{direction}"
-        if not (clean_key.startswith("motion_") or clean_key.startswith("swipe_")):
-            clean_key = f"motion_{clean_key}"
+        clean_key = self._new_gesture_key(key, f"motion_{posture}_{direction}", "motion_", "motion")
         posture_ko = POSTURE_NAMES_KO.get(posture, posture)
         dir_ko = DIRECTION_NAMES_KO.get(direction, direction)
         display_name = str(name or "").strip() or f"{posture_ko} · {dir_ko}"
@@ -964,6 +979,14 @@ class CompositeGestureDetector:
             return "thumb_pinky"
         if active_gesture == "thumb_tucked_open":
             return "thumb_tucked"
+        if landmarks and len(landmarks) >= 21:
+            # thumbs-up before fist: the engine reports a thumbs-up hand as a fist
+            from src.motion_mode import custom_posture_ok, hand_features
+            try:
+                if custom_posture_ok("thumbs_up", hand_features(landmarks)):
+                    return "thumbs_up"
+            except Exception:
+                pass
         if active_gesture == "fist":
             return "fist"
         if not landmarks or len(landmarks) < 21:

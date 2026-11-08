@@ -12,7 +12,7 @@ from src.recorder import finished_recordings, read_session
 from src.recording_plan import label_condition_key
 from src.spatial_features import SPATIAL_FEATURES, SPATIAL_FEATURE_VERSION, extract_spatial_features
 from src.tcn_features import FEATURE_VERSION, FEATURES, frame_features, windows
-from src.gesture_catalog import CLASSES, BY_KEY
+from src.gesture_catalog import CLASSES, BY_KEY, direction_speed
 
 _SESSION_CACHE_VERSION = f"v16-interference-context-guided-{FEATURE_VERSION}-{SPATIAL_FEATURE_VERSION}"
 _EXTRACT_MEM_CACHE: dict[tuple[str, int, int], dict] = {}
@@ -422,8 +422,8 @@ def _extract_record(path: Path, meta: dict, frames: list[dict], *, slim_frames: 
         task = BY_KEY.get(lab.get("task"))
         if task and task.direction and lab.get("phase") == "do":
             vx, vy = features[i, 130:132]
-            motion = {"left": -vx, "right": vx, "down": vy}[task.direction]
-            if motion < 0.03:
+            motion = direction_speed(task.direction, vx, vy)
+            if motion is not None and motion < 0.03:
                 valid_targets[i] = None
 
     # For real-length human recordings, trim reaction latency at phase transitions

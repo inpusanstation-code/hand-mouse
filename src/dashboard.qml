@@ -5014,7 +5014,7 @@ ApplicationWindow {
                                             Layout.fillWidth: true
                                             spacing: 5
                                             Repeater {
-                                                model: dashboard.posturePresets
+                                                model: dashboard.compositePosturePresets
                                                 delegate: CompactButton {
                                                     required property var modelData
                                                     text: modelData.label

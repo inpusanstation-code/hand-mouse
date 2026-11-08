@@ -54,6 +54,7 @@ class QtDashboard(QObject):
     hiddenToTray = Signal()           # the window was closed into the tray
     trackingActiveChanged = Signal()  # only when the test window opens or closes
     trainingChanged = Signal()        # training center: data, scores, training job, export
+    motionTemplatesDone = Signal(str, object, str)   # (key, result, error) from the template worker thread
 
     def __init__(self, dry_run=False, *, hide_to_tray=False, start_hidden=False,
                  overlay=False, overlay_corner="top-right", tcn_app=False):
@@ -109,6 +110,7 @@ class QtDashboard(QObject):
         from src.recording_plan_editor import RecordingPlanEditor
         self.recording_editor = RecordingPlanEditor()
         self.recording_editor.startRequested.connect(self._start_focused_plan)
+        self.motionTemplatesDone.connect(self._finish_motion_templates)
         self.model_version = 0                                  # +1 per newly trained model (runtime reloads the gate)
         from src.training_center import (
             TrainingJob,
@@ -2119,6 +2121,12 @@ class QtDashboard(QObject):
         return [{"value": k, "label": v} for k, v in POSTURE_NAMES_KO.items()]
 
     @Property("QVariantList", constant=True)
+    def compositePosturePresets(self):
+        """Base shapes a composite gesture can start from: a fixed shape is the point of it, so no "any"."""
+        from src.action_bindings import POSTURE_NAMES_KO
+        return [{"value": k, "label": v} for k, v in POSTURE_NAMES_KO.items() if k != "any"]
+
+    @Property("QVariantList", constant=True)
     def directionPresets(self):
         from src.action_bindings import DIRECTION_NAMES_KO
         return [{"value": k, "label": v} for k, v in DIRECTION_NAMES_KO.items()]
@@ -2298,7 +2306,10 @@ class QtDashboard(QObject):
 
     @Slot(str, result=bool)
     def trainMotionTemplatesSlot(self, target_key=""):
-        """Dedicated Time-Series Motion Learning: trains 16-step trajectory & velocity templates (+ TCN if requested)."""
+        """Dedicated Time-Series Motion Learning: trains 16-step trajectory & velocity templates (+ TCN if requested).
+
+        Reading every recording takes 10+ s, so it runs on a worker thread (it used to freeze the window);
+        the result comes back on the UI thread through `motionTemplatesDone` -> `_finish_motion_templates`."""
         if self.training_busy or self.training_job.running:
             return False
         from src.motion_mode import train_motion_templates_from_recordings
@@ -2306,44 +2317,59 @@ class QtDashboard(QObject):
 
         clean_key = str(target_key or "").strip()
         targets = [clean_key] if clean_key else None
-        try:
-            res = train_motion_templates_from_recordings(rec_dir=REC_DIR, target_keys=targets)
-            cnt = int(res.get("trained_count", 0))
-            if clean_key:
-                from src.gesture_catalog import BY_KEY
-                task_obj = BY_KEY.get(clean_key)
-                t_name = task_obj.name if task_obj else clean_key
-                if cnt > 0:
-                    # Also trigger binary TCN specialist training for this motion if recordings exist
-                    self.trainSelectedGesture(clean_key)
-                    t_info = (res.get("templates") or {}).get(clean_key, {})
-                    tr_pct = float(t_info.get("trajectory_recognition_rate", 0.0)) * 100.0
-                    ret_pct = float(t_info.get("return_suppression_rate", 1.0)) * 100.0
-                    self.training_note = (
-                        f"시계열 모션 궤적 템플릿 학습 완료 ({t_info.get('name', t_name)}): "
-                        f"궤적 일치 {tr_pct:.0f}% · 역방향 복귀 오발화 차단 {ret_pct:.0f}% (+ 시계열 TCN 병행 학습 중)"
-                    )
-                    if not self.training_job.running:
-                        self.refreshTraining()
-                    else:
-                        self.trainingChanged.emit()
-                else:
-                    self.training_note = (
-                        f"'{t_name}' 동작의 시계열 모션 녹화 데이터가 아직 없습니다 (현재 0회). "
-                        f"먼저 [이 동작 집중 녹화] 버튼으로 모션 스트로크를 녹화한 뒤 학습하세요."
-                    )
-                    self.trainingChanged.emit()
-            else:
-                if cnt > 0:
-                    self.training_note = f"전체 시계열 모션 {cnt}개 동작의 16-step 궤적·속도 프로파일 템플릿 학습 완료!"
-                else:
-                    self.training_note = "학습할 시계열 모션 녹화 데이터가 아직 없습니다. 먼저 모션 동작을 녹화하세요."
-                self.refreshTraining()
-            return cnt > 0
-        except Exception as exc:
-            self.training_note = f"시계열 모션 학습 오류: {exc}"
+        self._set_busy_task("시계열 모션 궤적 학습", "녹화에서 모션 스트로크(쓸기 구간)를 읽는 중…")
+
+        def work():
+            try:
+                res = train_motion_templates_from_recordings(rec_dir=REC_DIR, target_keys=targets)
+                self.motionTemplatesDone.emit(clean_key, res, "")
+            except Exception as exc:
+                self.motionTemplatesDone.emit(clean_key, None, str(exc))
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        self.training_timer.start()
+        return True
+
+    def _finish_motion_templates(self, clean_key, res, error=""):
+        """UI thread: report the template result and, for one motion, start its TCN specialist training."""
+        self._set_busy_task("")
+        if error or not isinstance(res, dict):
+            self.training_note = f"시계열 모션 학습 오류: {error or '결과 없음'}"
             self.trainingChanged.emit()
             return False
+        cnt = int(res.get("trained_count", 0))
+        if clean_key:
+            from src.gesture_catalog import BY_KEY
+            task_obj = BY_KEY.get(clean_key)
+            t_name = task_obj.name if task_obj else clean_key
+            if cnt > 0:
+                # Also trigger binary TCN specialist training for this motion if recordings exist
+                self.trainSelectedGesture(clean_key)
+                t_info = (res.get("templates") or {}).get(clean_key, {})
+                tr_pct = float(t_info.get("trajectory_recognition_rate", 0.0)) * 100.0
+                ret_pct = float(t_info.get("return_suppression_rate", 1.0)) * 100.0
+                self.training_note = (
+                    f"시계열 모션 궤적 템플릿 학습 완료 ({t_info.get('name', t_name)}): "
+                    f"궤적 일치 {tr_pct:.0f}% · 역방향 복귀 오발화 차단 {ret_pct:.0f}% (+ 시계열 TCN 병행 학습 중)"
+                )
+                if not self.training_job.running:
+                    self.refreshTraining()
+                else:
+                    self.trainingChanged.emit()
+            else:
+                self.training_note = (
+                    f"'{t_name}' 동작의 시계열 모션 녹화 데이터가 아직 없습니다 (현재 0회). "
+                    f"먼저 [집중 녹화] 버튼으로 모션 스트로크를 녹화한 뒤 학습하세요."
+                )
+                self.trainingChanged.emit()
+        else:
+            if cnt > 0:
+                self.training_note = f"전체 시계열 모션 {cnt}개 동작의 16-step 궤적·속도 프로파일 템플릿 학습 완료!"
+            else:
+                self.training_note = "학습할 시계열 모션 녹화 데이터가 아직 없습니다. 먼저 모션 동작을 녹화하세요."
+            self.refreshTraining()
+        return cnt > 0
 
     @Property(str, notify=trainingChanged)
     def trainingData(self):

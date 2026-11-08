@@ -142,7 +142,52 @@ def hand_features(landmarks: Sequence[Any]) -> Dict[str, Any]:
     thumb_up = -tdy / math.hypot(tdx, tdy) if math.hypot(tdx, tdy) > 1e-6 else 0.0   # cos of the angle between the thumb and "up" on the screen
     palm_ratio = d2(pts[5], pts[17]) / palm_len           # palm width / length: ~0.9-1.3 palm to the camera, 2+ when a fist points AT it
     depth_3d = max((abs(p[2] - wrist[2]) for p in pts), default=0.0)
-    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy), "depth_3d": depth_3d}
+    # thumb tip -> index / middle / ring / pinky tip, in palm lengths (a pinch is ~0.1-0.25)
+    pinch = tuple(d2(pts[THUMB_TIP], pts[tip]) / palm_len for tip in (8, 12, 16, 20))
+    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy), "depth_3d": depth_3d, "pinch": pinch}
+
+
+def _thumbs_up(f: Dict[str, Any]) -> bool:
+    """Same test as motion mode's entry pose (four fingers folded, thumb pointing up; a knuckles-up fist is not one)."""
+    global _ENTRY_CHECK
+    if _ENTRY_CHECK is None:
+        _ENTRY_CHECK = MotionMode()
+    return bool(_ENTRY_CHECK.entry_pose(f))
+
+
+_ENTRY_CHECK = None
+CUSTOM_PINCH_MAX = 0.32      # thumb tip within this many palm lengths of a fingertip = that pinch
+_PINCH_FINGER = {"thumb_index": 0, "thumb_middle": 1, "thumb_ring": 2, "thumb_pinky": 3}
+
+
+def custom_posture_ok(posture: str, f: Dict[str, Any]) -> bool:
+    """Does the hand (hand_features) have the shape a user-registered motion asks for?
+
+    Every posture the registration form offers (action_bindings.POSTURE_NAMES_KO) is checked here;
+    an unknown name never matches, so a typo cannot turn into "any hand shape"."""
+    curls = f.get("curl", (1.5, 1.5, 1.5, 1.5))
+    tuck = float(f.get("thumb_tuck", 0.8))
+    if posture == "any":
+        return True
+    if posture == "open_hand":
+        return min(curls) >= 1.22
+    if posture == "thumb_tucked":
+        return min(curls) >= 1.05 and tuck <= 0.52
+    if posture == "v_sign":
+        return curls[0] >= 1.45 and curls[1] >= 1.45 and curls[2] <= 1.25 and curls[3] <= 1.25
+    if posture == "rock_sign":
+        return curls[0] >= 1.45 and curls[3] >= 1.38 and curls[1] <= 1.25 and curls[2] <= 1.25
+    if posture == "fist":
+        return max(curls) <= 1.18 and not _thumbs_up(f)
+    if posture == "thumbs_up":
+        return _thumbs_up(f)
+    if posture in _PINCH_FINGER:
+        pinch = f.get("pinch")
+        if not pinch:
+            return False
+        i = _PINCH_FINGER[posture]
+        return pinch[i] <= CUSTOM_PINCH_MAX and pinch[i] == min(pinch)
+    return False
 
 
 @dataclass
@@ -472,21 +517,11 @@ class MotionMode:
         if not custom_motions:
             return None
 
-        curls = f.get("curl", (1.5, 1.5, 1.5, 1.5))
-        tuck = float(f.get("thumb_tuck", 0.8))
         for m_key, m_def in custom_motions.items():
             if not m_def.get("enabled", True):
                 continue
             req_posture = str(m_def.get("posture", "open_hand"))
-            if req_posture == "open_hand" and min(curls) < 1.22:
-                continue
-            elif req_posture == "thumb_tucked" and (min(curls) < 1.05 or tuck > 0.52):
-                continue
-            elif req_posture == "v_sign" and not (curls[0] >= 1.45 and curls[1] >= 1.45 and curls[2] <= 1.25 and curls[3] <= 1.25):
-                continue
-            elif req_posture == "rock_sign" and not (curls[0] >= 1.45 and curls[3] >= 1.38 and curls[1] <= 1.25 and curls[2] <= 1.25):
-                continue
-            elif req_posture == "fist" and max(curls) > 1.18:
+            if not custom_posture_ok(req_posture, f):
                 continue
 
             min_dist = float(m_def.get("min_distance", 0.14))
