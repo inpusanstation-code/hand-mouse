@@ -412,6 +412,61 @@ class GestureResult:
     hand_shape: str = ""  # "open" | "half" | "fist" (cursor speed step), "" when not a pointing frame
 
 
+# Hand landmark names (MediaPipe order), for the cursor reference picker
+HAND_JOINT_NAMES: Tuple[str, ...] = (
+    "손목",
+    "엄지 뿌리", "엄지 첫마디", "엄지 둘째마디", "엄지 끝",
+    "검지 뿌리", "검지 첫마디", "검지 둘째마디", "검지 끝",
+    "중지 뿌리", "중지 첫마디", "중지 둘째마디", "중지 끝",
+    "약지 뿌리", "약지 첫마디", "약지 둘째마디", "약지 끝",
+    "새끼 뿌리", "새끼 첫마디", "새끼 둘째마디", "새끼 끝",
+)
+# Joints that stay put while fingers pinch / curl: a cursor anchored only on these does not
+# jump when you click. Finger joints (6-8, 10-12, ...) move with every pinch.
+STABLE_ANCHOR_JOINTS = frozenset({0, 1, 5, 9, 13, 17})
+
+
+def normalize_anchor_joints(value: Any) -> Tuple[int, ...]:
+    """Landmark indices 0..20 from a list / tuple / "0,9" string; sorted, unique. Bad input -> ()."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [v for v in value.replace(";", ",").split(",") if v.strip()]
+    try:
+        items = list(value)
+    except TypeError:
+        return ()
+    out = set()
+    for v in items:
+        try:
+            i = int(str(v).strip())
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i <= 20:
+            out.add(i)
+    return tuple(sorted(out))
+
+
+def describe_anchor_joints(joints: Sequence[int]) -> str:
+    """Short Korean name of a joint set, for buttons and status lines."""
+    j = tuple(sorted(set(joints)))
+    named = {
+        (): "손바닥 중심 (기본)",
+        (0, 9): "손바닥 중심",
+        (0,): "손목",
+        (5, 9, 13, 17): "손가락 뿌리 4곳",
+        (0, 5, 9, 13, 17): "손바닥 전체",
+        (0, 1, 5, 9, 13, 17): "손바닥 전체 (엄지 포함)",
+    }
+    if j in named:
+        return named[j]
+    if len(j) == 1:
+        return HAND_JOINT_NAMES[j[0]]
+    if len(j) <= 3:
+        return " + ".join(HAND_JOINT_NAMES[i] for i in j) + " 가운데"
+    return f"관절 {len(j)}곳의 가운데"
+
+
 class GestureEngine:
     """
     Processes 21 hand landmarks to detect pinch gestures with hysteresis
@@ -444,6 +499,9 @@ class GestureEngine:
         self._profile_base = {}
         self._profile_applied = {}
         self.profile_name = None
+        # Joints the user picked as the cursor reference (UI setting, survives config/profile reloads).
+        # () = use the config (`cursor_anchor_points`, else the wrist -> middle MCP `cursor_anchor_ratio`).
+        self.cursor_anchor_override: Tuple[int, ...] = ()
         self.config: Dict[str, Any] = self.load_config(self.config_path)
         self._index_pinched: bool = False
         self._middle_hold_pinched: bool = False
@@ -758,11 +816,22 @@ class GestureEngine:
             ratios.append(self._dist_3d(pts[tip_i], wrist) / base if base > 1e-6 else 9.9)
         return tuple(ratios)
 
+    def anchor_joints(self) -> Tuple[int, ...]:
+        """Joints the cursor follows: the user's pick, else `cursor_anchor_points` in the config, else ()."""
+        return self.cursor_anchor_override or normalize_anchor_joints(self.config.get("cursor_anchor_points"))
+
     def palm_anchor_point(self, pts: Sequence[Point3D]) -> Tuple[float, float]:
         """
-        Cursor reference point on the wrist (#0) -> palm (middle MCP #9) line.
+        Cursor reference point.
+
+        With chosen joints (`anchor_joints()`): the centre of those landmarks.
+        Otherwise a point on the wrist (#0) -> palm (middle MCP #9) line:
         `cursor_anchor_ratio` 0.0 = wrist, 1.0 = middle finger base, 0.5 = palm center.
         """
+        joints = self.anchor_joints()
+        if joints and len(pts) > max(joints):
+            n = float(len(joints))
+            return (sum(pts[j].x for j in joints) / n, sum(pts[j].y for j in joints) / n)
         ratio = max(0.0, min(1.0, float(self.config.get("cursor_anchor_ratio", 0.5))))
         wrist = pts[self.WRIST]
         palm = pts[self.MIDDLE_MCP]

@@ -134,6 +134,245 @@ ApplicationWindow {
         }
     }
 
+    // Cursor reference picker: click joints on a hand skeleton; the cursor follows their centre
+    Popup {
+        id: anchorPicker
+        property var picked: []          // working copy, applied with [적용]
+        readonly property var stable: dashboard.stableAnchorJoints
+        // Schematic right hand, palm toward the camera (as in the mirrored preview), 0..1 box
+        readonly property var joints: [
+            [0.50, 0.94],
+            [0.35, 0.84], [0.24, 0.72], [0.16, 0.60], [0.10, 0.49],
+            [0.36, 0.53], [0.33, 0.37], [0.31, 0.26], [0.30, 0.15],
+            [0.49, 0.50], [0.49, 0.33], [0.49, 0.21], [0.49, 0.09],
+            [0.61, 0.52], [0.63, 0.36], [0.64, 0.26], [0.65, 0.16],
+            [0.71, 0.58], [0.75, 0.46], [0.78, 0.38], [0.80, 0.30]
+        ]
+        readonly property var bones: [
+            [0,1],[1,2],[2,3],[3,4], [0,5],[5,6],[6,7],[7,8], [5,9],[9,10],[10,11],[11,12],
+            [9,13],[13,14],[14,15],[15,16], [13,17],[17,18],[18,19],[19,20], [0,17]
+        ]
+        readonly property var presets: [
+            ["손바닥 중심 (기본)", []], ["손목", [0]], ["손가락 뿌리 4곳", [5, 9, 13, 17]],
+            ["손바닥 전체", [0, 5, 9, 13, 17]], ["검지 뿌리", [5]], ["중지 뿌리", [9]], ["검지 끝", [8]]
+        ]
+        // [] means the default (centre of wrist and middle-finger base): shown as 0 + 9
+        readonly property var shown: picked.length === 0 ? [0, 9] : picked
+        readonly property bool unstable: {
+            for (var i = 0; i < picked.length; i++)
+                if (stable.indexOf(picked[i]) < 0) return true
+            return false
+        }
+        function openWith(current) {
+            picked = current ? current.slice() : []
+            open()
+        }
+        function toggle(j) {
+            var base = picked.length === 0 ? [0, 9] : picked.slice()
+            var at = base.indexOf(j)
+            if (at >= 0) base.splice(at, 1); else base.push(j)
+            base.sort(function (a, b) { return a - b })
+            // back to exactly 0 + 9 = the default
+            picked = (base.length === 2 && base[0] === 0 && base[1] === 9) ? [] : base
+        }
+        function samePicks(a, b) {
+            if (a.length !== b.length) return false
+            for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+            return true
+        }
+        function centre() {
+            var x = 0, y = 0, js = shown
+            for (var i = 0; i < js.length; i++) { x += joints[js[i]][0]; y += joints[js[i]][1] }
+            return js.length ? [x / js.length, y / js.length] : [0.5, 0.7]
+        }
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(720, window.width - 40)
+        height: Math.min(560, window.height - 40)
+        modal: true
+        focus: true
+        z: 900
+        padding: 18
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle { radius: 16; color: "white"; border.color: window.line }
+        onPickedChanged: anchorSkelCanvas.requestPaint()
+        contentItem: ColumnLayout {
+            spacing: 10
+            TextLabel { text: "커서 기준점 정하기"; font.pixelSize: 19; font.bold: true }
+            TextLabel {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: window.muted
+                font.pixelSize: 13
+                text: "손 그림에서 관절을 눌러 고르세요. 여러 곳을 고르면 그 가운데(＋)를 커서가 따라갑니다. 다시 누르면 빠집니다."
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 16
+                Rectangle {
+                    id: anchorSkelBox
+                    Layout.preferredWidth: Math.min(330, anchorPicker.availableWidth * 0.5)
+                    Layout.fillHeight: true
+                    radius: 12
+                    color: "#F4F7F9"
+                    border.color: window.line
+                    Item {
+                        id: anchorSkelArea
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        Canvas {
+                            id: anchorSkelCanvas
+                            anchors.fill: parent
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.reset()
+                                var J = anchorPicker.joints, B = anchorPicker.bones
+                                ctx.strokeStyle = "#AEBBC6"
+                                ctx.lineWidth = 3
+                                ctx.lineCap = "round"
+                                for (var i = 0; i < B.length; i++) {
+                                    ctx.beginPath()
+                                    ctx.moveTo(J[B[i][0]][0] * width, J[B[i][0]][1] * height)
+                                    ctx.lineTo(J[B[i][1]][0] * width, J[B[i][1]][1] * height)
+                                    ctx.stroke()
+                                }
+                                var c = anchorPicker.centre(), sh = anchorPicker.shown
+                                ctx.strokeStyle = "rgba(29, 78, 216, 0.35)"
+                                ctx.lineWidth = 1.5
+                                for (var k = 0; k < sh.length && sh.length > 1; k++) {
+                                    ctx.beginPath()
+                                    ctx.moveTo(J[sh[k]][0] * width, J[sh[k]][1] * height)
+                                    ctx.lineTo(c[0] * width, c[1] * height)
+                                    ctx.stroke()
+                                }
+                            }
+                        }
+                        Repeater {
+                            model: 21
+                            delegate: Rectangle {
+                                id: anchorJointDot
+                                required property int index
+                                readonly property bool on: anchorPicker.shown.indexOf(index) >= 0
+                                readonly property bool fingertip: [4, 8, 12, 16, 20].indexOf(index) >= 0
+                                width: on ? 20 : 16
+                                height: width
+                                radius: width / 2
+                                x: anchorPicker.joints[index][0] * anchorSkelArea.width - width / 2
+                                y: anchorPicker.joints[index][1] * anchorSkelArea.height - height / 2
+                                color: on ? window.primaryBlue : (anchorJointHover.containsMouse ? "#DCE7F5" : "white")
+                                border.color: on ? window.primaryBlueDark : (anchorPicker.stable.indexOf(index) >= 0 ? "#16846E" : "#8A9AA8")
+                                border.width: 2
+                                MouseArea {
+                                    id: anchorJointHover
+                                    anchors.fill: parent
+                                    anchors.margins: -6
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: anchorPicker.toggle(anchorJointDot.index)
+                                }
+                                ToolTip.visible: anchorJointHover.containsMouse
+                                ToolTip.delay: 250
+                                ToolTip.text: anchorJointDot.index + " · " + dashboard.handJointNames[anchorJointDot.index]
+                            }
+                        }
+                        // the point the cursor will follow
+                        Item {
+                            readonly property var c: anchorPicker.centre()
+                            x: c[0] * anchorSkelArea.width - 13
+                            y: c[1] * anchorSkelArea.height - 13
+                            width: 26; height: 26
+                            visible: anchorPicker.shown.length > 1
+                            Rectangle { anchors.centerIn: parent; width: 26; height: 3; radius: 1.5; color: "#F97316" }
+                            Rectangle { anchors.centerIn: parent; width: 3; height: 26; radius: 1.5; color: "#F97316" }
+                        }
+                    }
+                    TextLabel {
+                        anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.margins: 8
+                        text: "오른손 · 손바닥이 카메라 쪽"
+                        font.pixelSize: 11
+                        color: window.muted
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 8
+                    SectionLabel { text: "빠른 선택" }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Repeater {
+                            model: anchorPicker.presets
+                            delegate: CompactButton {
+                                required property var modelData
+                                text: modelData[0]
+                                accent: anchorPicker.samePicks(anchorPicker.picked, modelData[1])
+                                onClicked: anchorPicker.picked = modelData[1].slice()
+                            }
+                        }
+                    }
+                    SectionLabel { text: "고른 관절" }
+                    TextLabel {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 13
+                        text: {
+                            if (anchorPicker.picked.length === 0)
+                                return "손목 + 중지 뿌리의 가운데 (기본 · 손바닥 중심)"
+                            var names = []
+                            for (var i = 0; i < anchorPicker.picked.length; i++)
+                                names.push(dashboard.handJointNames[anchorPicker.picked[i]])
+                            return names.join(", ") + (names.length > 1 ? "  → 가운데" : "")
+                        }
+                    }
+                    Rectangle {
+                        visible: anchorPicker.unstable
+                        Layout.fillWidth: true
+                        implicitHeight: anchorUnstableNote.implicitHeight + 16
+                        radius: 8
+                        color: "#FFF1D6"
+                        border.color: "#F2B544"
+                        TextLabel {
+                            id: anchorUnstableNote
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 12
+                            color: "#7A4A00"
+                            text: "손가락 마디·끝은 집거나 오므릴 때 함께 움직여서, 클릭하는 순간 커서가 흔들릴 수 있습니다. 클릭 위치가 중요하면 손목·손가락 뿌리(초록 테두리)를 고르세요."
+                        }
+                    }
+                    TextLabel {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        color: window.muted
+                        text: dashboard.pointerOnly
+                            ? "검지 포인터 모드에서는 [커서 기준점]이 '직접 지정'으로 바뀝니다."
+                            : "손바닥(Dan) 모드의 커서 이동에 바로 쓰입니다. 적용하면 입력이 잠시 멈춥니다."
+                    }
+                    Item { Layout.fillHeight: true }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Item { Layout.fillWidth: true }
+                        ActionButton { text: "취소"; onClicked: anchorPicker.close() }
+                        ActionButton {
+                            text: "적용"
+                            primary: true
+                            onClicked: {
+                                dashboard.setAnchorJoints(anchorPicker.picked)
+                                anchorPicker.close()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // One confirmation step for actions that cannot be undone (delete a recording, reset a gesture...)
     Dialog {
         id: confirmDialog
@@ -738,6 +977,16 @@ ApplicationWindow {
                                         onClicked: dashboard.resetPalmCalibration()
                                     }
                                 }
+                                ActionButton {
+                                    visible: !dashboard.pointerOnly
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    implicitWidth: 0
+                                    leftPadding: 10; rightPadding: 10
+                                    enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                                    text: "커서 기준점 · " + dashboard.anchorJointsLabel
+                                    onClicked: anchorPicker.openWith(dashboard.anchorJoints)
+                                }
                                 SectionLabel { visible: !dashboard.pointerOnly && dashboard.tcnAvailable; text: "손짓 확인 (TCN: 학습된 동작)" }
                                 Segmented {
                                     visible: !dashboard.pointerOnly && dashboard.tcnAvailable
@@ -790,9 +1039,19 @@ ApplicationWindow {
                                     SectionLabel { text: "커서 기준점" }
                                     Segmented {
                                         enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                        options: [["index", "검지 끝"], ["palm", "손바닥 중심"]]
+                                        options: [["index", "검지 끝"], ["palm", "직접 지정"]]
                                         current: dashboard.pointerAnchor
                                         onPicked: function (value) { dashboard.setAnchor(value) }
+                                    }
+                                    ActionButton {
+                                        visible: dashboard.pointerAnchor === "palm"
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        implicitWidth: 0
+                                        leftPadding: 10; rightPadding: 10
+                                        enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                        text: "기준점 · " + dashboard.anchorJointsLabel + "  · 바꾸기"
+                                        onClicked: anchorPicker.openWith(dashboard.anchorJoints)
                                     }
                                     SectionLabel { text: "손 주변 확대 (시험)" }
                                     Segmented {
@@ -852,7 +1111,7 @@ ApplicationWindow {
                                 Repeater {
                                     visible: dashboard.pointerOnly
                                     model: dashboard.pointerOnly ? (dashboard.clickOff
-                                        ? [[dashboard.pointerAnchor === "palm" ? "손바닥 따라가기" : "검지 끝 따라가기", "포인터 이동"], ["클릭", "꺼짐"]]
+                                        ? [[dashboard.pointerAnchor === "palm" ? (dashboard.anchorJointsLabel + " 따라가기") : "검지 끝 따라가기", "포인터 이동"], ["클릭", "꺼짐"]]
                                         : dashboard.triggerClick
                                         ? [["검지만 펴기", "포인터 이동"], ["엄지로 검지 옆 짧게", "좌클릭"],
                                            ["누른 채 가만히", "우클릭"], ["누른 채 움직이기", "드래그"]]

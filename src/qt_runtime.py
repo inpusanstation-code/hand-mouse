@@ -55,6 +55,7 @@ class UiState:
     use_index_pointer: bool = True
     click_style: str = "pinch"
     anchor: str = "index"
+    anchor_joints: Tuple[int, ...] = ()  # landmarks the cursor follows (palm mode / "직접 지정"); () = config default
     hand_crop: bool = False
     axes: Optional[Tuple[float, float, float, float]] = None
     calibrating: bool = False
@@ -391,6 +392,10 @@ class QtRuntime:
             time.sleep(.03)
             return
 
+        if ui.anchor_joints != self.engine.cursor_anchor_override:
+            # the user picked other skeleton points as the cursor reference (both engines use it)
+            self.engine.cursor_anchor_override = tuple(ui.anchor_joints)
+            self.pointer.gestures.cursor_anchor_override = tuple(ui.anchor_joints)
         if ui.profile != self._applied_profile:
             # the user picked another calibration profile: both engines reload their config
             self._applied_profile = ui.profile
@@ -1285,7 +1290,7 @@ class QtRuntime:
             if kind:
                 self._say(f"실패 기록: {kind}")
         saved = self.failures.poll(t0, {
-            "anchor": ui.anchor, "click_style": ui.click_style, "hand_crop": ui.hand_crop,
+            "anchor": ui.anchor, "anchor_joints": list(ui.anchor_joints), "click_style": ui.click_style, "hand_crop": ui.hand_crop,
             "frame_px": [frame.shape[1], frame.shape[0]], "camera_mode": list(self.camera.actual_mode() or ()),
             "tracker": self.tracker.options, "sensitivity_pct": ui.sensitivity,
             "control_hand": ui.control_hand, "dry_run": self.dry_run,
@@ -1318,7 +1323,7 @@ class QtRuntime:
             scheme = str(self.engine.config.get("movement_scheme", "legacy_shape"))
             ret_supp = str(self.engine.config.get("return_suppression", "off"))
             run = {
-                "anchor": ui.anchor, "sensitivity_pct": ui.sensitivity,
+                "anchor": ui.anchor, "anchor_joints": list(ui.anchor_joints), "sensitivity_pct": ui.sensitivity,
                 "movement_scheme": scheme, "return_suppression": ret_supp,
                 "condition": f"{scheme}+{ret_supp}",
                 "direction_calibrated": ui.axes is not None, "control_hand": ui.control_hand,

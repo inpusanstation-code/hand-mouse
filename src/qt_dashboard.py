@@ -164,6 +164,9 @@ class QtDashboard(QObject):
         saved_anchor = self.preferences.value("pointerAnchor", "index", type=str)
         # Which point of the hand the cursor follows: index fingertip or palm centre.
         self.pointer_anchor = saved_anchor if saved_anchor in ("index", "palm") else "index"
+        # Skeleton points the cursor follows (palm mode, and "직접 지정" in index mode); () = palm centre default
+        from src.gesture_engine import normalize_anchor_joints
+        self.anchor_joints = normalize_anchor_joints(self.preferences.value("cursorAnchorJoints", "", type=str))
         # Tracking test (main.py owns the TrackingTest; this only shows it)
         self.tracking_view = None           # plain view of the runtime's TrackingTest
         self.tracking_requested = False
@@ -2556,7 +2559,48 @@ class QtDashboard(QObject):
 
     @Property(str, notify=stateChanged)
     def anchorLabel(self):
-        return "기준점 · 검지 끝" if self.pointer_anchor == "index" else "기준점 · 손바닥 중심"
+        return "기준점 · 검지 끝" if self.pointer_anchor == "index" else "기준점 · " + self.anchorJointsLabel
+
+    # ------------------------------------------------------------------ cursor reference joints
+    @Property("QVariantList", notify=stateChanged)
+    def anchorJoints(self):
+        return list(self.anchor_joints)
+
+    @Property(str, notify=stateChanged)
+    def anchorJointsLabel(self):
+        from src.gesture_engine import describe_anchor_joints
+        return describe_anchor_joints(self.anchor_joints)
+
+    @Property("QVariantList", constant=True)
+    def handJointNames(self):
+        from src.gesture_engine import HAND_JOINT_NAMES
+        return list(HAND_JOINT_NAMES)
+
+    @Property("QVariantList", constant=True)
+    def stableAnchorJoints(self):
+        from src.gesture_engine import STABLE_ANCHOR_JOINTS
+        return sorted(STABLE_ANCHOR_JOINTS)
+
+    @Slot("QVariantList")
+    def setAnchorJoints(self, joints):
+        """Use these landmarks (their centre) as the cursor reference. [] = back to the palm-centre default.
+
+        In index-pointer mode this also switches the cursor reference to "직접 지정" (anchor "palm"),
+        since picking points is how the user says which point to follow."""
+        from src.gesture_engine import normalize_anchor_joints
+        picked = normalize_anchor_joints(joints)
+        if picked == (0, 9):
+            picked = ()      # wrist + middle MCP centre is exactly the default palm centre
+        switch = self.use_index_pointer and self.pointer_anchor != "palm"
+        if picked == self.anchor_joints and not switch:
+            return
+        self._pause_for_change()
+        self.anchor_joints = picked
+        self.preferences.setValue("cursorAnchorJoints", ",".join(str(j) for j in picked))
+        if switch:
+            self.pointer_anchor = "palm"
+            self.preferences.setValue("pointerAnchor", "palm")
+        self.stateChanged.emit()
 
     @Slot()
     def toggleAnchor(self):
@@ -2664,7 +2708,7 @@ class QtDashboard(QObject):
         return UiState(
             stage=self.stage_name, control_hand=self.control_hand,
             use_index_pointer=self.use_index_pointer, click_style=self.click_style,
-            anchor=self.pointer_anchor, hand_crop=self.hand_crop, axes=self.axes,
+            anchor=self.pointer_anchor, anchor_joints=self.anchor_joints, hand_crop=self.hand_crop, axes=self.axes,
             calibrating=self.calibrating, sensitivity=self.pointer_sensitivity,
             show_fingertips=self.show_fingertips, profile=self.profile, motion_request=self.motion_request,
             palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
