@@ -211,6 +211,39 @@ class SampleStore:
                 self._rewrite_index()
             return len(ids)
 
+    def prune(self, min_quality: float = .5) -> Dict[str, int]:
+        """Replay memory upkeep (spec 11): drops unchecked samples whose hand was mostly missing, and exact duplicates (the same joints
+        saved twice in one session; the oldest stays). What a person labelled is never dropped for quality; of two identical labelled
+        samples the
+        older one stays. Returns how many went for each reason."""
+        with self._lock:
+            low = [s.sample_id for s in self._items.values()
+                   if s.quality_score < min_quality and s.label_source not in SUPERVISED_SOURCES]
+            seen: Dict[str, str] = {}
+            dup: List[str] = []
+            for s in sorted(self._items.values(), key=lambda s: s.created):
+                if s.sample_id in low:
+                    continue
+                try:
+                    arrays = self.arrays(s.sample_id)
+                except Exception:
+                    continue
+                import hashlib
+                digest = hashlib.sha1()
+                for key in sorted(arrays):
+                    digest.update(key.encode())
+                    digest.update(np.ascontiguousarray(arrays[key]).tobytes())
+                key = f"{s.session}|{s.label}|{digest.hexdigest()}"
+                if key in seen:
+                    dup.append(s.sample_id)
+                else:
+                    seen[key] = s.sample_id
+            for sample_id in low + dup:
+                self._remove(sample_id)
+            if low or dup:
+                self._rewrite_index()
+            return {"low_quality": len(low), "duplicates": len(dup)}
+
     def reset(self) -> None:
         """Removes every stored sample."""
         with self._lock:

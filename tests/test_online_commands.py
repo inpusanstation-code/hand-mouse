@@ -136,6 +136,7 @@ def test_the_command_runs_only_when_control_is_on(tmp_path, registry):
     rt = with_gesture(tmp_path)
     set_command("집기", "ctrl+x")
     rt.paused = True
+    rt._step()          # the first step loads torch (seconds when this file runs alone): not part of the timing below
     steps_for(rt, .8)
     assert rt._snap.online_gesture == "집기" and hotkeys(rt) == []
     rt.paused = False
@@ -286,3 +287,15 @@ def test_the_dashboard_lists_gestures_and_saves_commands(dashboard, tmp_path, re
     assert dashboard.myGestures == [] and dashboard.online_commands[-1] == ("gesture_delete", "집기")
     dashboard.online_commands.clear()
     rt.online.close() if rt.online else None
+
+
+def test_win_combinations_are_offered_as_buttons_and_kept():
+    """Windows acts on Win+D before the app sees the keys, so it cannot be pressed in the popup: it is a button, and Win+L stays out."""
+    values = [c["value"] for c in choices()]
+    assert "win+d" in values and "win+shift+s" in values
+    assert check_hotkey("win+d") == "win+d" and check_hotkey("Windows+D") == "win+d"
+    try:
+        check_hotkey("win+l")
+        raise AssertionError("win+l must be refused")
+    except CommandError:
+        pass

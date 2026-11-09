@@ -55,3 +55,8 @@
 - **주의:** `uv run`/`uv sync`에 `--extra`를 빼면 uv가 환경을 기본 묶음에 맞추면서 PySide6·torch를 지운다. 이 작업에서는 늘 `--extra qt --extra train`을 붙인다.
 - 이 PC에서 확인한 버전: torch 2.15.0+cpu, onnx 1.23.2, onnxruntime 1.31.1, mediapipe 1.2.0, PySide6 6.12.0, Python 3.12. 시험 359개 통과(위의 알려진 실패 1개 제외).
 - 계획(사용자와 합의): 앱을 TCN 학습 데이터 제조기로 확장 → 오류가 많은 동작부터(엄지+약지 우클릭, 엄지+검지 스크롤, 반주먹 이동="아무것도 아님") 3가지 각도 × 15회 + 반주먹 이동 15분 녹화 → 규칙 엔진 위에 "의도한 동작인지" 확인기로 붙여 같은 기록에서 규칙과 비교 → 좋아지면 다른 동작으로 넓힌다. 녹화에는 화면 좌표뿐 아니라 3D 관절(world landmarks), Pose 어깨, PC·카메라·사람·날짜를 처음부터 함께 저장한다.
+
+## 화면 가상 손과 명세 마무리 (2026-11-10 밤, 이 PC `pc-rtx3060`)
+- 가상 손 조작·측정·남은 것: `docs/virtual-hand.md`. 이 모드에서는 규칙 엔진의 핀치가 모두 꺼지고 손 모양 판정(`src/virtual_hand.py`)만 쓴다.
+- 실사용 클릭 기록은 `logs/virtual_clicks/`(git 제외), 클릭 뒤 5초 안 F = "클릭 아님". 결과는 `scripts/virtual_click_report.py`.
+- 명세 남은 항목(FAR/FRR 곡선, 표본 정리, 자동 되돌리기, 학습 우선순위, Pause 긴급 정지): `docs/online-learning-phase5.md` "마무리 추가".

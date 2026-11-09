@@ -202,9 +202,11 @@ ApplicationWindow {
         objectName: "commandPopup"
         property string label: ""
         property bool listening: false
+        property bool withWin: false        // Windows keeps Win combinations from the app: this adds Win to the next key
         function openFor(name) {
             label = name
             listening = false
+            withWin = false
             dashboard.clearCommandMessage()
             open()
             commandKeys.forceActiveFocus()
@@ -245,9 +247,10 @@ ApplicationWindow {
                     if (event.modifiers & Qt.ControlModifier) combo.push("ctrl")
                     if (event.modifiers & Qt.AltModifier) combo.push("alt")
                     if (event.modifiers & Qt.ShiftModifier) combo.push("shift")
-                    if (event.modifiers & Qt.MetaModifier) combo.push("win")
+                    if ((event.modifiers & Qt.MetaModifier) || commandPopup.withWin) combo.push("win")
                     combo.push(name)
                     commandPopup.listening = false
+                    commandPopup.withWin = false
                     event.accepted = true
                     if (dashboard.setGestureCommand(commandPopup.label, combo.join("+"))) commandPopup.close()
                 }
@@ -269,11 +272,28 @@ ApplicationWindow {
                     }
                 }
             }
-            ActionButton {
+            RowLayout {
                 Layout.fillWidth: true
-                accent: commandPopup.listening
-                text: commandPopup.listening ? "지금 키를 누르세요 (예: Ctrl+B) · Esc 취소" : "다른 키 직접 입력"
-                onClicked: { commandPopup.listening = true; commandKeys.forceActiveFocus() }
+                spacing: 8
+                ActionButton {
+                    Layout.fillWidth: true
+                    accent: commandPopup.listening
+                    text: commandPopup.listening
+                          ? (commandPopup.withWin ? "Win + 지금 키를 누르세요 (예: D) · Esc 취소" : "지금 키를 누르세요 (예: Ctrl+B) · Esc 취소")
+                          : "다른 키 직접 입력"
+                    onClicked: { commandPopup.listening = true; commandKeys.forceActiveFocus() }
+                }
+                // Win+key cannot be pressed here (Windows acts on it first): switch Win on, then press only the key
+                ActionButton {
+                    objectName: "commandWinToggle"
+                    accent: commandPopup.withWin
+                    text: commandPopup.withWin ? "Win 켜짐" : "Win 같이"
+                    onClicked: {
+                        commandPopup.withWin = !commandPopup.withWin
+                        commandPopup.listening = true
+                        commandKeys.forceActiveFocus()
+                    }
+                }
             }
             TextLabel {
                 Layout.fillWidth: true
@@ -1367,6 +1387,15 @@ ApplicationWindow {
                                     current: dashboard.virtualHandOn ? "on" : "off"
                                     onPicked: function (value) { dashboard.setVirtualHand(value === "on") }
                                 }
+                                ActionButton {
+                                    visible: !dashboard.pointerOnly && dashboard.virtualHandOn
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    implicitWidth: 0
+                                    accent: dashboard.boxEditing
+                                    text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
+                                    onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
+                                }
                                 SectionLabel { visible: !dashboard.pointerOnly; text: "손 주변 확대 (시험)" }
                                 Segmented {
                                     visible: !dashboard.pointerOnly
@@ -1684,6 +1713,62 @@ ApplicationWindow {
                             source: dashboard.previewUrl
                             cache: false
                             fillMode: Image.PreserveAspectFit
+                        }
+                        // The box for the hand on the screen: its inside is the whole monitor. Drag on the image to draw it.
+                        Item {
+                            id: boxLayer
+                            objectName: "boxLayer"
+                            visible: !dashboard.pointerOnly && dashboard.virtualHandOn
+                            x: capturePreview.x + (capturePreview.width - capturePreview.paintedWidth) / 2
+                            y: capturePreview.y + (capturePreview.height - capturePreview.paintedHeight) / 2
+                            width: capturePreview.paintedWidth
+                            height: capturePreview.paintedHeight
+                            property point start
+                            property point end
+                            property bool dragging: false
+                            readonly property var box: dashboard.virtualBox
+                            Rectangle {
+                                x: (boxLayer.dragging ? Math.min(boxLayer.start.x, boxLayer.end.x) : boxLayer.box[0] * boxLayer.width)
+                                y: (boxLayer.dragging ? Math.min(boxLayer.start.y, boxLayer.end.y) : boxLayer.box[1] * boxLayer.height)
+                                width: boxLayer.dragging ? Math.abs(boxLayer.end.x - boxLayer.start.x) : (boxLayer.box[2] - boxLayer.box[0]) * boxLayer.width
+                                height: boxLayer.dragging ? Math.abs(boxLayer.end.y - boxLayer.start.y) : (boxLayer.box[3] - boxLayer.box[1]) * boxLayer.height
+                                color: dashboard.boxEditing ? Qt.rgba(0.27, 0.9, 0.74, 0.12) : "transparent"
+                                border.color: window.mint
+                                border.width: dashboard.boxEditing ? 3 : 2
+                                radius: 4
+                            }
+                            Rectangle {
+                                visible: dashboard.boxEditing
+                                anchors.top: parent.top
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.topMargin: 12
+                                width: boxHint.implicitWidth + 28
+                                height: boxHint.implicitHeight + 12
+                                radius: height / 2
+                                color: Qt.rgba(0.06, 0.09, 0.16, 0.72)
+                                Text {
+                                    id: boxHint
+                                    anchors.centerIn: parent
+                                    text: "손을 움직일 영역을 끌어서 그리세요 · 이 영역이 모니터 전체가 돼요"
+                                    color: "#F5F7F8"
+                                    font.pixelSize: 14
+                                    font.family: "Malgun Gothic"
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: dashboard.boxEditing
+                                cursorShape: dashboard.boxEditing ? Qt.CrossCursor : Qt.ArrowCursor
+                                onPressed: function (mouse) { boxLayer.start = Qt.point(mouse.x, mouse.y); boxLayer.end = boxLayer.start; boxLayer.dragging = true }
+                                onPositionChanged: function (mouse) {
+                                    boxLayer.end = Qt.point(Math.max(0, Math.min(boxLayer.width, mouse.x)), Math.max(0, Math.min(boxLayer.height, mouse.y)))
+                                }
+                                onReleased: {
+                                    boxLayer.dragging = false
+                                    dashboard.setVirtualBox(boxLayer.start.x / boxLayer.width, boxLayer.start.y / boxLayer.height,
+                                                            boxLayer.end.x / boxLayer.width, boxLayer.end.y / boxLayer.height)
+                                }
+                            }
                         }
                         // Read from 3 m away, but quietly: a translucent dark pill with the word (or the countdown number) in the colour of
                         // what to do now - teal = go, amber = get ready, blue = rest, red = timer stopped. Fades in and out.
@@ -6364,7 +6449,7 @@ ApplicationWindow {
         }
     }
 
-    // The control hand drawn at the cursor (src/virtual_hand.py): its thumb tip is the cursor, where a pinch clicks.
+    // The control hand drawn at the cursor (src/virtual_hand.py): its palm centre is the cursor; a click lands where the pinch meets.
     // Click-through and always on top, like the status pill; it follows the cursor instead of covering the screen.
     Window {
         id: virtualHandWindow
@@ -6379,9 +6464,36 @@ ApplicationWindow {
                | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
         width: 640
         height: 640
-        x: present ? hand.x - width / 2 : 0
-        y: present ? hand.y - height / 2 : 0
-        onHandChanged: handCanvas.requestPaint()
+        // Camera frames come ~30 times a second and unevenly: the drawn hand and the window glide toward the newest frame at the
+        // screen's own rate (each display frame closes a share of the gap), so the motion is continuous instead of stepping.
+        property var shown: null         // the joints as drawn now
+        property real shownX: 0
+        property real shownY: 0
+        readonly property real glide: 0.04   // seconds: time constant of the glide
+        function placeAt(px, py) { x = Math.round(px - width / 2); y = Math.round(py - height / 2) }
+        // the hand stays (faded, see VH_LOST_KEEP) through a short loss, so it is never thrown away and re-placed here
+        onPresentChanged: if (!present) shown = null
+        onHandChanged: {
+            if (hand.pts !== undefined && (shown === null || shown.length !== hand.pts.length)) {
+                shown = hand.pts.slice(); shownX = hand.x; shownY = hand.y
+                placeAt(shownX, shownY)
+                handCanvas.requestPaint()
+            }
+        }
+        FrameAnimation {
+            running: virtualHandWindow.visible && virtualHandWindow.shown !== null
+            onTriggered: {
+                var w = virtualHandWindow, h = w.hand
+                if (!h.pts || w.shown === null) return
+                var k = 1 - Math.exp(-Math.min(frameTime, 0.1) / w.glide)
+                var pts = w.shown
+                for (var i = 0; i < pts.length; i++) pts[i] += (h.pts[i] - pts[i]) * k
+                w.shownX += (h.x - w.shownX) * k
+                w.shownY += (h.y - w.shownY) * k
+                w.placeAt(w.shownX, w.shownY)
+                handCanvas.requestPaint()
+            }
+        }
         readonly property var bones: [
             [0,1],[1,2],[2,3],[3,4], [0,5],[5,6],[6,7],[7,8], [5,9],[9,10],[10,11],[11,12],
             [9,13],[13,14],[14,15],[15,16], [13,17],[17,18],[18,19],[19,20], [0,17]
@@ -6390,14 +6502,15 @@ ApplicationWindow {
         Canvas {
             id: handCanvas
             anchors.fill: parent
-            opacity: virtualHandWindow.hand.paused ? 0.45 : 1.0
+            opacity: virtualHandWindow.hand.lost ? 0.35 : (virtualHandWindow.hand.paused ? 0.45 : 1.0)
             onPaint: {
                 var ctx = getContext("2d")
                 ctx.reset()
                 var h = virtualHandWindow.hand
-                if (!h.pts) return
+                var pts = virtualHandWindow.shown
+                if (!h.pts || pts === null) return
                 var cx = width / 2, cy = height / 2
-                function px(i) { return [cx + h.pts[2 * i], cy + h.pts[2 * i + 1]] }
+                function px(i) { return [cx + pts[2 * i], cy + pts[2 * i + 1]] }
                 ctx.lineCap = "round"
                 // a dark outline under a light line: visible on light and dark windows alike
                 for (var pass = 0; pass < 2; pass++) {
@@ -6423,14 +6536,21 @@ ApplicationWindow {
                     ctx.lineWidth = h.guides[g][1] === "near" ? 3 : 5
                     ctx.beginPath(); ctx.moveTo(thumb[0], thumb[1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke()
                 }
-                // the click point: the cursor itself
-                ctx.lineWidth = 3
-                ctx.strokeStyle = h.action !== "" ? "#E5484D" : "#112331"
-                ctx.beginPath(); ctx.arc(cx, cy, 9, 0, 2 * Math.PI); ctx.stroke()
-                if (h.action !== "") {
-                    ctx.font = "bold 16px 'Malgun Gothic'"
-                    ctx.fillStyle = "#E5484D"
-                    ctx.fillText(h.action, cx + 14, cy - 12)
+                // the palm centre: where the hand is (the cursor while no finger pinches)
+                ctx.lineWidth = 2
+                ctx.strokeStyle = "rgba(17,35,49,0.55)"
+                ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 2 * Math.PI); ctx.stroke()
+                // the click point: where the thumb and the pinching finger meet
+                if (h.click) {
+                    var kx = cx + h.click[0], ky = cy + h.click[1]
+                    ctx.lineWidth = h.aim ? 2 : 3
+                    ctx.strokeStyle = h.action !== "" ? "#E5484D" : (h.aim ? "rgba(17,35,49,0.45)" : "#112331")
+                    ctx.beginPath(); ctx.arc(kx, ky, h.aim ? 6 : 9, 0, 2 * Math.PI); ctx.stroke()
+                    if (h.action !== "") {
+                        ctx.font = "bold 16px 'Malgun Gothic'"
+                        ctx.fillStyle = "#E5484D"
+                        ctx.fillText(h.action, kx + 14, ky - 12)
+                    }
                 }
             }
         }

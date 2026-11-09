@@ -65,6 +65,7 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
     window = int(info["window"])
     validation = set(info.get("validation_sessions") or [])
 
+    pruned = store.prune()                     # duplicates and hand-mostly-missing unchecked samples (spec 11)
     supervised = [s for s in store.samples(sources=list(SUPERVISED_SOURCES)) if s.label and s.label != UNKNOWN]
     if not supervised:
         return {"status": "nothing", "message": "학습할 정정·확인 데이터가 없어요"}
@@ -83,6 +84,11 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
     emit("loading", samples=len(guided) + len(supervised))
     data = build_dataset(store, guided + supervised, wide)
     in_validation = np.array([s.session in validation for s in data.samples])
+    slipped = auto_rollback(manager, data, in_validation, window)
+    if slipped:
+        emit("rolled_back", problems=slipped)
+        return {"status": "rolled_back", "problems": slipped, "pruned": pruned,
+                "message": "지금 모델이 이전 모델보다 나빠져서 이전 모델로 되돌렸어요", "seconds": round(time.perf_counter() - t0, 1)}
     is_user = np.array([s.label_source in SUPERVISED_SOURCES for s in data.samples])
     is_held = np.array([s.sample_id in set(held) for s in data.samples])
 
@@ -154,6 +160,33 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
     return {"status": "promoted" if promoted else "rejected", "problems": problems, "metrics": metrics, "new_classes": new_labels,
             "untested_new_classes": new_info["training"]["untested_new_classes"], "updates": learner.updates, "events": learner.events,
             "seconds": round(time.perf_counter() - t0, 1)}
+
+
+def auto_rollback(manager: ModelManager, data, in_validation, window: int) -> List[str]:
+    """Spec 9.3: after a swap, before learning more. The production model is checked against the one it replaced (previous) on the
+    validation sessions, with the same limits a candidate must pass. When it fell behind, the previous model comes back. Returns the
+    problems ([] = kept). One step only: after a rollback there is no previous to go back to."""
+    if not (manager.has("previous") and manager.has("production")):
+        return []
+    prod, prev = manager.load("production"), manager.load("previous")
+    prev_classes, prod_classes = list(prev["info"]["classes"]), list(prod["info"]["classes"])
+    if prod_classes[:len(prev_classes)] != prev_classes:
+        return []                      # not the same line of models: nothing to compare
+    indexes = [i for i, s in enumerate(data.samples) if in_validation[i] and s.label in prev_classes]
+    if not indexes:
+        return []
+    saved = data.classes
+    try:
+        data.classes = prev_classes
+        before = evaluate_samples(_model(prev["info"], len(prev_classes), prev["state"]).eval(), data, indexes, window, "cpu")
+        data.classes = prod_classes
+        after = evaluate_samples(_model(prod["info"], len(prod_classes), prod["state"]).eval(), data, indexes, window, "cpu")
+    finally:
+        data.classes = saved
+    problems = check_candidate(after, before)
+    if problems and manager.rollback():
+        return problems
+    return []
 
 
 def _brief(report: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

@@ -14,6 +14,7 @@ import sys
 from typing import Dict, Iterable
 
 VK_F2 = 0x71
+VK_PAUSE = 0x13          # emergency stop, anywhere (spec 10)
 VK_O = 0x4F
 VK_0 = 0x30
 VK_NUMPAD0 = 0x60

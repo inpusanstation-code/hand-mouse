@@ -1244,6 +1244,22 @@ class MouseController:
         if now - self._sw_opened_t >= float(config.get("switcher_timeout", 15.0)):
             self.close_switcher(confirm=True)
             return
+        if config.get("switcher_external_cursor", False):
+            # The virtual hand: the box places the cursor and the hand shapes give the clicks. The closed-hand rule below would
+            # throw away its thumb + index click (that shape is a pinch to the rule engine), so the clicks go straight in here.
+            self._run_switcher_pending(now, config)
+            if not self.switcher_open:
+                return
+            if action not in ("task_switcher", "alt_tab"):
+                self._sw_armed = True          # the opening thumb + pinky pinch has been released
+            if not self._sw_armed:
+                return
+            kind = {"left_click": "click", "task_switcher": "confirm", "alt_tab": "confirm",
+                    "right_click": "cancel"}.get(action)
+            if kind is not None and self._sw_pending is None:
+                self._sw_pending = (kind, now, self.last_screen_pos)
+                self._run_switcher_pending(now, config)
+            return
 
         # Closing the hand into a fist often passes through (or settles in) a thumb+index
         # pinch / drag shape. Those have no job in the switcher, so every closed-hand shape
@@ -1257,6 +1273,8 @@ class MouseController:
         if gesture in ("no_pinch",) + closed_hand and result.cursor_point is not None:
             self._sw_armed = True  # the opening thumb+pinky pinch has been released
             if pointer:
+                if config.get("switcher_external_cursor", False):
+                    return      # the virtual hand's box already placed the cursor (src/virtual_hand.py)
                 if gesture in closed_hand:
                     # Thumbnails are small: a much gentler fast-move than the normal fist DPI
                     self.dpi_multiplier = float(config.get("switcher_fist_multiplier", 15.0))

@@ -36,12 +36,16 @@ from src.pose_tracker import DEFAULT_POSE_MODEL, PoseTracker, pick_arm
 from src.guided_recording import GuidedSession, tasks_for
 from src.recorder import SessionRecorder
 from src.gesture_gate import DEFAULT_MODEL as GATE_MODEL, GestureGate, load_predictor
+from src.click_check import ClickCheck
+from src.click_log import ClickLog
 from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
 from src.crop_recorder import CropRecorder, crops_path
 from src.roi_tracker import RoiTracker, hand_box
 from src.hand_selection import HandFollower, selected_detection
-from src.virtual_hand import view as virtual_hand_view
+from src.virtual_hand import (ACTION_NAMES as HAND_ACTION_NAMES, BoxMapper, DEFAULT_BOX, Grip, PINCH_HOLD, Ratchet, ShapePinch, ShapeSwitch, ShapeTriple, ViewSmoother, triple_point,
+                              click_offset, holds_still, pinch_point, VIRTUAL_OFF_ACTIONS, virtual_guides,
+                              palm_centre, valid_box, view as virtual_hand_view)
 from src.online.collector import OnlineCollector
 from src.perf_log import foreground_window_title
 from src.online.commands import CommandGate, binding_key, command_of, command_text, forget_command
@@ -66,6 +70,16 @@ def _online_gate_class():
 
 FREEZE_SECONDS = .2     # a flicker of the recognition must not let the cursor jump
 
+DOUBLE_TAP = .7     # seconds after a pinch click in which the next thumb + index press is the second click
+CLICK_CHECK_THRESHOLD = .3   # TCN thumb_index peak over a press needed for a click. Held-out replay (16 recordings the TCN
+# never saw, 2026-11-10): .3 keeps 93 % of thumb + index clicks and cuts rest-time closes only 8.5 -> 6.8 a minute, because most of
+# those are real pinches right after a thumb + index task (labelled rest). Too little to pay 7 % of the clicks for: off by default
+# ("virtual_click_check": true in config/gestures.json turns it on).
+CLICK_NAMES = {"left": "좌클릭", "double": "더블클릭", "drag": "끌기", "right": "우클릭"}
+PASSIVE_ACTIONS = frozenset({"none", "move_cursor", "pointer_wait"})   # the engine is doing nothing a hand shape would undo
+VH_LOST_KEEP = .4     # seconds the drawn hand stays (faded) after the camera loses the hand
+
+
 @dataclass(frozen=True)
 class UiState:
     """What the UI thread decided (replaced as a whole, read once per frame)."""
@@ -89,6 +103,9 @@ class UiState:
     rec_advance: int = 0                # +1 per press of "start" in guided recording
     tcn_gate: bool = False              # right click / scroll grab confirmed by the trained model (src/gesture_gate.py)
     gate_model: str = "tcn"             # "tcn" = models/gesture_tcn.onnx, "online" = the model learned from this person
+    virtual_hand: bool = False          # the hand on the screen: a box on the camera image maps to the monitor (src/virtual_hand.py)
+    virtual_box: Tuple[float, float, float, float] = DEFAULT_BOX
+    screen_ratio: float = 1.0           # physical / logical pixels of the main screen (the drawn hand is in logical ones)
     rec_focus: str = ""                 # guided recording of one gesture only (training center "집중 녹화"); "" = all
     model_version: int = 0              # +1 when the training center saved a new model: reload the gate
     rec_plan: Optional[Dict[str, Any]] = None
@@ -172,6 +189,25 @@ class QtRuntime:
         self._online_gesture = ""
         self._online_gesture_until = 0.0
         self._virtual_hand: Optional[Dict[str, Any]] = None
+        self.box_mapper = BoxMapper()
+        self.view_smoother = ViewSmoother()
+        self._vh_click: Optional[List[float]] = None   # pinch point on the drawn hand, frozen while the fingers touch
+        self._vh_engaged = False
+        self.shape_pinch = ShapePinch("index")         # thumb + index = left click / drag, from the hand shape only
+        self.shape_right = ShapeTriple()               # thumb + index + middle together = right click, from the hand shape only
+        self._pinch_triple = False                     # this thumb + index press became the three-finger right click
+        self.click_check: Optional[ClickCheck] = None  # the TCN's second look at thumb + index clicks (loaded on first use)
+        self.click_log: Optional[ClickLog] = None      # everyday virtual hand clicks + F "not a click" marks (logs/virtual_clicks)
+        self._triple_open_t = -1e9                     # when the three fingers last came apart
+        self.shape_switch = ShapeSwitch()              # thumb folded, four fingers up = task switcher, from the hand shape only
+        self.grip = Grip()                             # what the virtual hand holds: a file (drag) or the page (scroll)
+        self.ratchet = Ratchet()                       # a fist scrolls one way: bringing the hand back is not a scroll
+        self._pinch_since: Optional[float] = None      # thumb + index closed since (shape pinch)
+        self._pinch_drag = False
+        self._pinch_double = False                     # this press is a double click's second click
+        self._last_tap: Optional[Tuple[float, Tuple[int, int]]] = None   # (time, screen point) of the last pinch click
+        self._vh_last: Optional[Dict[str, Any]] = None  # the last drawn hand, kept a moment when the camera loses the hand
+        self._vh_lost: Optional[float] = None
         self.command_gate = CommandGate()
         self._online_model_version = 0
         self._freeze_until = 0.0
@@ -360,6 +396,8 @@ class QtRuntime:
             elif kind == "tracking_close":
                 self.test = None
                 self._pause()
+            elif kind == "failure_mark" and self._virtual_click_mark(now):
+                pass
             elif kind == "failure_mark":
                 if self._rec is not None:
                     self._rec.event(now, "mark")
@@ -406,6 +444,8 @@ class QtRuntime:
             engine.set_movement_mode(new)
             mouse.release_all()
             self._say(f"Switched Movement Mode -> {new.upper()}")
+        elif key in (ord("f"), ord("F")) and self._virtual_click_mark(now):
+            pass
         elif key in (ord("f"), ord("F")):
             if self._rec is not None:
                 self._rec.event(now, "mark")
@@ -530,6 +570,28 @@ class QtRuntime:
         palm_calibrating = self._palm_axes(t0, ui, detections)
         guided_recording = self._recording_mode(t0, ui, detections)
         self._virtual_hand = None
+        if not detections:
+            # A fast hand blurs and is lost for a few frames: keep the drawn hand where it was (faded) and its filters, so it glides
+            # on from there instead of vanishing and popping up elsewhere. Only a longer loss lets go of everything.
+            if self._vh_lost is None:
+                self._vh_lost = t0
+                if self._vh_last is not None:
+                    self._vh_last = {**self._vh_last, "lost": True, "action": "", "guides": []}
+            if t0 - self._vh_lost <= VH_LOST_KEEP and self._vh_last is not None:
+                self._virtual_hand = self._vh_last
+            else:
+                self._vh_last = None
+                self.box_mapper.reset()
+                self.view_smoother.reset()
+                self.ratchet.reset()
+            self._vh_click, self._vh_engaged = None, False
+            self.grip.reset()
+            self.shape_pinch.reset()
+            self.shape_right.reset()
+            self.shape_switch.reset()
+            self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
+        else:
+            self._vh_lost = None
         command_hold = self._online_recognize(t0, ui, detections, frame, guided_recording)
         self._track_arm(t0, frame, ui, detections)
         if engine.config.get("elbow_pivot", False) and detections and not ui.use_index_pointer:
@@ -685,7 +747,138 @@ class QtRuntime:
             self._rule_action = rule_action
             if command_hold:
                 result.action, result.cursor_point, result.is_moving = "none", None, False
+            screen_point = None       # box mode: where the palm (the drawn hand) is on the monitor
+            cursor_point = None       # where the OS cursor goes: the palm, or the drawn pinch point while a click finger is in
+            vh = None
+            apply_cfg = engine.config
+            if getattr(ui, "virtual_hand", False) and valid_box(ui.virtual_box) and not guided_recording:
+                if result.action in VIRTUAL_OFF_ACTIONS:
+                    result.action = "none"                # index / middle pinches are off here (the fist grabs)
+                early = virtual_guides(pinch_guides(result.distances, engine.config, draw_pinched, action=result.action,
+                                                    gesture=result.active_gesture))
+                switching = bool(mouse.switcher_open)    # the task switcher: no page scroll, no drag; the box still places the cursor
+                grip = self.grip.step("fist" if result.active_gesture == "fist" and not command_hold and not switching else None, t0)
+                check = self._click_check(engine.config)
+                if check is not None:
+                    check.step(t0, hand, frame.shape[0] / max(1, frame.shape[1]))
+                pinch_evt = None
+                if grip is None and not command_hold:
+                    quick = self._last_tap is not None and t0 - self._last_tap[0] <= DOUBLE_TAP   # a second tap: no waiting
+                    right_evt = self.shape_right.step(hand.landmarks, frame.shape[1], frame.shape[0])
+                    if right_evt == "down" or (self.shape_right.closed and self.shape_pinch.closed):
+                        self._pinch_triple = True          # the index got there first: that press is the right click now
+                    if right_evt == "up":
+                        self._triple_open_t = t0
+                    # while the three are together, and a moment after (the middle leaving looks like a thumb + index pinch)
+                    settling = self.shape_right.closed or t0 - self._triple_open_t < .3
+                    pinch_evt = None if settling and not self.shape_pinch.closed else self.shape_pinch.step(
+                        hand.landmarks, frame.shape[1], frame.shape[0], frames=1 if quick else None)
+                else:
+                    self.shape_pinch.reset()
+                    self.shape_right.reset()
+                    right_evt = None
+                    self._pinch_triple = False
+                    self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
+                second = None          # a second tap soon after a click: the double click's second click, at the same point
+                if pinch_evt == "down":
+                    self._pinch_since, self._pinch_drag = t0, False
+                    last = self._last_tap
+                    if last is not None and t0 - last[0] <= DOUBLE_TAP:
+                        second, self._pinch_since = last[1], None      # no drag and no click on opening from this press
+                        self._pinch_double = True
+                    self._last_tap = None
+                was_drag = self._pinch_drag
+                if (self.shape_pinch.closed and self._pinch_since is not None and t0 - self._pinch_since >= PINCH_HOLD
+                        and not switching and not self._pinch_triple and not self.shape_right.closed
+                        and self._checked(check, t0)):
+                    self._pinch_drag = True                # held closed: it is a drag, not a click
+                dragging = self.shape_pinch.closed and self._pinch_drag
+                tap = pinch_evt == "up" and not self._pinch_drag and not self._pinch_double and not self._pinch_triple                     and self._checked(check, t0)
+                drop = pinch_evt == "up" and self._pinch_drag     # the button comes up between the fingers, not at the palm
+                press_t = self._pinch_since                    # when the fingers met (for the click log)
+                if pinch_evt == "up" or (not self.shape_pinch.closed and not self.shape_right.closed):
+                    self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
+                    self._pinch_triple = False
+                aiming = (self.shape_pinch.closed and not dragging) or tap or self.shape_right.closed
+                nx, ny = self.box_mapper.target(hand.landmarks, ui.virtual_box, now=t0, aim=grip is None,
+                                                hold=command_hold or grip == "scroll" or aiming
+                                                or (grip is None and holds_still(early, result.action, result.active_gesture)))
+                if (tap or second is not None) and result.action in PASSIVE_ACTIONS:
+                    result.action = "left_click"          # thumb + index closed and opened again: click between them
+                elif right_evt == "down" and result.action in PASSIVE_ACTIONS:
+                    result.action = "right_click"         # thumb, index and middle together: right click there
+                switch_now = grip is None and not command_hold and not self.shape_pinch.closed and not self.shape_right.closed                     and self.shape_switch.step(hand.landmarks, frame.shape[1], frame.shape[0], t0)
+                if switch_now and result.action in PASSIVE_ACTIONS:
+                    result.action = "task_switcher"       # opens it; the same shape again while it is open picks the highlighted one
+                elif dragging:
+                    result.action = "drag_hold"           # held closed: the button stays down until the fingers open
+                log = self._click_log(engine.config)
+                if log is not None and not self.paused:
+                    log.frame(t0, hand)
+                    kind = ("double" if second is not None and result.action == "left_click"
+                            else "left" if tap and result.action == "left_click"
+                            else "right" if right_evt == "down" and result.action == "right_click"
+                            else "drag" if dragging and not was_drag else None)
+                    if kind is not None:
+                        pressed = press_t if kind in ("left", "drag") else t0
+                        peak = check.peak(pressed, t0) if check is not None and check.ready and pressed is not None else None
+                        log.click(kind, t0, pressed, peak)
+                m = mouse.absolute_monitor
+                screen_point = (int(round(m.left + nx * (m.width - 1))), int(round(m.top + ny * (m.height - 1))))
+                if grip == "scroll":
+                    # a fist holds the page: hand down = browse down (the pinch scroll goes the other way, like a touch screen)
+                    if self.grip.started:
+                        self.ratchet.reset()
+                    # sideways is easier than up and down: fist right = browse down, left = up (fed to the scroll as up/down)
+                    cx, cy = palm_centre(hand.landmarks)
+                    result.action, result.cursor_point = "scroll_grab", (0.5, self.ratchet.step(cx, t0))
+                    flip = not engine.config.get("virtual_fist_scroll_follows_page", False)
+                    apply_cfg = {**engine.config, "scroll_invert": bool(engine.config.get("scroll_invert", False)) != flip,
+                                 "scroll_gain": float(engine.config.get("scroll_gain", 36000.0))
+                                 * float(engine.config.get("virtual_fist_scroll_speed", .5))}
+                else:
+                    self.ratchet.reset()
+                vh = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], early, result.action)
+                if vh is not None:
+                    vh["pts"] = self.view_smoother(vh["pts"], t0)
+                    if grip is not None:
+                        vh["click"] = None
+                    elif self.shape_pinch.closed or tap or drop:
+                        vh["click"] = pinch_point(vh["pts"], "index")
+                    elif self.shape_right.closed:
+                        vh["click"] = triple_point(vh["pts"])
+                    else:
+                        vh["click"] = click_offset(vh["pts"], early, result.action)
+                engaged = (self.box_mapper.held or dragging or drop
+                           or result.action in ("left_click", "right_click", "drag_hold")) \
+                    and vh is not None and vh["click"] is not None
+                if engaged:
+                    if self._vh_click is None or dragging or drop:
+                        # a click stays where the fingers met; a dragged thing rides between thumb and index all the way
+                        self._vh_click = list(vh["click"])
+                    r = float(getattr(ui, "screen_ratio", 1.0) or 1.0)
+                    cursor_point = (min(m.left + m.width - 1, max(m.left, screen_point[0] + int(round(self._vh_click[0] * r)))),
+                                    min(m.top + m.height - 1, max(m.top, screen_point[1] + int(round(self._vh_click[1] * r)))))
+                else:
+                    self._vh_click = None
+                    cursor_point = screen_point
+                jump = engaged and not self._vh_engaged
+                if second is not None:
+                    cursor_point, jump = second, True      # exactly the first click's pixel: Windows pairs them as a double click
+                if tap and result.action == "left_click":
+                    self._last_tap = (t0, cursor_point)
+                self._vh_engaged = engaged
+                result.is_moving = False      # the box places the cursor below, not the relative movement
+                if switching:
+                    apply_cfg = {**apply_cfg, "switcher_external_cursor": True}
             if not self.paused and not guided_recording:      # guided recording: rules judge, the mouse stays still
+                if cursor_point is not None:
+                    # the hand does the clicking: the cursor goes to the pinch point first (at once when the fingers meet)
+                    if cursor_point != tuple(mouse.last_screen_pos):
+                        mouse._move_os_cursor(*cursor_point, immediate=jump)
+                    if result.action == "drag_hold" and not mouse._hold_dragging:
+                        mouse._hold_dragging = True
+                        mouse._mouse_down()
                 comp_hit = self.composite_detector.step(
                     t0, hand.landmarks, result.active_gesture, draw_pinched, mouse.frame_aspect
                 )
@@ -721,14 +914,34 @@ class QtRuntime:
                             self._say(f"매핑 실행: {badge}", 1.2)
                         self._recent_action, self._recent_until = result.action, time.perf_counter() + 0.8
                         result.action = "none"
-                mouse.apply(result, engine.config)
+                mouse.apply(result, apply_cfg)
                 if result.action in ONE_SHOT:
                     self._recent_action, self._recent_until = result.action, time.perf_counter() + .8
             guides = pinch_guides(result.distances, engine.config, draw_pinched,
                                   action=result.action, gesture=result.active_gesture)
             HandTracker.draw_hand(frame, hand.landmarks, guides)
-            self._virtual_hand = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], guides,
-                                                   self._recent_action if time.perf_counter() < self._recent_until else result.action)
+            label = self._recent_action if time.perf_counter() < self._recent_until else result.action
+            if vh is None:
+                vh = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], guides, label)
+                if vh is not None:
+                    vh["pts"] = self.view_smoother(vh["pts"], t0)
+            if vh is not None:
+                if screen_point is not None:
+                    guides = virtual_guides(guides)         # only the pinches that work here are drawn on the screen hand
+                vh["guides"] = [[f, s] for f, s in guides]
+                vh["action"] = HAND_ACTION_NAMES.get(label, "")
+                if self._vh_click:
+                    vh["click"] = list(self._vh_click)
+                elif screen_point is not None:
+                    vh["click"] = pinch_point(vh["pts"], "index")     # the aim: put the file between thumb and index
+                    vh["aim"] = True
+                else:
+                    vh["click"] = click_offset(vh["pts"], guides, label)
+                if screen_point is not None:
+                    vh["screen"] = list(screen_point)       # where it is drawn (the palm), also while paused
+                    vh["switcher"] = bool(mouse.switcher_open)   # the window goes back above the task switcher
+            self._virtual_hand = vh
+            self._vh_last = vh
             if self._draw_cursor_anchor:
                 self._draw_cursor_anchor(frame, hand.landmarks, engine.palm_anchor_point(hand.landmarks),
                                          result.is_moving)
@@ -1138,6 +1351,39 @@ class QtRuntime:
         label = "elbow (estimated)"
         cv2.putText(frame, label if inside else label + " (off screen)", (mx + 14, max(18, my - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX, .55, orange, 2, cv2.LINE_AA)
+
+    def _click_log(self, config) -> Optional[ClickLog]:
+        """Everyday clicks of the virtual hand and the F marks (src/click_log.py); None when switched off."""
+        if not config.get("virtual_click_log", True):
+            return None
+        if self.click_log is None:
+            self.click_log = ClickLog(self.log_dir / "virtual_clicks", pc=machine_info(str(config.get("pc_alias", "")))["pc"],
+                                      camera=str(config.get("camera_note", "")))
+        return self.click_log
+
+    def _virtual_click_mark(self, now: float) -> bool:
+        """F right after a virtual hand click: that click was not meant. True = handled (no "what was it?" question)."""
+        kind = self.click_log.mark_last(now) if self.click_log is not None else None
+        if kind is None:
+            return False
+        self._say(f"방금 {CLICK_NAMES.get(kind, kind)}은 '클릭 아님'으로 기록했어요", 1.5)
+        return True
+
+    def _click_check(self, config) -> Optional[ClickCheck]:
+        """The TCN's look at the virtual hand's thumb + index clicks (src/click_check.py); None when switched off."""
+        if not config.get("virtual_click_check", False):     # off by default: see CLICK_CHECK_THRESHOLD
+            return None
+        if self.click_check is None and not self.dry_run:
+            self.click_check = ClickCheck(float(config.get("virtual_click_threshold", CLICK_CHECK_THRESHOLD)))
+        return self.click_check
+
+    def _checked(self, check: Optional[ClickCheck], t0: float) -> bool:
+        """Does the model see this thumb + index press as one? (No model: yes.) Says so when it drops one."""
+        if check is None or check.allows(self._pinch_since, t0):
+            return True
+        self._pinch_since = None           # this press is done: no drag later, no click on opening
+        self._say("집기로 보이지 않아 클릭하지 않았어요", .8)
+        return False
 
     def _gate_for(self, ui) -> Optional[GestureGate]:
         """The intent checker when it is switched on (and the model loads), else None. `gate_model` "online" uses the model learned from

@@ -61,6 +61,24 @@ def _timer(owner, action: str) -> None:
 
 
 
+def _saved_box(text: str):
+    from src.virtual_hand import DEFAULT_BOX, valid_box
+    try:
+        box = tuple(float(v) for v in text.split(","))
+    except ValueError:
+        return DEFAULT_BOX
+    return box if valid_box(box) else DEFAULT_BOX
+
+
+def _screen_ratio() -> float:
+    try:
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        return float(screen.devicePixelRatio()) if screen is not None else 1.0
+    except Exception:
+        return 1.0
+
+
 def _virtual_hand_default() -> bool:
     """config "virtual_hand_enabled" (on unless set to false)."""
     try:
@@ -215,7 +233,9 @@ class QtDashboard(QObject):
         self.registration_view = None
         self.live_gesture = ""
         self.virtual_hand = None
-        self.virtual_hand_on = _virtual_hand_default()
+        self.virtual_hand_on = self.preferences.value("virtualHand", _virtual_hand_default(), type=bool)
+        self.virtual_box = _saved_box(self.preferences.value("virtualBox", "", type=str))
+        self.box_editing = False
         self.my_gestures = []
         self.deleted_gestures = set()
         self.command_message = ""
@@ -417,7 +437,7 @@ class QtDashboard(QObject):
             reasons = list(dict.fromkeys(reason_ko(p, names) for p in state.get("problems", [])))
             return "검사에서 떨어져 지금 모델을 그대로 써요: " + ", ".join(reasons[:3])
         if status == "rolled_back":
-            return "이전 모델로 되돌렸어요."
+            return state.get("message") or "이전 모델로 되돌렸어요."
         if status == "nothing_to_roll_back":
             return "되돌릴 이전 모델이 없어요."
         return state.get("message") or "학습할 정정·확인 데이터가 없어요. F를 눌러 정정하거나 새 동작을 등록해 주세요."
@@ -510,10 +530,38 @@ class QtDashboard(QObject):
     def set_virtual_hand(self, view, paused=False):
         if view is None and self.virtual_hand is None:
             return
-        from PySide6.QtGui import QCursor
-        pos = QCursor.pos()             # logical pixels, the same space as window positions (DPI handled by Qt)
-        self.virtual_hand = None if view is None else {**view, "x": pos.x(), "y": pos.y(), "paused": bool(paused)}
+        if view is not None and view.get("screen"):
+            # the box mode's point is in physical pixels (like the OS cursor); windows are placed in logical ones
+            from PySide6.QtGui import QGuiApplication
+            ratio = QGuiApplication.primaryScreen().devicePixelRatio() or 1.0
+            x, y = view["screen"][0] / ratio, view["screen"][1] / ratio
+        else:
+            from PySide6.QtGui import QCursor
+            pos = QCursor.pos()         # logical pixels, the same space as window positions (DPI handled by Qt)
+            x, y = pos.x(), pos.y()
+        self.virtual_hand = None if view is None else {**view, "x": x, "y": y, "paused": bool(paused)}
         self.virtualHandChanged.emit()
+        if view is not None and view.get("switcher"):
+            self._raise_virtual_hand()
+
+    def _raise_virtual_hand(self):
+        """The Windows task switcher opens above every always-on-top window: put the hand back above it (a few times a second)."""
+        import sys
+        import time
+        now = time.monotonic()
+        if now - getattr(self, "_vh_raised", 0.0) < .25 or sys.platform != "win32":
+            return
+        self._vh_raised = now
+        try:
+            import ctypes
+            win = self.engine.rootObjects()[0].findChild(QObject, "virtualHandWindow")
+            if win is None or not win.isVisible():
+                return
+            HWND_TOPMOST, SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_SHOWWINDOW = -1, 0x1, 0x2, 0x10, 0x40
+            ctypes.windll.user32.SetWindowPos(ctypes.c_void_p(int(win.winId())), ctypes.c_void_p(HWND_TOPMOST), 0, 0, 0, 0,
+                                              SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        except Exception:
+            pass
 
     @Property("QVariant", notify=virtualHandChanged)
     def virtualHand(self):
@@ -526,7 +574,36 @@ class QtDashboard(QObject):
     @Slot(bool)
     def setVirtualHand(self, on):
         self.virtual_hand_on = bool(on)
+        self.preferences.setValue("virtualHand", self.virtual_hand_on)
         self.stateChanged.emit()
+
+    @Property("QVariantList", notify=stateChanged)
+    def virtualBox(self):
+        return list(self.virtual_box)
+
+    @Property(bool, notify=stateChanged)
+    def boxEditing(self):
+        return self.box_editing
+
+    @Slot(bool)
+    def setBoxEditing(self, on):
+        self.box_editing = bool(on)
+        self.stateChanged.emit()
+
+    @Slot(float, float, float, float, result=bool)
+    def setVirtualBox(self, x0, y0, x1, y1):
+        """From a drag on the preview, 0..1 of the camera image in either direction. Too small a box is refused."""
+        from src.virtual_hand import valid_box
+        box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        box = tuple(round(min(1.0, max(0.0, v)), 4) for v in box)
+        self.box_editing = False
+        if not valid_box(box):
+            self.stateChanged.emit()
+            return False
+        self.virtual_box = box
+        self.preferences.setValue("virtualBox", ",".join(str(v) for v in box))
+        self.stateChanged.emit()
+        return True
 
     def set_live_gesture(self, label):
         if label != self.live_gesture:
@@ -3235,13 +3312,39 @@ class QtDashboard(QObject):
             palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
             palm_axes_reset=self.palm_axes_requests[2],
             rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate, gate_model=self.gate_model,
+            virtual_hand=self.virtual_hand_on and not self.use_index_pointer, virtual_box=self.virtual_box,
+            screen_ratio=_screen_ratio(),
             rec_focus=self.rec_focus, model_version=self.model_version,
             rec_plan=copy.deepcopy(self.rec_plan), rec_paused=self.rec_paused,
             rec_discard=self.rec_discard,
         )
 
+    LAG_FPS, RECOVER_FPS = 20.0, 26.0     # camera loop speed at which background learning is slowed / let go again
+
+    def throttle_learning(self, fps):
+        """Spec 13: background learning must not slow the camera. Below LAG_FPS the learning process drops to idle priority, back
+        to below normal from RECOVER_FPS (the gap keeps it from flipping every frame)."""
+        job = self.online_job
+        if job is None or not job.running or not fps:
+            self.learn_slowed = False
+            return
+        slowed = getattr(self, "learn_slowed", False)
+        if not slowed and fps < self.LAG_FPS:
+            self.learn_slowed = job.set_low_priority(True) or slowed
+        elif slowed and fps >= self.RECOVER_FPS:
+            job.set_low_priority(False)
+            self.learn_slowed = False
+
+    def emergency_stop(self):
+        """Spec 10 kill switch (Pause key, anywhere): control off, buttons and keys let go, background learning stopped."""
+        if self.online_job is not None and self.online_job.running:
+            self.online_job.stop()
+            self.learn_message = "긴급 정지로 학습을 멈췄어요"
+            self.learnChanged.emit()
+
     def apply_snapshot(self, snap):
         """Render one runtime snapshot (UI thread)."""
+        self.throttle_learning(getattr(snap, "fps", 0.0))
         if self.stage_name == "capture":
             self.select_hand(snap.detections, snap.mirrored)
         if self.use_index_pointer:

@@ -39,7 +39,7 @@ class FakeTracker:
     def detect(self, frame, roi=None):
         if not self.present:
             return []
-        lms = [Point3D(p.x + self.dx, p.y, p.z) for p in self.hand]
+        lms = [Point3D(p.x + self.dx, p.y + getattr(self, "dy", 0.0), p.z) for p in self.hand]
         return [HandDetection(landmarks=lms, handedness="Left", score=.95)]
 
 

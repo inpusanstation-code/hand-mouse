@@ -17,6 +17,8 @@ KEY_PREFIX = "user:"
 COMMON_COMMANDS = (
     ("ctrl+x", "잘라내기"), ("ctrl+c", "복사"), ("ctrl+v", "붙여넣기"), ("ctrl+z", "되돌리기"),
     ("ctrl+s", "저장"), ("ctrl+a", "전체 선택"), ("enter", "Enter"), ("space", "Space"),
+    # Windows takes Win combinations before the app sees them, so they cannot be pressed in "다른 키 직접 입력": buttons instead
+    ("win+d", "바탕화면 보기"), ("win+shift+s", "화면 캡처"),
 )
 # Could end the session, close things or wipe text at once
 BLOCKED = ({"alt", "f4"}, {"ctrl", "w"}, {"ctrl", "alt", "delete"}, {"ctrl", "alt", "del"}, {"win", "l"}, {"delete"}, {"del"},

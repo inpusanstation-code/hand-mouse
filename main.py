@@ -38,7 +38,7 @@ from src.mouse_controller import MouseController
 from src.scroll_target import ScrollTargetFinder
 from src.window_probe import window_center_at
 from src.settings_panel import SettingsPanel
-from src.hotkeys import VK_0, VK_F2, VK_O, KeyPoller, settings_key_pressed
+from src.hotkeys import VK_0, VK_F2, VK_O, VK_PAUSE, KeyPoller, settings_key_pressed
 from src.win_perf import keep_responsive_in_background
 from src.perf_log import PerfLog
 from src.pipeline import InferencePipeline, Snapshot
@@ -382,6 +382,10 @@ def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
                 runtime.post(*dashboard.online_commands.pop(0))
             dashboard.poll_online_job()
             want_settings = key in (ord("o"), ord("O"), ord("0"))
+            if keys.available and keys.pressed([VK_PAUSE]):
+                runtime.post("pause")            # emergency stop: control off and every button / key released (runtime._pause)
+                dashboard.emergency_stop()
+                print("[긴급 정지] Pause 키: 마우스 제어를 멈추고 학습을 중단했어요")
             if keys.available:
                 want_settings = settings_key_pressed(keys, text_input_has_focus()) or want_settings
             if want_settings and dashboard.stage_name == "main":

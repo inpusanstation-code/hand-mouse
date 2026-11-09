@@ -58,6 +58,7 @@ class OnlineJob:
             self._set(phase="error", message=str(exc))
             return False
         threading.Thread(target=self._read, name="online-job", daemon=True).start()
+        self.set_low_priority(False)          # below normal from the start: the camera comes first
         return True
 
     def _read(self) -> None:
@@ -87,6 +88,25 @@ class OnlineJob:
     def stop(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             self._proc.kill()
+
+    def set_low_priority(self, low: bool) -> bool:
+        """Spec 13: while the camera loop falls behind, the learning process only gets the CPU nobody else wants (Windows idle
+        priority); otherwise below normal. True when the priority was set."""
+        proc = self._proc
+        if proc is None or proc.poll() is not None or os.name != "nt":
+            return False
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x0200 | 0x0400, False, proc.pid)      # set / query information
+            if not handle:
+                return False
+            try:
+                return bool(kernel32.SetPriorityClass(handle, 0x40 if low else 0x4000))   # IDLE / BELOW_NORMAL
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
 
 
 def summary(root: Path | str = DEFAULT_ROOT) -> Dict[str, Any]:

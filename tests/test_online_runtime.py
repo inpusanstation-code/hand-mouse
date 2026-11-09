@@ -255,3 +255,26 @@ def test_a_recognised_gesture_reaches_the_screen_and_fades_after_the_hand_leaves
     assert rt._snap.online_gesture == ""
     assert rt.paused
     rt.online.close()
+
+
+def test_in_the_virtual_hand_a_registered_gesture_wins_over_the_built_in_shapes(tmp_path):
+    """The built-in shapes are few on purpose; the rest is the person's own gestures. A registered one that looks like a thumb +
+    index pinch is that gesture, not a click."""
+    import dataclasses
+    from src.online.pose_memory import pose_features
+    from src.online.registration import USER_SOURCE
+    rt = ready_runtime(tmp_path)
+    rt.ui = dataclasses.replace(rt.ui, use_index_pointer=False, virtual_hand=True, virtual_box=(0.0, 0.0, 1.0, 1.0))
+    rt.paused = False
+    hand = rt.tracker.hand
+    tip = hand[8]
+    hand[4] = type(tip)(tip.x, tip.y, tip.z)                  # the registered gesture is a thumb + index pinch shape
+    hand[12] = type(tip)(hand[9].x, hand[9].y, hand[9].z)
+    frames = rt.tracker.detect(np.zeros((720, 1280, 3), np.uint8))
+    pose = pose_features([{"t": 0.0, "lm": [(p.x, p.y, p.z) for p in frames[0].landmarks], "world": frames[0].world}], .5625)
+    assert rt._online_load()
+    rt.online_memory.add_class("집기", np.repeat(pose, 6, axis=0), demo_ids=np.arange(6) % 3, source=USER_SOURCE)
+    steps(rt, 6)
+    assert rt._snap.online_gesture == "집기"
+    assert "left_click" not in rt.mouse.event_log and not rt.mouse.is_dragging
+    rt.online.close()
