@@ -48,3 +48,6 @@ config/hub.json
 config/hub.json.tmp
 config/hub_secrets.bin
 config/hub_secrets.bin.tmp
+
+# Online learning data: joints of a person using the app (docs/online-learning-design.md)
+data/online/

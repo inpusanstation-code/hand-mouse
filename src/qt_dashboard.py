@@ -1,4 +1,5 @@
 """Qt Quick desktop shell. Shares the existing engine loop with the Tk shell."""
+import json
 from collections import deque
 from pathlib import Path
 import copy
@@ -59,6 +60,15 @@ def _timer(owner, action: str) -> None:
     getattr(owner.training_timer, action)()
 
 
+
+def _virtual_hand_default() -> bool:
+    """config "virtual_hand_enabled" (on unless set to false)."""
+    try:
+        cfg = json.loads((Path(__file__).resolve().parents[1] / "config" / "gestures.json").read_text(encoding="utf-8"))
+        return bool(cfg.get("virtual_hand_enabled", True))
+    except (OSError, ValueError):
+        return True
+
 class QtDashboard(QObject):
     stateChanged = Signal()
     previewChanged = Signal()
@@ -67,6 +77,10 @@ class QtDashboard(QObject):
     metricsChanged = Signal()         # camera mode / brightness, a few times a second
     recentChanged = Signal()          # tracking test result list
     failureChanged = Signal()         # failure recording summary
+    correctionChanged = Signal()      # online learning: the "what was that really?" question
+    learnChanged = Signal()           # online learning: background learning rounds
+    virtualHandChanged = Signal()     # the hand drawn at the cursor
+    registrationChanged = Signal()    # online learning: adding a new gesture
     receptionChanged = Signal()       # tray / overlay state (ok, weak, none, paused)
     overlayChanged = Signal()         # overlay shown / hidden / moved
     hiddenToTray = Signal()           # the window was closed into the tray
@@ -175,6 +189,7 @@ class QtDashboard(QObject):
         self.training_timer.timeout.connect(self._training_tick)
         from src.gesture_gate import DEFAULT_MODEL
         self.tcn_gate = DEFAULT_MODEL.exists()                  # intent check by the trained model: on when one exists
+        self.gate_model = "tcn"                                 # or "online": the model learned from this person
         self.palm_axes_view = (False, "", 0.0, "", False)       # running, prompt, progress, note, saved
         self.motion_state = (False, 0.0, "", 0.0, 0.0)           # (on, seconds left, last command, entering, leaving)
         self.motion_exit_until = 0.0                             # the "motion mode off" notice stays until then
@@ -195,6 +210,24 @@ class QtDashboard(QObject):
         # Hand-area crop on/off (A/B with the tracking test) and failure recording
         self.hand_crop = self.preferences.value("handCrop", False, type=bool)
         self.failure_mark_requested = False
+        self.online_ready = False
+        self.online_commands = []
+        self.registration_view = None
+        self.live_gesture = ""
+        self.virtual_hand = None
+        self.virtual_hand_on = _virtual_hand_default()
+        self.my_gestures = []
+        self.deleted_gestures = set()
+        self.command_message = ""
+        self.online_root = None
+        self.online_job = None
+        self.learn_seen = -1
+        self.learn_message = ""
+        self.learn_summary = {}
+        self.correction_sample = None
+        self.correction_store = None
+        self.correction_choices = []
+        self.correction_guess = ""
         self.failure_summary = "아직 저장된 기록이 없습니다."
         self.failure_last = ""
         self.recent = load_recent_results(LOG_DIR, RECENT_LIMIT)
@@ -303,7 +336,295 @@ class QtDashboard(QObject):
     # ------------------------------------------------------------------ failure recording
     @Slot()
     def markFailure(self):
-        self.failure_mark_requested = True
+        if not self.correction_sample:       # F again while the question is open: nothing new to mark
+            self.failure_mark_requested = True
+
+    # ------------------------------------------------------------------ adding a new gesture (online learning)
+    def set_online_ready(self, ready):
+        self.online_ready = bool(ready)
+        self.registrationChanged.emit()
+
+    def set_registration(self, view):
+        if view != self.registration_view:
+            self.registration_view = view
+            if (view or {}).get("state") == "done":
+                self.refreshMyGestures()
+            self.registrationChanged.emit()
+
+    # ------------------------------------------------------------------ background learning (online learning, phase 4)
+    def _online_job(self):
+        if self.online_job is None:
+            from src.online.app_job import OnlineJob
+            from src.online.samples import DEFAULT_ROOT
+            self.online_job = OnlineJob(self.online_root or DEFAULT_ROOT)
+        return self.online_job
+
+    @Slot()
+    def startOnlineLearning(self):
+        if self._online_job().start():
+            self.learn_message = "학습을 시작했어요. 카메라와 마우스는 그대로 쓸 수 있어요."
+            self.learnChanged.emit()
+
+    @Slot()
+    def rollbackOnlineModel(self):
+        if self._online_job().start(rollback=True):
+            self.learn_message = "이전 모델로 되돌리는 중…"
+            self.learnChanged.emit()
+
+    @Slot()
+    def refreshOnlineSummary(self):
+        from src.online.app_job import summary
+        from src.online.samples import DEFAULT_ROOT
+        try:
+            self.learn_summary = summary(self.online_root or DEFAULT_ROOT)
+        except Exception:
+            self.learn_summary = {}
+        self.learnChanged.emit()
+
+    def poll_online_job(self):
+        """Called every loop of the UI thread: turns the job's progress into words once it changes."""
+        job = self.online_job
+        if job is None or job.version == self.learn_seen:
+            return
+        self.learn_seen = job.version
+        state = dict(job.state)
+        phase = state.get("phase")
+        if phase == "update":
+            self.learn_message = f"학습 중… {state.get('done', 0)}/{state.get('total', 0)}"
+        elif phase in ("starting", "loading"):
+            self.learn_message = "데이터를 읽는 중…"
+        elif phase == "checking":
+            self.learn_message = "학습에 안 쓴 데이터로 검사 중…"
+        elif phase == "error":
+            self.learn_message = f"학습하지 못했어요: {state.get('message', '')}"
+        elif phase == "done":
+            self.learn_message = self._learn_result(state)
+            self.online_commands.append(("online_reload",))
+            self.refreshOnlineSummary()
+        self.learnChanged.emit()
+
+    def _learn_result(self, state):
+        from src.online.update_job import reason_ko
+        from src.online.collector import correction_choices
+        names = {c["label"]: c["name"] for c in correction_choices()}
+        status = state.get("status")
+        if status == "promoted":
+            text = "새 모델을 반영했어요."
+            if state.get("untested_new_classes"):
+                text += " (" + ", ".join(state["untested_new_classes"]) + "은 데이터가 적어 따로 검사하지 못했어요)"
+            return text
+        if status == "rejected":
+            reasons = list(dict.fromkeys(reason_ko(p, names) for p in state.get("problems", [])))
+            return "검사에서 떨어져 지금 모델을 그대로 써요: " + ", ".join(reasons[:3])
+        if status == "rolled_back":
+            return "이전 모델로 되돌렸어요."
+        if status == "nothing_to_roll_back":
+            return "되돌릴 이전 모델이 없어요."
+        return state.get("message") or "학습할 정정·확인 데이터가 없어요. F를 눌러 정정하거나 새 동작을 등록해 주세요."
+
+    @Property(bool, notify=learnChanged)
+    def learnRunning(self):
+        return self.online_job is not None and self.online_job.running
+
+    @Property(bool, notify=learnChanged)
+    def learnCanUse(self):
+        """A model learned from this person exists (production), so it can confirm gestures."""
+        return bool(self.learn_summary.get("has_production"))
+
+    @Property(bool, notify=learnChanged)
+    def learnCanRollback(self):
+        return bool(self.learn_summary.get("can_rollback"))
+
+    @Property(str, notify=learnChanged)
+    def learnText(self):
+        if self.learn_message:
+            return self.learn_message
+        s = self.learn_summary
+        if not s:
+            return ""
+        last = s.get("last")
+        when = f" · 마지막 학습 {last['time'][5:16]}" if last else " · 아직 학습 안 함"
+        return f"정정·확인한 데이터 {s.get('samples', 0)}개" + when
+
+    @Slot()
+    def refreshMyGestures(self):
+        """The gestures a person registered, with the command of each."""
+        from src.online.commands import command_of, command_text
+        from src.online.pose_memory import POSE_FILE, PoseMemory
+        from src.online.registration import USER_SOURCE
+        from src.online.samples import DEFAULT_ROOT
+        rows = []
+        path = (self.online_root or DEFAULT_ROOT) / POSE_FILE
+        if path.is_file():
+            try:
+                memory = PoseMemory.load(path)
+                for entry in memory.classes.values():
+                    if entry.source == USER_SOURCE and entry.label not in self.deleted_gestures:
+                        value = command_of(entry.label)
+                        rows.append({"label": entry.label, "value": value, "text": command_text(value)})
+            except (OSError, ValueError) as exc:
+                print(f"[Online] 내 동작 목록을 읽지 못했어요: {exc}")
+        self.my_gestures = rows
+        self.registrationChanged.emit()
+
+    @Property("QVariantList", notify=registrationChanged)
+    def myGestures(self):
+        return self.my_gestures
+
+    @Property("QVariantList", constant=True)
+    def commandChoices(self):
+        from src.online.commands import choices
+        return choices()
+
+    @Property(str, notify=registrationChanged)
+    def commandMessage(self):
+        return self.command_message
+
+    @Slot(str, str, result=bool)
+    def setGestureCommand(self, label, value):
+        """Empty value = show on the screen only."""
+        from src.online.commands import CommandError, set_command
+        try:
+            text = set_command(label, value)
+        except CommandError as exc:
+            self.command_message = str(exc)
+            self.registrationChanged.emit()
+            return False
+        self.command_message = f"'{label}' → {text} 연결했어요"
+        self.refreshMyGestures()
+        return True
+
+    @Slot()
+    def clearCommandMessage(self):
+        self.command_message = ""
+        self.registrationChanged.emit()
+
+    @Slot(str)
+    def deleteMyGesture(self, label):
+        self.deleted_gestures.add(label)
+        self.online_commands.append(("gesture_delete", label))
+        self.command_message = f"'{label}'을(를) 지웠어요"
+        self.refreshMyGestures()
+
+    # ------------------------------------------------------------------ the hand drawn on the screen
+    def set_virtual_hand(self, view, paused=False):
+        if view is None and self.virtual_hand is None:
+            return
+        from PySide6.QtGui import QCursor
+        pos = QCursor.pos()             # logical pixels, the same space as window positions (DPI handled by Qt)
+        self.virtual_hand = None if view is None else {**view, "x": pos.x(), "y": pos.y(), "paused": bool(paused)}
+        self.virtualHandChanged.emit()
+
+    @Property("QVariant", notify=virtualHandChanged)
+    def virtualHand(self):
+        return self.virtual_hand or {}
+
+    @Property(bool, notify=stateChanged)
+    def virtualHandOn(self):
+        return self.virtual_hand_on
+
+    @Slot(bool)
+    def setVirtualHand(self, on):
+        self.virtual_hand_on = bool(on)
+        self.stateChanged.emit()
+
+    def set_live_gesture(self, label):
+        if label != self.live_gesture:
+            self.live_gesture = label
+            self.registrationChanged.emit()
+
+    @Property(str, notify=registrationChanged)
+    def liveGesture(self):
+        return self.live_gesture
+
+    @Property(bool, notify=registrationChanged)
+    def onlineReady(self):
+        return self.online_ready
+
+    @Property("QVariant", notify=registrationChanged)
+    def registration(self):
+        return self.registration_view or {"state": ""}
+
+    @Property(str, notify=registrationChanged)
+    def registrationAdvice(self):
+        """What the check found, in words (internal class names stay out of sight)."""
+        report = (self.registration_view or {}).get("report") or {}
+        if not report:
+            return ""
+        from src.online.collector import correction_choices
+        names = {c["label"]: c["name"] for c in correction_choices()}
+        lines = []
+        conflicts = report.get("conflicts") or []
+        other = conflicts[0]["label"] if conflicts else report.get("confused_with")
+        if other:
+            lines.append(f"'{names.get(other, other)}'와(과) 헷갈릴 수 있어요.")
+        if report.get("rest_fires"):
+            lines.append("쉬는 손 모양과도 비슷해요. 더 뚜렷한 동작을 권해요.")
+        if not report.get("reliable"):
+            lines.append("안정적이지 않아요. 다시 시연하는 것을 권해요.")
+        return " ".join(lines) or "기존 동작과 잘 구분돼요."
+
+    @Slot(str)
+    def startRegistration(self, name):
+        self.online_commands.append(("register_start", name))
+
+    @Slot()
+    def approveRegistration(self):
+        self.online_commands.append(("register_approve",))
+
+    @Slot()
+    def cancelRegistration(self):
+        self.online_commands.append(("register_cancel",))
+
+    # ------------------------------------------------------------------ "what was that really?" (online learning)
+    def show_correction(self, sample, store):
+        """Asks a person to label the last moments. Their answer is the only thing that makes this sample a training target."""
+        from src.online.collector import correction_choices
+        self.correction_sample, self.correction_store = sample, store
+        self.correction_choices = correction_choices()
+        names = {c["label"]: c["name"] for c in self.correction_choices}
+        self.correction_guess = names.get(sample.suggested_label, "")
+        self.correctionChanged.emit()
+
+    @Property(bool, notify=correctionChanged)
+    def correctionVisible(self):
+        return self.correction_sample is not None
+
+    @Property(str, notify=correctionChanged)
+    def correctionGuess(self):
+        return self.correction_guess
+
+    @Property("QVariantList", notify=correctionChanged)
+    def correctionChoices(self):
+        return self.correction_choices
+
+    @Slot(str)
+    def answerCorrection(self, label):
+        from src.online.collector import label_sample
+        sample, store = self.correction_sample, self.correction_store
+        if sample is None:
+            return
+        self.correction_sample = None
+        self.correctionChanged.emit()
+        try:
+            label_sample(store, sample.sample_id, label)
+        except (KeyError, OSError, ValueError) as exc:
+            print(f"[Online] 정정 저장 실패: {exc}")
+        self.learn_message = ""
+        self.refreshOnlineSummary()
+
+    @Slot()
+    def dismissCorrection(self):
+        """No answer: the sample has no use and holds a person's movement, so it goes."""
+        sample, store = self.correction_sample, self.correction_store
+        if sample is None:
+            return
+        self.correction_sample = None
+        self.correctionChanged.emit()
+        try:
+            store.delete([sample.sample_id])
+        except OSError as exc:
+            print(f"[Online] 표본 삭제 실패: {exc}")
 
     def set_failures(self, summary, last_file):
         self.failure_summary, self.failure_last = summary, last_file
@@ -2660,6 +2981,15 @@ class QtDashboard(QObject):
         self.tcn_gate = bool(on)
         self.stateChanged.emit()
 
+    @Property(str, notify=stateChanged)
+    def gateModel(self):
+        return self.gate_model
+
+    @Slot(str)
+    def setGateModel(self, value):
+        self.gate_model = "online" if value == "online" else "tcn"
+        self.stateChanged.emit()
+
     def _review_saved_recording(self, rec_view) -> None:
         """A recording was saved: show its quality banner. The check runs after the save ("pending"), so the same file comes
         again with its result; a failed one is excluded from training by the check itself, and the lists are read again so
@@ -2904,7 +3234,7 @@ class QtDashboard(QObject):
             show_fingertips=self.show_fingertips, profile=self.profile, motion_request=self.motion_request,
             palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
             palm_axes_reset=self.palm_axes_requests[2],
-            rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate,
+            rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate, gate_model=self.gate_model,
             rec_focus=self.rec_focus, model_version=self.model_version,
             rec_plan=copy.deepcopy(self.rec_plan), rec_paused=self.rec_paused,
             rec_discard=self.rec_discard,
@@ -2924,6 +3254,9 @@ class QtDashboard(QObject):
         if snap.tracking is None:
             self.tracking_close_requested = False
         self.toggle_progress = getattr(snap, "toggle_progress", 0.0)
+        self.set_registration(getattr(snap, "registration", None))
+        self.set_live_gesture(getattr(snap, "online_gesture", ""))
+        self.set_virtual_hand(getattr(snap, "virtual_hand", None), snap.paused)
         lost = (bool(getattr(snap, "hand_lost", False)), bool(getattr(snap, "arm_lost", False)),
                 bool(getattr(snap, "admin_blocked", False)))
         if lost != (getattr(self, "hand_lost", False), getattr(self, "arm_lost", False), getattr(self, "admin_blocked", False)):

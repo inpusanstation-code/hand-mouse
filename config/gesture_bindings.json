@@ -124,8 +124,16 @@
     "motion_f5": {
       "gesture_key": "motion_f5",
       "track": "motion",
+      "enabled": true,
       "action_type": "hotkey",
       "action_value": "f5",
+      "app_overrides": []
+    },
+    "user:잘라내기": {
+      "gesture_key": "user:잘라내기",
+      "track": "static",
+      "action_type": "hotkey",
+      "action_value": "ctrl+x",
       "enabled": true,
       "app_overrides": []
     }

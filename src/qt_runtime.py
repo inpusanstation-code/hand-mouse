@@ -40,7 +40,15 @@ from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
 from src.crop_recorder import CropRecorder, crops_path
 from src.roi_tracker import RoiTracker, hand_box
-from src.hand_selection import selected_detection
+from src.hand_selection import HandFollower, selected_detection
+from src.virtual_hand import view as virtual_hand_view
+from src.online.collector import OnlineCollector
+from src.perf_log import foreground_window_title
+from src.online.commands import CommandGate, binding_key, command_of, command_text, forget_command
+from src.online.pose_memory import POSE_FILE, PoseMemory, PoseRecognizer, pose_features
+from src.online.registration import USER_SOURCE, RegistrationConfig, RegistrationError, RegistrationSession
+from src.online.samples import DEFAULT_ROOT as ONLINE_DEFAULT_ROOT, SampleStore
+from src.recorder import machine_info
 from src.hand_tracker import HandLandmark, HandTracker, pinch_guides
 from src.pointer_engine import PointerEngine, PointerSettings
 from src.pointer_workspace import FINGERTIPS
@@ -48,6 +56,15 @@ from src.tracking_test import TrackingTest, result_line
 
 ONE_SHOT = ("left_click", "right_click", "drag_toggle", "alt_tab", "show_desktop", "task_switcher")
 
+
+def _online_gate_class():
+    try:
+        from src.online.safety import OnlineGate
+        return OnlineGate
+    except Exception:          # no torch: there is no learned-model checker to tell apart
+        return type(None)
+
+FREEZE_SECONDS = .2     # a flicker of the recognition must not let the cursor jump
 
 @dataclass(frozen=True)
 class UiState:
@@ -71,6 +88,7 @@ class UiState:
     rec_mode: str = "off"               # dataset recording (src/recorder.py): "off" | "guided" | "free"
     rec_advance: int = 0                # +1 per press of "start" in guided recording
     tcn_gate: bool = False              # right click / scroll grab confirmed by the trained model (src/gesture_gate.py)
+    gate_model: str = "tcn"             # "tcn" = models/gesture_tcn.onnx, "online" = the model learned from this person
     rec_focus: str = ""                 # guided recording of one gesture only (training center "집중 녹화"); "" = all
     model_version: int = 0              # +1 when the training center saved a new model: reload the gate
     rec_plan: Optional[Dict[str, Any]] = None
@@ -105,6 +123,9 @@ class Snapshot:
     palm_axes: Tuple[bool, str, float, str, bool] = (False, "", 0.0, "", False)  # wizard running, prompt, progress, note, correction saved
     rec: Optional[Dict[str, Any]] = None  # dataset recording view: mode, prompt, sub, progress, overall, waiting, frames, file
     gate_status: Optional[Dict[str, Any]] = None  # Stage 7: calibrated confidence & rejection reason from GestureGate
+    registration: Optional[Dict[str, Any]] = None  # adding a new gesture: state, demo, seconds, report (src/online/registration.py)
+    online_gesture: str = ""              # a registered gesture recognised right now (shown on the preview, sends nothing)
+    virtual_hand: Optional[Dict[str, Any]] = None  # the hand drawn at the cursor (src/virtual_hand.py), None = no hand
     hand_lost: bool = False               # no hand for `hand_lost_alert` seconds: the screen shows it big
     arm_lost: bool = False                # Pose has not seen the arm for `arm_lost_alert` seconds (only when Pose runs)
     admin_blocked: bool = False           # an admin window (Task Manager) is in front and this app is not admin: input is dropped
@@ -138,8 +159,22 @@ class QtRuntime:
     def __init__(self, *, camera, tracker: HandTracker, engine: GestureEngine, mouse, perf_log,
                  config_path=None, dry_run: bool = False, max_frames: int = 0,
                  draw_cursor_anchor: Callable = None, draw_recording: Callable = None,
-                 log_dir: Optional[Path] = None) -> None:
+                 log_dir: Optional[Path] = None, online_root: Optional[Path] = None) -> None:
         self.camera, self.tracker, self.engine, self.mouse = camera, tracker, engine, mouse
+        self.online: Optional[OnlineCollector] = None     # config "online_learning_enabled" (docs/online-learning-design.md)
+        self._online_root = online_root
+        self._online_failed = False
+        self.online_memory: Optional[PoseMemory] = None
+        self.recognizer: Optional[PoseRecognizer] = None
+        self.registration: Optional[RegistrationSession] = None
+        self.registration_config: Optional[RegistrationConfig] = None
+        self._registration_view: Optional[Dict[str, Any]] = None
+        self._online_gesture = ""
+        self._online_gesture_until = 0.0
+        self._virtual_hand: Optional[Dict[str, Any]] = None
+        self.command_gate = CommandGate()
+        self._online_model_version = 0
+        self._freeze_until = 0.0
         self.perf_log = perf_log
         self.dry_run = dry_run
         self.max_frames = int(max_frames)
@@ -150,7 +185,10 @@ class QtRuntime:
         self.pointer = PointerEngine(GestureEngine(config_path=config_path))
         # crop_min_px: how small the crop around a far hand may get (the hand then fills more of what MediaPipe sees)
         self.hand_crop = HandCrop(min_px=int(engine.config.get("crop_min_px", 96)),
-                                  scale=float(engine.config.get("crop_scale", 2.4)))
+                                  scale=float(engine.config.get("crop_scale", 2.4)),
+                                  search_seconds=float(engine.config.get("crop_search_seconds", 0.0)),
+                                  collapse_ratio=float(engine.config.get("crop_collapse_ratio", 0.0)))
+        self._search_frames = 0
         # while the detector has lost the hand, a video tracker keeps the crop on it (src/roi_tracker.py)
         self.roi_tracker = RoiTracker(str(engine.config.get("crop_tracker", "off")),
                                       float(engine.config.get("crop_track_seconds", 3.0)))
@@ -170,6 +208,7 @@ class QtRuntime:
 
         self._had_hand = False
         self._det_path = ""
+        self._hand_follower = HandFollower()
         self._applied_profile = engine.profile_name
         self.motion = MotionMode(engine.config)
         self.close_sign = CloseSign(engine.config)
@@ -268,6 +307,11 @@ class QtRuntime:
                 self.mouse.release_all()
             except Exception:
                 pass
+            if self.online is not None:
+                try:
+                    self.online.close()
+                except Exception:
+                    pass
             try:
                 self._stop_recording(time.perf_counter())   # quitting mid-recording still leaves a complete file
             except Exception:
@@ -320,6 +364,8 @@ class QtRuntime:
                 if self._rec is not None:
                     self._rec.event(now, "mark")
                 self._record_negative_candidate(now, "f_key", "Manual failure mark button")
+                if self.online is not None:
+                    self.online.capture_recent(now)      # the window then asks what it really was (main.py run_qt)
                 if self.failures.trigger(now, "manual"):
                     self._say("실패·오작동 부정 후보 기록 (자동 재학습 미투입)")
             elif kind == "return_block_mark":
@@ -329,11 +375,25 @@ class QtRuntime:
                     self._say("이동 차단 오탐 기록 (복귀 억제 오작동)")
             elif kind == "rec_discard":
                 self._discard_recording(now)
+            elif kind == "register_start":
+                self._register_start(cmd[1], now)
+            elif kind == "register_approve":
+                self._register_approve()
+            elif kind == "register_cancel":
+                self._register_cancel()
+            elif kind == "gesture_delete":
+                self._gesture_delete(cmd[1])
+            elif kind == "online_reload":
+                self._online_reload()
             elif kind == "key":
                 self._key(cmd[1], now)
 
     def _key(self, key: int, now: float) -> None:
         engine, mouse, camera = self.engine, self.mouse, self.camera
+        if self.registration is not None and self.registration.active and key in (27, ord(" ")):
+            if key == 27:
+                self._register_cancel()      # Space must not start the mouse in the middle of demonstrations
+            return
         if key in (27, ord(" ")):
             was_paused = self.paused
             if not was_paused and now < getattr(self, "_recent_until", 0.0) + 1.0:
@@ -404,6 +464,8 @@ class QtRuntime:
             pointer.frame_missing()
             time.sleep(.03)
             return
+        # The preview is drawn on `frame` itself, later in this step. What keeps pixels for later needs the camera's picture.
+        clean = frame.copy() if self._crop_rec is not None or (ui.hand_crop and self.roi_tracker.enabled) else None
 
         if ui.anchor_joints != self.engine.cursor_anchor_override:
             # the user picked other skeleton points as the cursor reference (both engines use it)
@@ -419,11 +481,15 @@ class QtRuntime:
         roi = self.hand_crop.roi if ui.hand_crop else None
         if should_detect:
             detections = tracker.detect(frame, roi=roi)
-            self._det_path = "crop" if roi is not None else "full"
-            if roi is not None and not detections:
+            searching = roi is not None and self.hand_crop.searching
+            self._det_path = "search" if searching else "crop" if roi is not None else "full"
+            self._search_frames = self._search_frames + 1 if searching else 0
+            if roi is not None and not detections and searching and self._search_frames % 6:
+                pass   # a far hand is too small for the whole frame: it is only tried now and then during the search
+            elif roi is not None and not detections:
                 # the crop stays (HandCrop.miss) so the next frames try it again; this frame falls back to the full frame
                 roi = None
-                self._det_path = "crop_miss>full"
+                self._det_path = "search_miss>full" if searching else "crop_miss>full"
                 detections = tracker.detect(frame)
         else:
             detections = []
@@ -436,16 +502,22 @@ class QtRuntime:
             if not self.paused:
                 self._pause()
             detections = []
+            self._hand_follower.reset()
         else:
-            chosen = selected_detection(detections, ui.control_hand, camera.config.mirror)
+            if engine.config.get("hand_follow_enabled", True):
+                chosen = self._hand_follower.select(detections, ui.control_hand, camera.config.mirror, t0)
+                if self._hand_follower.followed:
+                    self._det_path += "+follow"
+            else:
+                chosen = selected_detection(detections, ui.control_hand, camera.config.mirror)
             detections = [chosen] if chosen is not None else []
             if detections:
                 self._hand_seen_t = t0
         self.mouse.hand_size = self._hand_width_fraction(detections[0].landmarks, frame.shape[1], frame.shape[0]) if detections else None
         if ui.hand_crop and detections:
             self.hand_crop.update(detections[0].landmarks, frame.shape[1], frame.shape[0], now=t0)
-            if self.roi_tracker.enabled:
-                self.roi_tracker.good(frame, hand_box(detections[0].landmarks, frame.shape[1], frame.shape[0]))
+            if self.roi_tracker.enabled and not self.hand_crop.collapsed:
+                self.roi_tracker.good(clean, hand_box(detections[0].landmarks, frame.shape[1], frame.shape[0]))
         elif ui.hand_crop:
             followed = self.roi_tracker.lost(frame, t0) if self.roi_tracker.enabled else None
             if followed is not None:
@@ -457,6 +529,8 @@ class QtRuntime:
             self.roi_tracker.reset()
         palm_calibrating = self._palm_axes(t0, ui, detections)
         guided_recording = self._recording_mode(t0, ui, detections)
+        self._virtual_hand = None
+        command_hold = self._online_recognize(t0, ui, detections, frame, guided_recording)
         self._track_arm(t0, frame, ui, detections)
         if engine.config.get("elbow_pivot", False) and detections and not ui.use_index_pointer:
             self.elbow.observe(t0, engine.palm_anchor_point(detections[0].landmarks), mouse.frame_aspect)
@@ -609,6 +683,8 @@ class QtRuntime:
                     self._say(gate.last_note, 1.2)
                     gate.last_note = ""
             self._rule_action = rule_action
+            if command_hold:
+                result.action, result.cursor_point, result.is_moving = "none", None, False
             if not self.paused and not guided_recording:      # guided recording: rules judge, the mouse stays still
                 comp_hit = self.composite_detector.step(
                     t0, hand.landmarks, result.active_gesture, draw_pinched, mouse.frame_aspect
@@ -648,9 +724,11 @@ class QtRuntime:
                 mouse.apply(result, engine.config)
                 if result.action in ONE_SHOT:
                     self._recent_action, self._recent_until = result.action, time.perf_counter() + .8
-            HandTracker.draw_hand(frame, hand.landmarks, pinch_guides(
-                result.distances, engine.config, draw_pinched,
-                action=result.action, gesture=result.active_gesture))
+            guides = pinch_guides(result.distances, engine.config, draw_pinched,
+                                  action=result.action, gesture=result.active_gesture)
+            HandTracker.draw_hand(frame, hand.landmarks, guides)
+            self._virtual_hand = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], guides,
+                                                   self._recent_action if time.perf_counter() < self._recent_until else result.action)
             if self._draw_cursor_anchor:
                 self._draw_cursor_anchor(frame, hand.landmarks, engine.palm_anchor_point(hand.landmarks),
                                          result.is_moving)
@@ -668,7 +746,9 @@ class QtRuntime:
         if roi is not None:
             cv2.rectangle(frame, roi[:2], roi[2:], (189, 229, 70), 2, cv2.LINE_AA)
         self._failures(t0, detections, roi, index_mode, ui, frame, result, frame_out)
-        self._record_frame(t0, detections, result, frame)
+        self._record_frame(t0, detections, result, clean)
+        if ui.stage == "main" and not guided_recording and self.test is None:
+            self._online_frame(t0, detections, frame)
         self._last_step_t = t0
         tracking = self._tracking(t0, detections, index_mode, ui)
 
@@ -708,6 +788,9 @@ class QtRuntime:
             palm_axes=self._palm_view(t0),
             rec=self._rec_view(t0),
             gate_status=self.gate.status_summary() if (self.gate is not None and ui.tcn_gate) else None,
+            registration=self._registration_view,
+            online_gesture=self._online_gesture if t0 < self._online_gesture_until else "",
+            virtual_hand=self._virtual_hand,
             admin_blocked=self._admin_window_in_front(t0),
             hand_lost=(t0 - self._hand_seen_t) > float(self.engine.config.get("hand_lost_alert", 0.35)),
             arm_lost=bool(self.pose is not None and not ui.use_index_pointer
@@ -719,8 +802,168 @@ class QtRuntime:
             self._snap = snap
             self._cond.notify_all()
         if self.perf_log is not None:
+            if ui.stage == "main":
+                lms = detections[0].landmarks if detections else None
+                self.perf_log.hand(
+                    found=bool(detections), raw=bool(all_detections), followed=self._hand_follower.followed,
+                    size=max(math.hypot(lms[k].x - lms[0].x, (lms[k].y - lms[0].y) * frame.shape[0] / frame.shape[1])
+                             for k in (5, 9, 13, 17)) if lms else None)
             self.perf_log.frame(tracker.last_detect_ms if should_detect else None, (time.perf_counter() - t0) * 1000.0)
             self.perf_log.tick(camera.fps, camera.dropped_frames)
+
+    def _online_frame(self, t0: float, detections, frame) -> None:
+        """Everyday-use collection. A failure here switches collection off, it never stops the mouse."""
+        if self._online_failed or not self.engine.config.get("online_learning_enabled", False):
+            return
+        try:
+            if self.online is None:
+                config = self.engine.config
+                self.online = OnlineCollector(
+                    SampleStore(self._online_root or ONLINE_DEFAULT_ROOT), pc=machine_info(str(config.get("pc_alias", "")))["pc"],
+                    camera=str(config.get("camera_note", "")), aspect=frame.shape[0] / max(1, frame.shape[1]),
+                    handedness=str(self.ui.control_hand))
+                self._online_reload()
+            hand = detections[0] if detections else None
+            lm = world = None
+            if hand is not None and getattr(hand, "world", None):
+                lm, world = [(p.x, p.y, p.z) for p in hand.landmarks], hand.world
+            if self.registration is not None and self.registration.active:
+                self.registration.update(t0, lm, world)     # demonstrations are saved on approval, not as everyday use
+                self._registration_view = self.registration.view()
+                return
+            self.online.frame(t0, hand, getattr(self, "_rule_action", None) if hand is not None else None)
+        except Exception as exc:
+            self._online_failed = True
+            self.registration = None
+            self._say(f"학습 데이터 수집을 껐어요: {exc}", 5.0)
+
+    def _online_recognize(self, t0: float, ui, detections, frame, guided_recording: bool) -> bool:
+        """Registered gestures, before the rules act on this frame. True = one is being made: the hand is giving a command, so the
+        cursor stays where it is and no click is judged (otherwise the command lands somewhere else)."""
+        if self._online_failed or not self.engine.config.get("online_learning_enabled", False):
+            return False
+        if ui.stage != "main" or guided_recording or self.test is not None or (self.registration is not None and self.registration.active):
+            return False
+        try:
+            if self.recognizer is None:
+                if not self._online_load():
+                    return False
+                self.recognizer = PoseRecognizer(self.online_memory, frame.shape[0] / max(1, frame.shape[1]))
+            hand = detections[0] if detections else None
+            lm = world = None
+            if hand is not None and getattr(hand, "world", None):
+                lm, world = [(p.x, p.y, p.z) for p in hand.landmarks], hand.world
+            fired = self.recognizer.step(t0, lm, world, USER_SOURCE)
+            if fired:
+                self._online_gesture, self._online_gesture_until = fired, t0 + 1.0
+            elif self.recognizer.current:
+                self._online_gesture_until = max(self._online_gesture_until, t0 + .3)
+            due = self.command_gate.step(t0, self.recognizer.current, allowed=not self.paused)
+            if due:
+                self._run_command(due, t0)
+            if self.recognizer.candidate:
+                self._freeze_until = t0 + FREEZE_SECONDS
+            return t0 < self._freeze_until
+        except Exception as exc:
+            self._online_failed = True
+            self._say(f"새 동작 인식을 껐어요: {exc}", 5.0)
+            return False
+
+    def _run_command(self, label: str, t0: float) -> None:
+        """The command the person chose for a registered gesture. Nothing happens for a gesture without one."""
+        value = command_of(label)
+        if not value:
+            return
+        if foreground_window_title().startswith("Hand-Mouse"):
+            # the keys would land in this app itself, where a letter can be a shortcut (Q quits)
+            self._online_gesture, self._online_gesture_until = f"{label}: 앱 창에는 명령을 보내지 않아요", t0 + 1.5
+            return
+        registry = get_action_registry()
+        resolved = registry.resolve_effective_action(binding_key(label), self.mouse.foreground_info() if not self.mouse.dry_run else {})
+        ok, badge = registry.execute_resolved_action(resolved, dry_run=self.mouse.dry_run, mouse_controller=self.mouse)
+        self._online_gesture = f"{label} → {command_text(value)}" if ok else f"{label}: {badge}"
+        self._online_gesture_until = t0 + 1.5
+        self._say(f"새 동작 실행: {label} → {badge}", 1.5)
+
+    def _gesture_delete(self, label: str) -> None:
+        if not self._online_load() or self.online_memory.classes.get(label) is None or self.online_memory.classes[label].source != USER_SOURCE:
+            return
+        self.online_memory.remove_class(label)
+        root = self._online_root or ONLINE_DEFAULT_ROOT
+        self.online_memory.save(root / POSE_FILE)
+        store = SampleStore(root)
+        store.delete([s.sample_id for s in store.samples(label=label)])
+        forget_command(label)
+        if self.recognizer is not None:
+            self.recognizer.reset()
+        self.command_gate.reset()
+
+    def _online_load(self) -> bool:
+        """The poses of the known classes and the registered gestures (scripts/online_build_pose.py)."""
+        if self.online_memory is not None:
+            return True
+        path = (self._online_root or ONLINE_DEFAULT_ROOT) / POSE_FILE
+        if getattr(self, "_online_load_failed", False) or not path.is_file():
+            return False
+        try:
+            self.online_memory = PoseMemory.load(path)
+        except Exception as exc:
+            self._online_load_failed = True
+            self._say(f"새 동작 기능을 켜지 못했어요: {exc}", 5.0)
+            return False
+        return True
+
+    def _register_start(self, name: str, now: float) -> None:
+        if not self.engine.config.get("online_learning_enabled", False) or not self._online_load():
+            self._registration_view = {"state": "failed", "message": "새 동작 기능이 꺼져 있거나 준비되지 않았어요"}
+            return
+        self._pause()
+        try:
+            config = self.engine.config
+            aspect = self.mouse.frame_aspect
+            self.registration = RegistrationSession(
+                name, memory=self.online_memory, embed=lambda frames: pose_features(frames, aspect),
+                store=SampleStore(self._online_root or ONLINE_DEFAULT_ROOT), config=self.registration_config,
+                meta={"pc": machine_info(str(config.get("pc_alias", "")))["pc"], "camera": str(config.get("camera_note", "")),
+                      "aspect": aspect, "handedness": str(self.ui.control_hand)})
+            self._registration_view = self.registration.view()
+        except RegistrationError as exc:
+            self.registration = None
+            self._registration_view = {"state": "failed", "message": str(exc)}
+
+    def _register_approve(self) -> None:
+        if self.registration is None:
+            return
+        try:
+            self.registration.approve((self._online_root or ONLINE_DEFAULT_ROOT) / POSE_FILE)
+            self._registration_view = self.registration.view()
+            if self.recognizer is not None:
+                self.recognizer.reset()
+        except (RegistrationError, OSError, ValueError) as exc:
+            self._registration_view = {"state": "failed", "message": str(exc)}
+        self.registration = None
+
+    def _register_cancel(self) -> None:
+        if self.registration is not None:
+            self.registration.cancel()
+        self.registration, self._registration_view = None, None
+
+    def _online_reload(self) -> None:
+        """A new production model (or a rollback): the guesses come from it from now on. Without torch or a model: the rule engine's."""
+        self._online_model_version += 1          # the gate reloads too, and holds actions for a moment (OnlineGate)
+        if self.online is None:
+            return
+        try:
+            from src.online.app_job import ProductionPredictor
+            from src.online.versions import ModelManager
+            root = self._online_root or ONLINE_DEFAULT_ROOT
+            self.online.guess = ProductionPredictor(root).guess if ModelManager(root).has("production") else None
+        except Exception:
+            self.online.guess = None
+
+    def take_correction(self):
+        """A saved "last moments" sample waiting for the person's answer, or None. UI thread."""
+        return self.online.take_manual() if self.online is not None else None
 
     def _motion_blocked(self, t0: float) -> bool:
         """A pinch, scroll or drag is going on or has just ended: the entry pose does not count then."""
@@ -897,27 +1140,39 @@ class QtRuntime:
                     cv2.FONT_HERSHEY_SIMPLEX, .55, orange, 2, cv2.LINE_AA)
 
     def _gate_for(self, ui) -> Optional[GestureGate]:
-        """The intent checker when it is switched on (and the model loads), else None."""
-        version = getattr(ui, "model_version", 0)
-        reload = version != getattr(self, "_model_version", 0)
+        """The intent checker when it is switched on (and the model loads), else None. `gate_model` "online" uses the model learned from
+        this person (src/online/safety.py); a promoted model or a rollback reloads it."""
+        key = (getattr(ui, "model_version", 0), getattr(ui, "gate_model", "tcn"), self._online_model_version)
+        reload = key != getattr(self, "_gate_key", None)
         if reload:
-            self._model_version = version
+            self._gate_key = key
             self._gate_failed = False
         if not ui.tcn_gate or self._gate_failed:
             return None
         if self.gate is None or reload:
             try:
-                predict, info = load_predictor(GATE_MODEL)
-                replacement = GestureGate(predict, info, self.engine.config)
+                if key[1] == "online":
+                    from src.online.safety import OnlineGate
+                    replacement = OnlineGate(self._online_root or ONLINE_DEFAULT_ROOT, self.engine.config)
+                    note = f"손짓 확인: 내 모델 켜짐 ({len(replacement.classes) - 1}종 동작)"
+                else:
+                    predict, info = load_predictor(GATE_MODEL)
+                    replacement = GestureGate(predict, info, self.engine.config)
+                    note = f"손짓 확인(TCN) 켜짐: 학습된 {len(info['classes']) - 1}종 동작을 확인해요"
                 self.mouse.release_all()
                 self.engine.reset()
                 self.pointer.reset()
                 self.gate = replacement
-                self._say(f"손짓 확인(TCN) 켜짐: 학습된 {len(info['classes']) - 1}종 동작을 확인해요", 3.0)
+                self._say(note, 3.0)
             except Exception as exc:
+                # a failed reload keeps the checker that was working; only a first load that fails leaves none
+                switched = self.gate is not None and isinstance(self.gate, _online_gate_class()) != (key[1] == "online")
+                if switched:
+                    self.gate = None          # the other kind was asked for: never keep confirming with the wrong model
                 self._gate_failed = self.gate is None
-                self._say(f"손짓 확인(TCN)을 켜지 못했어요: {exc}", 5.0)
+                self._say(f"손짓 확인을 켜지 못했어요: {exc}", 5.0)
                 return self.gate
+        return self.gate
         return self.gate
 
     def _intent(self, target, now):
@@ -1097,6 +1352,8 @@ class QtRuntime:
                     "mode": getattr(result, "hand_shape_mode", "normal"),
                     "clutch": getattr(self.mouse, "clutch_state", "inactive"),
                     "return": getattr(self.mouse, "return_state", "none")}
+            if self._hand_follower.followed:
+                rule["followed"] = True      # kept only by HandFollower: lets a recording measure what the rule adds
             if self._guided is not None:
                 from types import SimpleNamespace
                 from src.gesture_catalog import BY_KEY
@@ -1381,7 +1638,8 @@ class QtRuntime:
             "tracker": self.tracker.options, "sensitivity_pct": ui.sensitivity,
             "control_hand": ui.control_hand, "dry_run": self.dry_run,
             "camera_source": str(self.camera.config.source), "mirror": bool(self.camera.config.mirror),
-            "crop_params": {**{k: getattr(self.hand_crop, k) for k in ("scale", "min_px", "recenter", "resize", "max_hand_frac")},
+            "crop_params": {**{k: getattr(self.hand_crop, k) for k in ("scale", "min_px", "recenter", "resize", "max_hand_frac",
+                                                                       "search_seconds", "collapse_ratio")},
                             "tracker": self.roi_tracker.kind, "track_seconds": self.roi_tracker.seconds},
             "config": {k: v for k, v in self.engine.config.items() if isinstance(v, (int, float, str, bool))},
         })

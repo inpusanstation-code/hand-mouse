@@ -353,6 +353,9 @@ def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
     mouse.slowdown_provider = magnet.factor
     magnet.start()
     runtime.ui = dashboard.ui_state()
+    from src.online.pose_memory import POSE_FILE
+    from src.online.samples import DEFAULT_ROOT as ONLINE_ROOT
+    dashboard.set_online_ready(bool(engine.config.get("online_learning_enabled", False)) and (ONLINE_ROOT / POSE_FILE).is_file())
     runtime.start()
     try:
         while not dashboard.closed and not runtime.finished:
@@ -371,6 +374,13 @@ def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
             if dashboard.failure_mark_requested:
                 dashboard.failure_mark_requested = False
                 runtime.post("failure_mark")
+            correction = runtime.take_correction()
+            if correction is not None:
+                runtime.post("pause")     # the hand must not click while the person answers
+                dashboard.show_correction(correction, runtime.online.store)
+            while dashboard.online_commands:
+                runtime.post(*dashboard.online_commands.pop(0))
+            dashboard.poll_online_job()
             want_settings = key in (ord("o"), ord("O"), ord("0"))
             if keys.available:
                 want_settings = settings_key_pressed(keys, text_input_has_focus()) or want_settings

@@ -134,6 +134,305 @@ ApplicationWindow {
         }
     }
 
+    // Online learning: after F, what was the last moment really? (only this answer makes it training data)
+    Popup {
+        id: correctionPopup
+        anchors.centerIn: parent
+        width: Math.min(620, window.width - 48)
+        padding: 20
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onClosed: dashboard.dismissCorrection()
+        background: Rectangle { radius: 14; color: "#FFFFFF"; border.color: window.line }
+        Connections {
+            target: dashboard
+            function onCorrectionChanged() {
+                if (dashboard.correctionVisible) correctionPopup.open()
+                else correctionPopup.close()
+            }
+        }
+        contentItem: ColumnLayout {
+            spacing: 12
+            focus: true
+            Keys.onPressed: function (event) {
+                var index = event.key === Qt.Key_0 ? 9 : event.key - Qt.Key_1
+                if (index >= 0 && index < dashboard.correctionChoices.length) {
+                    dashboard.answerCorrection(dashboard.correctionChoices[index].label)
+                    event.accepted = true
+                }
+            }
+            TextLabel { text: "방금 동작은 무엇이었나요?"; font.pixelSize: 18; font.bold: true }
+            TextLabel {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: window.muted
+                text: (dashboard.correctionGuess ? "앱은 '" + dashboard.correctionGuess + "'(으)로 봤어요. " : "")
+                      + "고르면 직전 3초를 학습 데이터로 저장해요."
+            }
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: 8
+                rowSpacing: 8
+                Repeater {
+                    model: dashboard.correctionChoices
+                    ActionButton {
+                        required property var modelData
+                        required property int index
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        text: (index < 9 ? (index + 1) + ". " : (index === 9 ? "0. " : "")) + modelData.name
+                        onClicked: dashboard.answerCorrection(modelData.label)
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                TextLabel { text: "숫자 키로 고를 수 있어요"; font.pixelSize: 12; color: window.muted }
+                Item { Layout.fillWidth: true }
+                ActionButton { text: "저장 안 함 (Esc)"; onClicked: dashboard.dismissCorrection() }
+            }
+        }
+    }
+
+    // Online learning: which command a registered gesture runs. Two clicks, or press the keys.
+    Popup {
+        id: commandPopup
+        objectName: "commandPopup"
+        property string label: ""
+        property bool listening: false
+        function openFor(name) {
+            label = name
+            listening = false
+            dashboard.clearCommandMessage()
+            open()
+            commandKeys.forceActiveFocus()
+        }
+        // Qt key -> the app's key name
+        function keyName(event) {
+            var k = event.key
+            if (k >= Qt.Key_A && k <= Qt.Key_Z) return String.fromCharCode(k).toLowerCase()
+            if (k >= Qt.Key_0 && k <= Qt.Key_9) return String.fromCharCode(k)
+            if (k >= Qt.Key_F1 && k <= Qt.Key_F12) return "f" + (k - Qt.Key_F1 + 1)
+            var names = {}
+            names[Qt.Key_Return] = "enter"; names[Qt.Key_Enter] = "enter"; names[Qt.Key_Space] = "space"; names[Qt.Key_Tab] = "tab"
+            names[Qt.Key_Backspace] = "backspace"; names[Qt.Key_Delete] = "delete"; names[Qt.Key_Left] = "left"; names[Qt.Key_Right] = "right"
+            names[Qt.Key_Up] = "up"; names[Qt.Key_Down] = "down"; names[Qt.Key_Home] = "home"; names[Qt.Key_End] = "end"
+            names[Qt.Key_PageUp] = "pageup"; names[Qt.Key_PageDown] = "pagedown"
+            return names[k] || ""
+        }
+        anchors.centerIn: parent
+        width: Math.min(460, window.width - 48)
+        padding: 20
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle { radius: 14; color: "#FFFFFF"; border.color: window.line }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Item {
+                id: commandKeys
+                width: 0; height: 0
+                focus: true
+                // While listening, a letter is the key being chosen, not the window's shortcut (Q would quit the app)
+                Keys.onShortcutOverride: function (event) { event.accepted = commandPopup.listening }
+                Keys.onPressed: function (event) {
+                    if (!commandPopup.listening) return
+                    if (event.key === Qt.Key_Escape) { commandPopup.listening = false; event.accepted = true; return }
+                    var name = commandPopup.keyName(event)
+                    if (name === "") { event.accepted = true; return }    // a modifier alone, or a key with no name: keep listening
+                    var combo = []
+                    if (event.modifiers & Qt.ControlModifier) combo.push("ctrl")
+                    if (event.modifiers & Qt.AltModifier) combo.push("alt")
+                    if (event.modifiers & Qt.ShiftModifier) combo.push("shift")
+                    if (event.modifiers & Qt.MetaModifier) combo.push("win")
+                    combo.push(name)
+                    commandPopup.listening = false
+                    event.accepted = true
+                    if (dashboard.setGestureCommand(commandPopup.label, combo.join("+"))) commandPopup.close()
+                }
+            }
+            TextLabel { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "'" + commandPopup.label + "' 하면 무엇을 실행할까요?"; font.pixelSize: 18; font.bold: true }
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: 8
+                rowSpacing: 8
+                Repeater {
+                    model: dashboard.commandChoices
+                    ActionButton {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        text: modelData.label
+                        onClicked: if (dashboard.setGestureCommand(commandPopup.label, modelData.value)) commandPopup.close()
+                    }
+                }
+            }
+            ActionButton {
+                Layout.fillWidth: true
+                accent: commandPopup.listening
+                text: commandPopup.listening ? "지금 키를 누르세요 (예: Ctrl+B) · Esc 취소" : "다른 키 직접 입력"
+                onClicked: { commandPopup.listening = true; commandKeys.forceActiveFocus() }
+            }
+            TextLabel {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                visible: dashboard.commandMessage !== ""
+                color: window.muted
+                font.pixelSize: 12
+                text: dashboard.commandMessage
+            }
+            TextLabel {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: window.muted
+                font.pixelSize: 12
+                text: "제어 시작 상태에서 동작을 0.5초 유지하면 실행돼요. 한 번 유지에 한 번만 실행해요."
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                ActionButton {
+                    danger: true
+                    text: "동작 삭제"
+                    onClicked: confirmDialog.ask("동작 삭제", "'" + commandPopup.label + "' 동작과 시연 기록을 지웁니다. 되돌릴 수 없습니다.", "삭제", function () {
+                        dashboard.deleteMyGesture(commandPopup.label)
+                        commandPopup.close()
+                    })
+                }
+                Item { Layout.fillWidth: true }
+                ActionButton {
+                    text: "표시만"
+                    onClicked: if (dashboard.setGestureCommand(commandPopup.label, "")) commandPopup.close()
+                }
+                ActionButton { text: "닫기"; onClicked: commandPopup.close() }
+            }
+        }
+    }
+
+    // Online learning: add a new gesture from a few demonstrations. Not modal: the person watches the preview meanwhile.
+    Popup {
+        id: registerPopup
+        objectName: "registerPopup"
+        x: window.width - width - 28
+        y: 86
+        width: Math.min(400, window.width - 48)
+        padding: 20
+        modal: false
+        closePolicy: Popup.NoAutoClose
+        background: Rectangle { radius: 14; color: "#FFFFFF"; border.color: window.line; border.width: 1 }
+        readonly property var view: dashboard.registration
+        readonly property string state: view.state || ""
+        readonly property bool running: state === "prep" || state === "do" || state === "rest"
+        onOpened: dashboard.refreshMyGestures()
+        contentItem: ColumnLayout {
+            spacing: 12
+            TextLabel { text: "새 동작 등록"; font.pixelSize: 18; font.bold: true }
+            // the gestures already registered, each with its command
+            Repeater {
+                model: registerPopup.state === "" || registerPopup.state === "failed" ? dashboard.myGestures : []
+                RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    spacing: 8
+                    TextLabel { text: modelData.label; font.bold: true; elide: Text.ElideRight; Layout.maximumWidth: 150 }
+                    TextLabel { Layout.fillWidth: true; text: modelData.text; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight }
+                    CompactButton { text: "명령 바꾸기"; onClicked: commandPopup.openFor(modelData.label) }
+                }
+            }
+            // name
+            TextLabel {
+                visible: registerPopup.state === "" || registerPopup.state === "failed"
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: registerPopup.state === "failed" ? window.dangerRed : window.muted
+                text: registerPopup.state === "failed" ? registerPopup.view.message
+                      : "이름을 정하고 5번 시연해요. 동작마다 조금씩 다르게 해 보세요. 마우스는 움직이지 않아요."
+            }
+            TextField {
+                id: registerName
+                visible: registerPopup.state === "" || registerPopup.state === "failed"
+                Layout.fillWidth: true
+                placeholderText: "동작 이름 (예: 주먹 쥐기)"
+                maximumLength: 30
+                selectByMouse: true
+                onAccepted: if (text.trim().length) dashboard.startRegistration(text)
+            }
+            // demonstrations
+            TextLabel {
+                visible: registerPopup.running
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                font.pixelSize: 26
+                font.bold: true
+                color: registerPopup.state === "do" ? "#16846E" : window.navy
+                text: registerPopup.state === "do" ? "지금 동작하세요" : (registerPopup.state === "prep" ? "준비하세요" : "손을 풀어 주세요")
+            }
+            TextLabel {
+                visible: registerPopup.running
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                color: registerPopup.view.hand === false ? window.dangerRed : window.muted
+                text: registerPopup.view.hand === false ? "손이 보이지 않아요. 시간이 멈춰 있어요"
+                      : (registerPopup.view.demo + " / " + registerPopup.view.demos + "번째 · " + registerPopup.view.seconds + "초")
+            }
+            // the result
+            TextLabel {
+                visible: registerPopup.state === "review"
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.bold: true
+                text: registerPopup.view.report ? "시연 " + registerPopup.view.report.demos + "번 중 "
+                      + registerPopup.view.report.recognised + "번을 알아봤어요" : ""
+            }
+            TextLabel {
+                visible: registerPopup.state === "review"
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: registerPopup.view.report && registerPopup.view.report.reliable ? window.muted : window.dangerRed
+                text: dashboard.registrationAdvice
+            }
+            TextLabel {
+                visible: registerPopup.state === "done"
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: "'" + registerPopup.view.name + "'을(를) 등록했어요. 이제 이 동작으로 실행할 명령을 골라 주세요."
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Item { Layout.fillWidth: true }
+                ActionButton {
+                    text: registerPopup.state === "review" || registerPopup.running ? "취소" : "닫기"
+                    onClicked: {
+                        dashboard.cancelRegistration()
+                        if (!registerPopup.running) registerPopup.close()
+                    }
+                }
+                ActionButton {
+                    visible: registerPopup.state === "" || registerPopup.state === "failed"
+                    primary: true
+                    enabled: registerName.text.trim().length > 0
+                    text: "시연 시작"
+                    onClicked: dashboard.startRegistration(registerName.text)
+                }
+                ActionButton {
+                    visible: registerPopup.state === "review"
+                    primary: true
+                    text: "등록"
+                    onClicked: dashboard.approveRegistration()
+                }
+                ActionButton {
+                    visible: registerPopup.state === "done"
+                    primary: true
+                    text: "명령 고르기"
+                    onClicked: commandPopup.openFor(registerPopup.view.name)
+                }
+            }
+        }
+    }
+
     // Cursor reference picker: click joints on a hand skeleton; the cursor follows their centre
     Popup {
         id: anchorPicker
@@ -1016,6 +1315,58 @@ ApplicationWindow {
                                     text: "커서 기준점 · " + dashboard.anchorJointsLabel
                                     onClicked: anchorPicker.openWith(dashboard.anchorJoints)
                                 }
+                                ActionButton {
+                                    visible: !dashboard.pointerOnly && dashboard.onlineReady
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    implicitWidth: 0
+                                    enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                                    text: "새 동작 등록"
+                                    onClicked: registerPopup.open()
+                                }
+
+                                // background learning from the person's corrections (online learning, phase 4)
+                                ColumnLayout {
+                                    visible: dashboard.onlineReady
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Component.onCompleted: dashboard.refreshOnlineSummary()
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        visible: dashboard.learnText !== ""
+                                        text: dashboard.learnText
+                                        color: window.muted
+                                        font.pixelSize: 12
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        ActionButton {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            implicitWidth: 0
+                                            enabled: !dashboard.learnRunning
+                                            text: dashboard.learnRunning ? "학습 중…" : "학습하기"
+                                            onClicked: dashboard.startOnlineLearning()
+                                        }
+                                        ActionButton {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            implicitWidth: 0
+                                            enabled: !dashboard.learnRunning && dashboard.learnCanRollback
+                                            text: "되돌리기"
+                                            onClicked: confirmDialog.ask("이전 모델로 되돌리기", "마지막 학습 전의 모델로 돌아갑니다.", "되돌리기", function () { dashboard.rollbackOnlineModel() })
+                                        }
+                                    }
+                                }
+                                SectionLabel { visible: !dashboard.pointerOnly; text: "화면에 가상 손" }
+                                Segmented {
+                                    visible: !dashboard.pointerOnly
+                                    options: [["off", "끔"], ["on", "켬"]]
+                                    current: dashboard.virtualHandOn ? "on" : "off"
+                                    onPicked: function (value) { dashboard.setVirtualHand(value === "on") }
+                                }
                                 SectionLabel { visible: !dashboard.pointerOnly; text: "손 주변 확대 (시험)" }
                                 Segmented {
                                     visible: !dashboard.pointerOnly
@@ -1041,6 +1392,13 @@ ApplicationWindow {
                                         font.pixelSize: 12
                                         color: window.muted
                                         wrapMode: Text.WordWrap
+                                    }
+                                    Segmented {
+                                        visible: dashboard.onlineReady && dashboard.learnCanUse
+                                        enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                                        options: [["tcn", "기존 모델"], ["online", "내 모델"]]
+                                        current: dashboard.gateModel
+                                        onPicked: function (value) { dashboard.setGateModel(value) }
                                     }
                                     TextLabel {
                                         Layout.fillWidth: true
@@ -1089,6 +1447,15 @@ ApplicationWindow {
                                         enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                         text: "기준점 · " + dashboard.anchorJointsLabel + "  · 바꾸기"
                                         onClicked: anchorPicker.openWith(dashboard.anchorJoints)
+                                    }
+                                    ActionButton {
+                                        visible: dashboard.onlineReady
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        implicitWidth: 0
+                                        enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                        text: "새 동작 등록"
+                                        onClicked: registerPopup.open()
                                     }
                                     SectionLabel { text: "손 주변 확대 (시험)" }
                                     Segmented {
@@ -1344,6 +1711,33 @@ ApplicationWindow {
                                 color: bigCue.accent
                                 font.bold: true
                                 font.pixelSize: Math.max(48, Math.min(capturePreview.paintedHeight, capturePreview.paintedWidth) * (text.length <= 2 ? 0.34 : 0.18))
+                            }
+                        }
+                        // A registered gesture recognised right now (shown only, it sends nothing to the mouse)
+                        Rectangle {
+                            objectName: "liveGesturePill"
+                            opacity: dashboard.liveGesture !== "" ? 1.0 : 0.0
+                            visible: opacity > 0.01
+                            Behavior on opacity { NumberAnimation { duration: 120 } }
+                            anchors.top: parent.top
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.topMargin: 14
+                            z: 5
+                            width: Math.min(liveGestureText.implicitWidth + 40, parent.width - 24)
+                            height: liveGestureText.implicitHeight + 16
+                            radius: height / 2
+                            color: Qt.rgba(0.06, 0.09, 0.16, 0.72)
+                            border.width: 2
+                            border.color: window.mint
+                            Text {
+                                id: liveGestureText
+                                anchors.centerIn: parent
+                                width: Math.min(implicitWidth, parent.width - 24)
+                                elide: Text.ElideRight
+                                text: dashboard.liveGesture
+                                color: window.mint
+                                font.pixelSize: 20
+                                font.bold: true
                             }
                         }
                         // Hand lost: a thin soft red frame and a small pill at the top
@@ -5965,6 +6359,78 @@ ApplicationWindow {
                     color: "#F5F7F8"
                     font.pixelSize: 13
                     font.family: "Malgun Gothic"
+                }
+            }
+        }
+    }
+
+    // The control hand drawn at the cursor (src/virtual_hand.py): its thumb tip is the cursor, where a pinch clicks.
+    // Click-through and always on top, like the status pill; it follows the cursor instead of covering the screen.
+    Window {
+        id: virtualHandWindow
+        objectName: "virtualHandWindow"
+        title: "MANUX 가상 손"
+        transientParent: null
+        readonly property var hand: dashboard.virtualHand
+        readonly property bool present: hand.pts !== undefined
+        visible: dashboard.virtualHandOn && !dashboard.pointerOnly && present
+        color: "transparent"
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+               | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+        width: 640
+        height: 640
+        x: present ? hand.x - width / 2 : 0
+        y: present ? hand.y - height / 2 : 0
+        onHandChanged: handCanvas.requestPaint()
+        readonly property var bones: [
+            [0,1],[1,2],[2,3],[3,4], [0,5],[5,6],[6,7],[7,8], [5,9],[9,10],[10,11],[11,12],
+            [9,13],[13,14],[14,15],[15,16], [13,17],[17,18],[18,19],[19,20], [0,17]
+        ]
+        readonly property var tips: ({"index": 8, "middle": 12, "ring": 16, "pinky": 20})
+        Canvas {
+            id: handCanvas
+            anchors.fill: parent
+            opacity: virtualHandWindow.hand.paused ? 0.45 : 1.0
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var h = virtualHandWindow.hand
+                if (!h.pts) return
+                var cx = width / 2, cy = height / 2
+                function px(i) { return [cx + h.pts[2 * i], cy + h.pts[2 * i + 1]] }
+                ctx.lineCap = "round"
+                // a dark outline under a light line: visible on light and dark windows alike
+                for (var pass = 0; pass < 2; pass++) {
+                    ctx.strokeStyle = pass === 0 ? "rgba(17,35,49,0.55)" : "rgba(245,247,248,0.95)"
+                    ctx.lineWidth = pass === 0 ? 7 : 3.5
+                    ctx.beginPath()
+                    for (var b = 0; b < virtualHandWindow.bones.length; b++) {
+                        var a = px(virtualHandWindow.bones[b][0]), c = px(virtualHandWindow.bones[b][1])
+                        ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1])
+                    }
+                    ctx.stroke()
+                }
+                for (var j = 0; j < 21; j++) {
+                    var p = px(j)
+                    ctx.beginPath(); ctx.arc(p[0], p[1], j % 4 === 0 && j > 0 ? 5 : 3.5, 0, 2 * Math.PI)
+                    ctx.fillStyle = "#46E5BD"; ctx.fill()
+                }
+                // thumb -> finger lines of the pinches the engine sees
+                var colors = {"near": "#F2B544", "pinched": "#2FBF8F", "action": "#E5484D"}
+                for (var g = 0; g < h.guides.length; g++) {
+                    var tip = px(virtualHandWindow.tips[h.guides[g][0]]), thumb = px(4)
+                    ctx.strokeStyle = colors[h.guides[g][1]] || "#F2B544"
+                    ctx.lineWidth = h.guides[g][1] === "near" ? 3 : 5
+                    ctx.beginPath(); ctx.moveTo(thumb[0], thumb[1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke()
+                }
+                // the click point: the cursor itself
+                ctx.lineWidth = 3
+                ctx.strokeStyle = h.action !== "" ? "#E5484D" : "#112331"
+                ctx.beginPath(); ctx.arc(cx, cy, 9, 0, 2 * Math.PI); ctx.stroke()
+                if (h.action !== "") {
+                    ctx.font = "bold 16px 'Malgun Gothic'"
+                    ctx.fillStyle = "#E5484D"
+                    ctx.fillText(h.action, cx + 14, cy - 12)
                 }
             }
         }

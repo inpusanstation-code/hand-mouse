@@ -282,23 +282,30 @@ class HandTracker:
         h, w = frame.shape[:2]
         pts = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
 
+        # Marks follow the hand's size in the frame: at fixed sizes they cover a far hand of 30-50 pixels completely.
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        k = min(1.0, max(max(xs) - min(xs), max(ys) - min(ys)) / 160.0) if pts else 1.0
+
+        def px(value: float, least: int = 1) -> int:
+            return max(least, int(round(value * k)))
+
         pinched_any = any(state != "near" for _, state in guides)
         line_color = (0, 230, 118) if pinched_any else (220, 220, 220)
         for i, j in HAND_CONNECTIONS:
-            cv2.line(frame, pts[i], pts[j], line_color, 2, cv2.LINE_AA)
-        for idx, (px, py) in enumerate(pts):
-            cv2.circle(frame, (px, py), 4, (255, 180, 0), -1, cv2.LINE_AA)
+            cv2.line(frame, pts[i], pts[j], line_color, px(2), cv2.LINE_AA)
+        for point in pts:
+            cv2.circle(frame, point, px(4), (255, 180, 0), -1, cv2.LINE_AA)
 
         thumb_pt = pts[4]
         for finger, state in guides:
             tip_pt = pts[FINGER_TIPS[finger]]
             color = GUIDE_COLORS[state]
-            cv2.line(frame, thumb_pt, tip_pt, color, 3 if state != "near" else 2, cv2.LINE_AA)
-            cv2.circle(frame, thumb_pt, 8, color, -1, cv2.LINE_AA)
-            cv2.circle(frame, tip_pt, 8, color, -1, cv2.LINE_AA)
+            cv2.line(frame, thumb_pt, tip_pt, color, px(3 if state != "near" else 2), cv2.LINE_AA)
+            cv2.circle(frame, thumb_pt, px(8, 2), color, -1, cv2.LINE_AA)
+            cv2.circle(frame, tip_pt, px(8, 2), color, -1, cv2.LINE_AA)
             if state != "near":
                 mid = ((thumb_pt[0] + tip_pt[0]) // 2, (thumb_pt[1] + tip_pt[1]) // 2)
-                cv2.circle(frame, mid, 11, color, 2, cv2.LINE_AA)
+                cv2.circle(frame, mid, px(11, 3), color, 1 if k < .5 else 2, cv2.LINE_AA)
 
     # a crop is looked at again from slightly shifted places (fractions of its side): the errors of the looks differ a little
     TTA_SHIFTS = ((0.12, 0.06), (-0.12, -0.06), (0.06, -0.12), (-0.06, 0.12))
