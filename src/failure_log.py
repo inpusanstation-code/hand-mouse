@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import time
 from collections import deque
 from pathlib import Path
@@ -70,7 +71,7 @@ def summarize(frames: List[Dict[str, Any]], kind: str, meta: Dict[str, Any]) -> 
         raw_seen += 1 if f.get("raw") else 0
     out["paths_during_loss"] = paths
     out["raw_hands_during_loss"] = raw_seen
-    if last is not None:
+    if last is not None and "box" in last:
         x0, y0, x1, y1 = last["box"]
         out["box_size"] = [round(x1 - x0, 3), round(y1 - y0, 3)]
         out["box_center"] = [round((x0 + x1) / 2, 3), round((y0 + y1) / 2, 3)]
@@ -78,7 +79,13 @@ def summarize(frames: List[Dict[str, Any]], kind: str, meta: Dict[str, Any]) -> 
         out["speed"] = last.get("speed")
         out["score_last"] = last.get("score")
         out["last_hand_t"] = last["t"]
-        recent = [f for f in hand_before if f["t"] >= last["t"] - 0.4]
+        if last.get("clutch_state") is not None:
+            out["clutch_state_last"] = last.get("clutch_state")
+        if last.get("return_state") is not None:
+            out["return_state_last"] = last.get("return_state")
+        if last.get("hand_shape_mode") is not None:
+            out["hand_shape_mode_last"] = last.get("hand_shape_mode")
+        recent = [f for f in hand_before if f["t"] >= last["t"] - 0.4 and "box" in f]
         if len(recent) >= 2:
             a, b = recent[0], recent[-1]
 
@@ -99,6 +106,17 @@ def summarize(frames: List[Dict[str, Any]], kind: str, meta: Dict[str, Any]) -> 
             bx0, by0, bx1, by1 = x0 * fw, y0 * fh, x1 * fw, y1 * fh
             side = max(1, crop[2] - crop[0])
             out["box_in_crop_margin"] = round(min(bx0 - crop[0], by0 - crop[1], crop[2] - bx1, crop[3] - by1) / side, 3)
+    # Summarize return-stroke / clutch state around the trigger
+    near_trigger = [f for f in frames if -0.8 <= f["t"] <= 0.2]
+    clutch_states = [f.get("clutch_state") for f in near_trigger if f.get("clutch_state") is not None]
+    return_states = [f.get("return_state") for f in near_trigger if f.get("return_state") is not None]
+    if clutch_states:
+        out["clutch_active_frames"] = sum(1 for c in clutch_states if c == "active")
+    if return_states:
+        out["return_states_seen"] = sorted(set(str(r) for r in return_states))
+    drift_vals = [f.get("return_drift_px") for f in near_trigger if f.get("return_drift_px") is not None]
+    if drift_vals:
+        out["return_drift_px"] = round(float(max(drift_vals)), 1)
     dts = [f["dt_ms"] for f in frames if f.get("dt_ms")]
     if dts:
         out["max_dt_ms"] = max(dts)
@@ -115,7 +133,11 @@ def summarize(frames: List[Dict[str, Any]], kind: str, meta: Dict[str, Any]) -> 
     if len(drops) >= 2:
         out["camera_drops_in_window"] = max(drops) - min(drops)
     hints: List[str] = []
-    if kind != "manual":
+    if kind == "return_drift":
+        hints.append("전진 이동 직후 반대 방향 복귀(리클러칭) 중 커서가 함께 끌려감")
+    elif kind == "return_blocked_fp":
+        hints.append("사용자 표시: 의도한 이동이 복귀 억제/클러치에 의해 차단됨 (오탐 차단)")
+    elif kind != "manual":
         if run and raw_seen:
             hints.append("손은 검출됐지만 제어 손 필터(좌/우)에서 제외됨: handedness 뒤바뀜 의심")
         if out.get("edge_gap") is not None and out["edge_gap"] < 0.1:
@@ -191,6 +213,12 @@ class FailureRecorder:
             if not self._had_hand:
                 self._tracked_since = t
             self._last_landmarks = landmarks
+            if moving:
+                drift_px = self._detect_return_drift(t, sample)
+                if drift_px is not None:
+                    sample["return_drift_px"] = round(float(drift_px), 1)
+                    if self.trigger(t, "return_drift", note=f"drift_px={drift_px:.0f}"):
+                        kind = "return_drift"
         elif self._had_hand and self._last_landmarks is not None:
             tracked_for = t - (self._tracked_since or t)
             if moving:
@@ -201,6 +229,81 @@ class FailureRecorder:
                 kind = None
         self._had_hand = landmarks is not None
         return kind
+
+    def _detect_return_drift(self, t: float, current: Dict[str, Any]) -> Optional[float]:
+        """Detect unsuppressed return-stroke cursor drift after a large forward stroke.
+
+        Triggers when:
+        1) Clutch/return suppression is not currently blocking movement (`clutch_state != "active"`
+           and `return_state not in ("pending", "confirmed")`),
+        2) In the preceding 0.85 s window there was a forward cursor movement >= 220 px followed by
+           a sharp reversal (angle >= 120 deg) where the hand moves back toward frame center (0.5, 0.5)
+           and the cursor gets dragged >= 180 px along the return direction.
+        """
+        if current.get("clutch_state") == "active" or current.get("return_state") in ("pending", "confirmed"):
+            return None
+        cur_pos = current.get("cursor")
+        cur_box = current.get("box")
+        if not cur_pos or not cur_box or len(cur_pos) < 2 or len(cur_box) < 4:
+            return None
+        win = [
+            s for s in self.samples
+            if t - 0.85 <= s["t"] <= t and s.get("hand") and s.get("cursor") and s.get("box")
+        ]
+        if len(win) < 6:
+            return None
+        start = win[0]
+        sx, sy = float(start["cursor"][0]), float(start["cursor"][1])
+        # Find the apex (turning point) with maximum distance from window start
+        apex_idx = -1
+        max_fwd_px = 0.0
+        for idx in range(2, len(win) - 2):
+            cx, cy = float(win[idx]["cursor"][0]), float(win[idx]["cursor"][1])
+            d = math.hypot(cx - sx, cy - sy)
+            if d > max_fwd_px:
+                max_fwd_px = d
+                apex_idx = idx
+        if apex_idx < 0 or max_fwd_px < 220.0:
+            return None
+        apex = win[apex_idx]
+        if t - float(apex["t"]) < 0.08 or t - float(apex["t"]) > 0.50:
+            return None
+        ax, ay = float(apex["cursor"][0]), float(apex["cursor"][1])
+        ex, ey = float(cur_pos[0]), float(cur_pos[1])
+        fwd_vx, fwd_vy = ax - sx, ay - sy
+        ret_vx, ret_vy = ex - ax, ey - ay
+        ret_px = math.hypot(ret_vx, ret_vy)
+        if ret_px < 180.0:
+            return None
+        cos_ang = (fwd_vx * ret_vx + fwd_vy * ret_vy) / max(1e-6, max_fwd_px * ret_px)
+        angle_deg = math.degrees(math.acos(max(-1.0, min(1.0, cos_ang))))
+        if angle_deg < 120.0:
+            return None
+        # Check that hand box center moved back toward camera frame center (0.5, 0.5)
+        ab = apex["box"]
+        ahx, ahy = 0.5 * (float(ab[0]) + float(ab[2])), 0.5 * (float(ab[1]) + float(ab[3]))
+        ehx, ehy = 0.5 * (float(cur_box[0]) + float(cur_box[2])), 0.5 * (float(cur_box[1]) + float(cur_box[3]))
+        hvx, hvy = ehx - ahx, ehy - ahy
+        h_norm = math.hypot(hvx, hvy)
+        to_cx, to_cy = 0.5 - ahx, 0.5 - ahy
+        to_c_norm = math.hypot(to_cx, to_cy)
+        if h_norm < 0.03 or to_c_norm < 0.04:
+            return None
+        to_center_cos = (hvx * to_cx + hvy * to_cy) / (h_norm * to_c_norm)
+        if to_center_cos < 0.25:
+            return None
+        return ret_px
+
+    def mark_return_block_fp(self, t: float, note: str = "User marked blocked movement (G key)") -> bool:
+        """Record a user-marked false-positive return/clutch block (`return_blocked_fp` + negative candidate)."""
+        self.record_negative_candidate(
+            t,
+            source="g_key",
+            suspected_action="return_suppressed",
+            rejection_reason="return_blocked_fp",
+            note=note,
+        )
+        return self.trigger(t, "return_blocked_fp", note=note)
 
     def trigger(self, t: float, kind: str, note: str = "") -> bool:
         """Save the window around `t` once `after` seconds have been recorded."""
@@ -283,9 +386,92 @@ class FailureRecorder:
             except OSError:
                 pass
 
+    def record_negative_candidate(
+        self,
+        t: float,
+        *,
+        source: str = "f_key",
+        suspected_action: Optional[str] = None,
+        suspected_gesture: Optional[str] = None,
+        calibrated_confidence: Optional[float] = None,
+        rejection_reason: str = "",
+        note: str = "",
+        lookback_sec: float = 2.5,
+    ) -> Optional[Path]:
+        """Save a verifiable negative-candidate label (`negative_candidates.jsonl`) when the user
+        immediately cancels an unintended action or presses the `F` key.
+
+        Crucially, `auto_retrain` is hard-coded to `False` so unreviewed candidates are NEVER
+        automatically injected into model retraining.
+        """
+        if source not in ("f_key", "g_key", "return_block_mark", "user_cancelled", "manual_mark"):
+            return None
+        recent = [s for s in self.samples if t - float(lookback_sec) <= s["t"] <= t + 0.05]
+        inferred_action = suspected_action
+        if not inferred_action:
+            for s in reversed(recent):
+                act = s.get("action") or s.get("act")
+                if act and act not in ("none", "move_cursor"):
+                    inferred_action = str(act)
+                    break
+        compact_frames = [
+            {
+                "dt": round(float(s["t"] - t), 4),
+                "action": s.get("action", s.get("act")),
+                "hand_score": s.get("score", s.get("hand_score")),
+                "clutch_state": s.get("clutch_state"),
+                "return_state": s.get("return_state"),
+                "hand_shape_mode": s.get("hand_shape_mode"),
+                "cursor": s.get("cursor"),
+                "landmarks": s.get("lm", s.get("landmarks")),
+            }
+            for s in recent[-25:]
+        ]
+        record = {
+            "schema": "manux-negative-candidate/1",
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "trigger_t": round(float(t), 4),
+            "source": str(source),
+            "suspected_action": inferred_action or "unknown",
+            "suspected_gesture": suspected_gesture or "",
+            "candidate_target_label": "none",
+            "calibrated_confidence": round(float(calibrated_confidence), 4) if calibrated_confidence is not None else None,
+            "rejection_reason": str(rejection_reason or ""),
+            "verified": False,
+            "auto_retrain": False,
+            "note": str(note or ""),
+            "frame_count": len(compact_frames),
+            "frames": compact_frames,
+        }
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            out_path = self.directory / "negative_candidates.jsonl"
+            with out_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self.counts["negative_candidate"] = self.counts.get("negative_candidate", 0) + 1
+            return out_path
+        except OSError as exc:
+            self.last_error = str(exc)
+            return None
+
+    def load_negative_candidates(self) -> List[Dict[str, Any]]:
+        """Read stored negative candidate records (`auto_retrain=False`) for human verification."""
+        out_path = self.directory / "negative_candidates.jsonl"
+        if not out_path.is_file():
+            return []
+        items: List[Dict[str, Any]] = []
+        try:
+            for line in out_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    items.append(json.loads(line))
+        except Exception:
+            pass
+        return items
+
     def summary_text(self) -> str:
         if not self.counts:
             return "아직 저장된 기록이 없습니다."
-        names = {"lost_while_moving": "이동 중 놓침", "lost_mid_frame": "화면 안에서 놓침", "manual": "직접 표시", "drag_started": "드래그 시작", "drag_ended": "드래그 끝", "inertia": "관성 스크롤",
+        names = {"lost_while_moving": "이동 중 놓침", "lost_mid_frame": "화면 안에서 놓침", "manual": "직접 표시", "negative_candidate": "오작동 부정 후보", "return_drift": "복귀 드리프트", "return_blocked_fp": "이동 차단 오탐", "drag_started": "드래그 시작", "drag_ended": "드래그 끝", "inertia": "관성 스크롤",
                  "motion_enter": "모션 모드 켜짐", "motion_swipe": "모션 스와이프", "motion_exit": "모션 모드 꺼짐", "motion_close_ask": "창 닫기 질문", "close_ask": "창 닫기 질문(손 모양)", "close_close": "창 닫기(손 모양)", "toggle_sign": "켜기/끄기(손 모양)", "desktop": "바탕화면 보기", "click": "클릭"}
         return " · ".join(f"{names.get(k, k)} {v}건" for k, v in self.counts.items())

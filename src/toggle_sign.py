@@ -54,11 +54,14 @@ class ToggleSign:
     def cfg(self, key: str) -> float:
         return float(self.config[key])
 
-    def pose(self, f: Dict[str, Any]) -> bool:
+    def pose(self, f: Dict[str, Any], *, model_confirmed: bool = False) -> bool:
         i, m, r, p = f["curl"]
         up, fold = self.cfg("toggle_sign_up_ratio"), self.cfg("toggle_sign_fold_ratio")
-        return (i >= up and m >= up and r <= fold and p <= fold
-                and min(i, m) - max(r, p) >= self.cfg("toggle_sign_gap"))
+        if i >= up and m >= up and r <= fold and p <= fold and min(i, m) - max(r, p) >= self.cfg("toggle_sign_gap"):
+            return True
+        if model_confirmed:
+            return i >= 1.25 and m >= 1.25 and r <= 1.32 and p <= 1.35 and (min(i, m) - max(r, p)) >= 0.18
+        return False
 
     def progress(self, now: float) -> float:
         if self._since is None or self._need_release:
@@ -69,11 +72,18 @@ class ToggleSign:
         """True once the sign has been held for `settle` s (the cursor and the pinches are suspended meanwhile)."""
         return self._since is not None and not self._need_release and now - self._since >= settle
 
-    def update(self, now: float, landmarks: Optional[Sequence[Any]], blocked: bool = False) -> Optional[ToggleEvent]:
+    def update(
+        self,
+        now: float,
+        landmarks: Optional[Sequence[Any]],
+        blocked: bool = False,
+        *,
+        model_confirmed: bool = False,
+    ) -> Optional[ToggleEvent]:
         if self.cfg("toggle_sign_enabled") < 1.0:
             return None
         feats = hand_features(landmarks) if landmarks is not None else None
-        ok = feats is not None and not blocked and self.pose(feats)
+        ok = feats is not None and not blocked and self.pose(feats, model_confirmed=model_confirmed)
         self.last_pose = ok
         if not ok:
             if self._since is not None and feats is not None and not blocked:

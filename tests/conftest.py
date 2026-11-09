@@ -23,5 +23,12 @@ def _default_config_only(tmp_path, monkeypatch, request):
         monkeypatch.setitem(gesture_engine.DEFAULT_CONFIG, "record_fling_enabled", True)
 
 
+@pytest.fixture(autouse=True)
+def _own_fold_cache(tmp_path, monkeypatch):
+    """A test that starts a (fake) training must not leave an 'unfinished training' in the real logs/fold_cache."""
+    import src.fold_cache as fold_cache
+    monkeypatch.setattr(fold_cache, "CACHE_ROOT", tmp_path / "fold_cache")
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "record_off: run with Record & Fling at its shipped default (off)")

@@ -23,7 +23,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 SIZES_PX = (40, 70, 110)  # target diameters on the test monitor
 
@@ -43,28 +43,48 @@ class Target:
     dwell_jitter_px: Optional[float] = None
     inside_since: Optional[float] = None
     inside_points: List[Tuple[float, float]] = field(default_factory=list)
+    # Step 7: ISO 9241-9 / Fitts' Law & return-stroke / clutch metrics
+    overshoot_count: int = 0
+    clutch_count: int = 0
+    is_far_target: bool = False
+    max_axis_overshoot_px: float = 0.0
+    _axis_overshot: bool = False
 
 
 class TrackingTest:
     def __init__(self, monitor, count: int = 12, dwell: float = .5, timeout: float = 12.0,
-                 seed: Optional[int] = None, margin: float = .08, hold_margin_px: float = 10.0) -> None:
+                 seed: Optional[int] = None, margin: float = .08, hold_margin_px: float = 10.0,
+                 include_far_targets: bool = True, condition: str = "") -> None:
         self.monitor = monitor  # screens.Monitor (left, top, width, height in screen px)
         self.dwell = float(dwell)
         # Once on a target, a cursor this far past its edge still counts as holding, so
         # small targets stay reachable with some jitter (the jitter is still recorded).
         self.hold_margin_px = float(hold_margin_px)
         self.timeout = float(timeout)
+        self.condition = str(condition or "")
         rng = random.Random(seed)
         self.targets: List[Target] = []
         prev = (.5, .5)
         for i in range(count):
-            # Alternate far-ish jumps so every target needs a real movement
+            # Alternate far-ish jumps so every target needs a real movement;
+            # every 3rd target (when include_far_targets is True) requires a larger cross-screen jump
+            min_jump = 0.55 if (include_far_targets and i % 3 == 2) else 0.3
+            best_pt = prev
+            best_dist = -1.0
+            fx, fy = prev
             for _ in range(50):
                 fx, fy = rng.uniform(margin, 1 - margin), rng.uniform(margin, 1 - margin)
-                if math.dist((fx, fy), prev) >= .3:
+                d = math.dist((fx, fy), prev)
+                if d > best_dist:
+                    best_dist = d
+                    best_pt = (fx, fy)
+                if d >= min_jump:
                     break
+            else:
+                fx, fy = best_pt
+            jump_frac = math.dist((fx, fy), prev)
             prev = (fx, fy)
-            self.targets.append(Target(fx, fy, SIZES_PX[i % len(SIZES_PX)]))
+            self.targets.append(Target(fx, fy, SIZES_PX[i % len(SIZES_PX)], is_far_target=(jump_frac >= 0.52)))
         self.index = 0
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
@@ -75,6 +95,7 @@ class TrackingTest:
         self.frames = 0
         self.fps: List[float] = []
         self.detect_ms: List[float] = []
+        self._clutch_engaged = False
 
     # ------------------------------------------------------------------ geometry
     def center_px(self, t: Target) -> Tuple[float, float]:
@@ -95,11 +116,14 @@ class TrackingTest:
 
     # ------------------------------------------------------------------ per frame
     def update(self, now: float, pos: Tuple[float, float], *, hand: bool, active: bool,
-               fps: float = 0.0, detect_ms: float = 0.0) -> None:
+               fps: float = 0.0, detect_ms: float = 0.0,
+               clutch_state: str = "inactive", return_state: str = "none",
+               hand_shape_mode: str = "normal") -> None:
         """Feed one frame: cursor screen position, whether a hand is tracked, control on."""
         self.paused = not active
         if self.done or not active:
             self.last_t = None  # paused time is not counted
+            self._clutch_engaged = False
             return
         if self.started_at is None:
             self.started_at = now
@@ -108,6 +132,7 @@ class TrackingTest:
             target.shown_at = now
             target.start_pos = pos
             self.last_pos = pos
+            self._clutch_engaged = False
         dt = 0.0 if self.last_t is None else max(0.0, now - self.last_t)
         self.last_t = now
         self.frames += 1
@@ -115,6 +140,12 @@ class TrackingTest:
             self.fps.append(float(fps))
         if hand and detect_ms:
             self.detect_ms.append(float(detect_ms))
+
+        # Track clutch / return-suppression transitions per target
+        engaged_now = (clutch_state == "active") or (return_state == "confirmed")
+        if engaged_now and not self._clutch_engaged:
+            target.clutch_count += 1
+        self._clutch_engaged = engaged_now
 
         if not hand:
             if self.hand_present:
@@ -126,8 +157,20 @@ class TrackingTest:
         self.last_pos = pos
 
         cx, cy = self.center_px(target)
-        radius = target.size_px / 2 + (self.hold_margin_px if target.inside_since is not None else 0.0)
+        base_radius = target.size_px / 2
+        radius = base_radius + (self.hold_margin_px if target.inside_since is not None else 0.0)
         inside = math.dist(pos, (cx, cy)) <= radius
+        # Track approach-axis overshoot past target center beyond radius
+        if target.start_pos is not None:
+            ax, ay = cx - target.start_pos[0], cy - target.start_pos[1]
+            adist = math.hypot(ax, ay)
+            if adist > 1e-3:
+                proj_past = ((pos[0] - cx) * ax + (pos[1] - cy) * ay) / adist
+                if proj_past > target.max_axis_overshoot_px:
+                    target.max_axis_overshoot_px = proj_past
+                if not inside and proj_past > base_radius and not target._axis_overshot and target.inside_since is None:
+                    target._axis_overshot = True
+                    target.overshoot_count += 1
         if inside:
             if target.inside_since is None:
                 target.inside_since = now
@@ -142,6 +185,9 @@ class TrackingTest:
                 self._next(now)
                 return
         else:
+            if target.inside_since is not None:
+                # Entered the target and slipped out before dwell completed -> overshoot
+                target.overshoot_count += 1
             target.inside_since = None
         if now - target.shown_at >= self.timeout:
             target.timed_out = True
@@ -163,34 +209,100 @@ class TrackingTest:
             cx, cy = self.center_px(t)
             distance = math.dist(t.start_pos, (cx, cy)) if t.start_pos else math.nan
             reach = (t.reached_at - t.shown_at - self.dwell) if t.reached_at is not None else None
+            reach_s = None if reach is None else max(0.0, reach)
+            id_bits = (
+                math.log2(distance / max(1.0, float(t.size_px)) + 1.0)
+                if math.isfinite(distance) and distance >= 0.0
+                else None
+            )
+            tp_bps = (
+                id_bits / max(0.05, reach_s)
+                if (id_bits is not None and reach_s is not None and t.reached_at is not None)
+                else None
+            )
             out.append({
                 "target": i,
                 "size_px": t.size_px,
                 "distance_px": round(distance, 1),
                 "reached": t.reached_at is not None,
-                "time_to_reach_s": None if reach is None else round(max(0.0, reach), 3),
+                "time_to_reach_s": None if reach_s is None else round(reach_s, 3),
                 "path_px": round(t.path_px, 1),
                 "path_efficiency": (round(min(1.0, distance / t.path_px), 3)
                                     if t.path_px > 0 and math.isfinite(distance) else None),
                 "dwell_jitter_px": None if t.dwell_jitter_px is None else round(t.dwell_jitter_px, 2),
                 "lost_s": round(t.lost_s, 3),
                 "lost_events": t.lost_events,
+                "id_bits": None if id_bits is None else round(id_bits, 3),
+                "throughput_bps": None if tp_bps is None else round(tp_bps, 3),
+                "overshoot_count": t.overshoot_count,
+                "clutch_count": t.clutch_count,
+                "is_far_target": bool(t.is_far_target),
             })
         return out
+
+    def _effective_throughput_bps(self, rows: List[Dict[str, Any]]) -> Optional[float]:
+        """Compute ISO 9241-9 effective throughput TP_e = ID_e / MT using endpoint spread W_e = 4.133 * SD_x."""
+        reached_rows = [r for r in rows if r["reached"] and r["time_to_reach_s"] is not None]
+        if not reached_rows:
+            return None
+        proj_errors: List[float] = []
+        for t in self.targets:
+            if t.reached_at is None or not t.inside_points or t.start_pos is None:
+                continue
+            cx, cy = self.center_px(t)
+            settled = t.inside_points[len(t.inside_points) // 2:] or t.inside_points
+            end_x = statistics.fmean(p[0] for p in settled)
+            end_y = statistics.fmean(p[1] for p in settled)
+            ax, ay = cx - t.start_pos[0], cy - t.start_pos[1]
+            adist = math.hypot(ax, ay)
+            if adist > 1e-3:
+                dx = ((end_x - cx) * ax + (end_y - cy) * ay) / adist
+            else:
+                dx = math.hypot(end_x - cx, end_y - cy)
+            proj_errors.append(dx)
+        mean_d = statistics.fmean(r["distance_px"] for r in reached_rows)
+        mean_mt = max(0.05, statistics.fmean(max(0.05, r["time_to_reach_s"]) for r in reached_rows))
+        if len(proj_errors) >= 2:
+            sd_x = statistics.stdev(proj_errors)
+            we = max(8.0, 4.133 * sd_x)
+        else:
+            we = statistics.fmean(r["size_px"] for r in reached_rows)
+        id_e = math.log2(mean_d / max(1.0, we) + 1.0)
+        return round(id_e / mean_mt, 3)
 
     def summary(self) -> Dict[str, Any]:
         rows = self.rows()
         reached = [r for r in rows if r["reached"]]
-        times = [r["time_to_reach_s"] for r in reached]
+        times = [r["time_to_reach_s"] for r in reached if r["time_to_reach_s"] is not None]
         jitter = [r["dwell_jitter_px"] for r in reached if r["dwell_jitter_px"] is not None]
         eff = [r["path_efficiency"] for r in rows if r["path_efficiency"] is not None]
+        ids = [r["id_bits"] for r in reached if r.get("id_bits") is not None]
+        tps = [r["throughput_bps"] for r in reached if r.get("throughput_bps") is not None]
+        far_reached_times = [
+            r["time_to_reach_s"] for r in reached
+            if r.get("is_far_target") and r["time_to_reach_s"] is not None
+        ]
+        shown_count = len(rows)
+        reached_count = len(reached)
         return {
             "targets": len(self.targets),
-            "shown": len(rows),
-            "reached": len(reached),
+            "shown": shown_count,
+            "reached": reached_count,
+            "error_rate": round((shown_count - reached_count) / shown_count, 3) if shown_count else None,
             "median_time_s": round(statistics.median(times), 3) if times else None,
             "mean_dwell_jitter_px": round(statistics.fmean(jitter), 2) if jitter else None,
             "median_path_efficiency": round(statistics.median(eff), 3) if eff else None,
+            "mean_id_bits": round(statistics.fmean(ids), 3) if ids else None,
+            "mean_throughput_bps": round(statistics.fmean(tps), 3) if tps else None,
+            "effective_throughput_bps": self._effective_throughput_bps(rows),
+            "overshoot_rate": (
+                round(sum(1 for r in reached if r.get("overshoot_count", 0) > 0) / reached_count, 3)
+                if reached_count else None
+            ),
+            "total_overshoots": sum(int(r.get("overshoot_count", 0)) for r in rows),
+            "total_clutches": sum(int(r.get("clutch_count", 0)) for r in rows),
+            "far_target_clutches": sum(int(r.get("clutch_count", 0)) for r in rows if r.get("is_far_target")),
+            "far_target_median_time_s": round(statistics.median(far_reached_times), 3) if far_reached_times else None,
             "lost_s": round(sum(r["lost_s"] for r in rows), 3),
             "lost_events": sum(r["lost_events"] for r in rows),
             "mean_fps": round(statistics.fmean(self.fps), 1) if self.fps else None,
@@ -276,3 +388,87 @@ def load_recent_results(directory: Path, limit: int = 5) -> List[str]:
         when = f"{stamp[4:6]}/{stamp[6:8]} {stamp[9:11]}:{stamp[11:13]}" if len(stamp) >= 13 else ""
         lines.append(result_line(meta, when))
     return lines
+
+
+def load_tracking_csv(path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Read metadata (`#` rows) and target rows from a saved `tracking-*.csv` file."""
+    meta: Dict[str, Any] = {}
+    table_rows: List[Dict[str, Any]] = []
+    headers: Optional[List[str]] = None
+    with open(path, encoding="utf-8", newline="") as f:
+        for row in csv.reader(f):
+            if not row:
+                continue
+            if row[0] == "#":
+                if len(row) >= 3:
+                    meta[row[1]] = row[2]
+            elif headers is None:
+                headers = list(row)
+            else:
+                table_rows.append(dict(zip(headers, row)))
+    return meta, table_rows
+
+
+def aggregate_condition_results(
+    runs: Sequence[Union[Path, Dict[str, Any]]]
+) -> Dict[str, Dict[str, Any]]:
+    """Aggregate ISO 9241-9 and return-suppression metrics across multiple tracking test runs grouped by condition.
+
+    Note: Final interpretation of human pointing trials is performed by the user.
+    """
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in runs:
+        if isinstance(item, Path):
+            try:
+                meta, _ = load_tracking_csv(item)
+            except (OSError, UnicodeDecodeError, csv.Error):
+                continue
+        else:
+            meta = dict(item)
+        cond = str(meta.get("condition") or "").strip()
+        if not cond:
+            scheme = str(meta.get("movement_scheme") or "legacy_shape")
+            ret = str(meta.get("return_suppression") or "off")
+            cond = f"{scheme}+{ret}"
+        grouped.setdefault(cond, []).append(meta)
+
+    def _num(d: Dict[str, Any], key: str) -> Optional[float]:
+        v = d.get(key)
+        if v in (None, "", "None"):
+            return None
+        try:
+            f = float(v)
+            return f if math.isfinite(f) else None
+        except (TypeError, ValueError):
+            return None
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for cond, items in grouped.items():
+        tps = [_num(m, "mean_throughput_bps") for m in items]
+        tps_valid = [x for x in tps if x is not None]
+        tpes = [_num(m, "effective_throughput_bps") for m in items]
+        tpes_valid = [x for x in tpes if x is not None]
+        times = [_num(m, "median_time_s") for m in items]
+        times_valid = [x for x in times if x is not None]
+        errs = [_num(m, "error_rate") for m in items]
+        errs_valid = [x for x in errs if x is not None]
+        ovs = [_num(m, "overshoot_rate") for m in items]
+        ovs_valid = [x for x in ovs if x is not None]
+        clutches = [_num(m, "total_clutches") for m in items]
+        clutches_valid = [x for x in clutches if x is not None]
+        jitters = [_num(m, "mean_dwell_jitter_px") for m in items]
+        jitters_valid = [x for x in jitters if x is not None]
+        effs = [_num(m, "median_path_efficiency") for m in items]
+        effs_valid = [x for x in effs if x is not None]
+        out[cond] = {
+            "runs": len(items),
+            "mean_throughput_bps": round(statistics.fmean(tps_valid), 3) if tps_valid else None,
+            "effective_throughput_bps": round(statistics.fmean(tpes_valid), 3) if tpes_valid else None,
+            "median_time_s": round(statistics.median(times_valid), 3) if times_valid else None,
+            "mean_error_rate": round(statistics.fmean(errs_valid), 3) if errs_valid else None,
+            "mean_overshoot_rate": round(statistics.fmean(ovs_valid), 3) if ovs_valid else None,
+            "mean_clutches": round(statistics.fmean(clutches_valid), 2) if clutches_valid else None,
+            "mean_dwell_jitter_px": round(statistics.fmean(jitters_valid), 2) if jitters_valid else None,
+            "median_path_efficiency": round(statistics.median(effs_valid), 3) if effs_valid else None,
+        }
+    return out

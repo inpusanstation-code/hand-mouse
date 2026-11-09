@@ -111,6 +111,33 @@ def _world(result, idx: int) -> Optional[List[Tuple[float, float, float]]]:
     return [(float(p.x), float(p.y), float(p.z)) for p in world[idx]]
 
 
+def merge_looks(looks: List[List[HandDetection]], outlier: float = 0.35) -> List[HandDetection]:
+    """The hand seen in several crops of the same frame -> one hand: the landmark-wise average. A look that is far from the
+    others (further than `outlier` x the hand's size from the median) is dropped; looks that found nothing are skipped.
+    The first look keeps its hand label and score. One look alone is returned as it is."""
+    found = [d[0] for d in looks if d]
+    if not found:
+        return []
+    if len(found) == 1:
+        return [found[0]]
+    pts = np.array([[(p.x, p.y, p.z) for p in d.landmarks] for d in found], dtype=float)      # looks x 21 x 3
+    median = np.median(pts, axis=0)
+    size = float(np.max(np.linalg.norm(median[[5, 9, 13, 17], :2] - median[0, :2], axis=1)))
+    dist = np.linalg.norm(pts[:, :, :2] - median[None, :, :2], axis=2).mean(axis=1)           # per look
+    keep = dist <= max(outlier * size, 1e-6) if size > 1e-6 else np.ones(len(found), dtype=bool)
+    if not keep.any():
+        keep = dist <= dist.min() + 1e-9
+    kept = [d for d, k in zip(found, keep) if k]
+    mean = pts[keep].mean(axis=0)
+    world = None
+    worlds = [d.world for d in kept if d.world is not None]
+    if worlds:
+        world = [tuple(float(v) for v in row) for row in np.mean(np.array(worlds, dtype=float), axis=0)]
+    first = kept[0]
+    return [HandDetection(landmarks=[HandLandmark(x=float(a), y=float(b), z=float(c)) for a, b, c in mean],
+                          handedness=first.handedness, score=max(d.score for d in kept), from_crop=True, world=world)]
+
+
 def ensure_model_exists(model_path: Path = DEFAULT_MODEL_PATH) -> Path:
     """Ensure the MediaPipe hand_landmarker.task model exists locally; download if missing."""
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +164,10 @@ class HandTracker:
         min_presence_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
         detect_max_width: int = 640,
+        crop_upscale_side: int = 0,
+        crop_max_zoom: float = 4.0,
+        crop_tta: int = 0,
+        crop_tta_max_side: int = 200,
     ) -> None:
         # MediaPipe shrinks the image to a small fixed input internally anyway, so feeding it
         # a 720p frame mostly costs conversion time (14.5 ms -> 10.6 ms per frame at 640 px).
@@ -147,9 +178,23 @@ class HandTracker:
             "min_presence_confidence": min_presence_confidence,
             "min_tracking_confidence": min_tracking_confidence,
             "detect_max_width": self.detect_max_width,
+            "crop_upscale_side": int(crop_upscale_side),
+            "crop_max_zoom": float(crop_max_zoom),
+            "crop_tta": int(crop_tta),
+            "crop_tta_max_side": int(crop_tta_max_side),
         }
+        self.crop_upscale_side = int(crop_upscale_side)
+        self.crop_max_zoom = float(crop_max_zoom)
+        # Several looks at a small hand (see _detect_crop): `crop_tta` extra crops, only while the crop is at most
+        # `crop_tta_max_side` pixels (a far hand). Each extra crop has its own landmarker so its video tracking stays steady.
+        self.crop_tta = int(crop_tta)
+        self.crop_tta_max_side = int(crop_tta_max_side)
+        self._tta_landmarkers: list = []
+        self._tta_timestamps: list = []
         self.last_detect_ms: float = 0.0
         resolved_model = ensure_model_exists(model_path or DEFAULT_MODEL_PATH)
+        # MediaPipe's native Windows file loader cannot reliably open Korean paths.
+        model_bytes = resolved_model.read_bytes()
 
         BaseOptions = mp.tasks.BaseOptions
         HandLandmarker = mp.tasks.vision.HandLandmarker
@@ -157,7 +202,7 @@ class HandTracker:
         VisionRunningMode = mp.tasks.vision.RunningMode
 
         options = HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(resolved_model)),
+            base_options=BaseOptions(model_asset_buffer=model_bytes),
             running_mode=VisionRunningMode.VIDEO,
             num_hands=num_hands,
             min_hand_detection_confidence=min_detection_confidence,
@@ -169,7 +214,7 @@ class HandTracker:
         # Hand-area crop: a second landmarker (one hand) fed a full-resolution crop around
         # the hand, created on first use. Separate instance = separate VIDEO-mode state.
         self._crop_options = HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(resolved_model)),
+            base_options=BaseOptions(model_asset_buffer=model_bytes),
             running_mode=VisionRunningMode.VIDEO,
             num_hands=1,
             min_hand_detection_confidence=min_detection_confidence,
@@ -178,7 +223,7 @@ class HandTracker:
         )
         self._crop_landmarker = None
         self._crop_timestamp_ms: int = 0
-        self.crop_max_side = 480  # a crop bigger than this is shrunk before MediaPipe
+        self.crop_max_side = 640  # a crop bigger than this is shrunk before MediaPipe
 
     def detect(self, frame_bgr: np.ndarray, roi: Optional[Tuple[int, int, int, int]] = None
                ) -> List[HandDetection]:
@@ -255,7 +300,42 @@ class HandTracker:
                 mid = ((thumb_pt[0] + tip_pt[0]) // 2, (thumb_pt[1] + tip_pt[1]) // 2)
                 cv2.circle(frame, mid, 11, color, 2, cv2.LINE_AA)
 
+    # a crop is looked at again from slightly shifted places (fractions of its side): the errors of the looks differ a little
+    TTA_SHIFTS = ((0.12, 0.06), (-0.12, -0.06), (0.06, -0.12), (-0.06, 0.12))
+
+    def _crop_landmarker_for(self, slot: int):
+        """Slot 0 is the usual crop landmarker; slots 1.. are the extra ones (made when first needed)."""
+        if slot == 0:
+            if self._crop_landmarker is None:
+                self._crop_landmarker = mp.tasks.vision.HandLandmarker.create_from_options(self._crop_options)
+            return self._crop_landmarker
+        while len(self._tta_landmarkers) < slot:
+            self._tta_landmarkers.append(mp.tasks.vision.HandLandmarker.create_from_options(self._crop_options))
+            self._tta_timestamps.append(0)
+        return self._tta_landmarkers[slot - 1]
+
     def _detect_crop(self, frame_bgr: np.ndarray, roi: Tuple[int, int, int, int]) -> List[HandDetection]:
+        """One look at the crop, plus (for a small crop) `crop_tta` more from shifted crops, and the hand is their average."""
+        t0 = time.perf_counter()
+        base = self._crop_pass(frame_bgr, roi, 0)
+        extra = int(getattr(self, "crop_tta", 0))
+        x0, y0, x1, y1 = (int(v) for v in roi)
+        side = max(x1 - x0, y1 - y0)
+        if extra <= 0 or side > int(getattr(self, "crop_tta_max_side", 200)):
+            return base
+        h, w = frame_bgr.shape[:2]
+        looks = [base]
+        for slot in range(1, extra + 1):
+            sx, sy = self.TTA_SHIFTS[(slot - 1) % len(self.TTA_SHIFTS)]
+            dx, dy = int(round(sx * side)), int(round(sy * side))
+            nx0 = max(0, min(w - (x1 - x0), x0 + dx))
+            ny0 = max(0, min(h - (y1 - y0), y0 + dy))
+            looks.append(self._crop_pass(frame_bgr, (nx0, ny0, nx0 + (x1 - x0), ny0 + (y1 - y0)), slot))
+        merged = merge_looks(looks)
+        self.last_detect_ms = (time.perf_counter() - t0) * 1000.0
+        return merged
+
+    def _crop_pass(self, frame_bgr: np.ndarray, roi: Tuple[int, int, int, int], slot: int = 0) -> List[HandDetection]:
         t0 = time.perf_counter()
         h, w = frame_bgr.shape[:2]
         x0, y0, x1, y1 = (int(v) for v in roi)
@@ -264,18 +344,30 @@ class HandTracker:
         crop = frame_bgr[y0:y1, x0:x1]
         cw, ch = x1 - x0, y1 - y0
         side = max(cw, ch)
+        upscale_side = getattr(self, "crop_upscale_side", 0)
+        if 0 < upscale_side and side < upscale_side:
+            # Digital zoom for a far hand: enlarge the small crop with a good filter before MediaPipe, which would
+            # otherwise stretch it itself. No new detail, but the hand reaches the size the models are made for.
+            # Landmarks are normalized to the crop, so they still map back with (cw, ch).
+            k = min(float(getattr(self, "crop_max_zoom", 4.0)), upscale_side / float(side))
+            crop = cv2.resize(crop, (max(1, int(round(cw * k))), max(1, int(round(ch * k)))),
+                              interpolation=cv2.INTER_CUBIC)
+            side = max(crop.shape[1], crop.shape[0])
         if side > self.crop_max_side:
             scale = self.crop_max_side / float(side)
             crop = cv2.resize(crop, (max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))),
                               interpolation=cv2.INTER_AREA)
-        if self._crop_landmarker is None:
-            self._crop_landmarker = mp.tasks.vision.HandLandmarker.create_from_options(self._crop_options)
+        landmarker = self._crop_landmarker_for(slot)
         rgb = np.ascontiguousarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
         timestamp_ms = int(time.perf_counter() * 1000)
-        if timestamp_ms <= self._crop_timestamp_ms:
-            timestamp_ms = self._crop_timestamp_ms + 1
-        self._crop_timestamp_ms = timestamp_ms
-        result = self._crop_landmarker.detect_for_video(
+        last = self._crop_timestamp_ms if slot == 0 else self._tta_timestamps[slot - 1]
+        if timestamp_ms <= last:
+            timestamp_ms = last + 1
+        if slot == 0:
+            self._crop_timestamp_ms = timestamp_ms
+        else:
+            self._tta_timestamps[slot - 1] = timestamp_ms
+        result = landmarker.detect_for_video(
             mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), timestamp_ms)
         self.last_detect_ms = (time.perf_counter() - t0) * 1000.0
         detections: List[HandDetection] = []
@@ -298,13 +390,20 @@ class HandTracker:
         if self._crop_landmarker is not None:
             self._crop_landmarker.close()
             self._crop_landmarker = None
+        for extra in self._tta_landmarkers:
+            extra.close()
+        self._tta_landmarkers, self._tta_timestamps = [], []
 
 
 TRACKER_DEFAULTS = {
     "tracker_min_detection_confidence": 0.6,
     "tracker_min_presence_confidence": 0.5,
     "tracker_min_tracking_confidence": 0.5,
-    "tracker_detect_max_width": 640,
+    "tracker_detect_max_width": 960,
+    "tracker_crop_upscale_side": 512,   # a far hand's small crop is enlarged to this side before MediaPipe (0 = off)
+    "tracker_crop_max_zoom": 16.0,      # ... by at most this factor (it was 4 until the "zoom as far as it goes" test)
+    "tracker_crop_tta": 0,              # a small hand is looked at again in this many shifted crops and the joints averaged (0 = off)
+    "tracker_crop_tta_max_side": 200,   # ... only while the crop is at most this many pixels wide
 }
 
 
@@ -323,4 +422,8 @@ def tracker_options(config) -> dict:
         "min_tracking_confidence": number("tracker_min_tracking_confidence", 0.05, 0.95),
         # 0 = no downscale (full camera width)
         "detect_max_width": int(number("tracker_detect_max_width", 0, 4096)),
+        "crop_upscale_side": int(number("tracker_crop_upscale_side", 0, 1024)),
+        "crop_max_zoom": float(number("tracker_crop_max_zoom", 1, 32)),
+        "crop_tta": int(number("tracker_crop_tta", 0, 4)),
+        "crop_tta_max_side": int(number("tracker_crop_tta_max_side", 32, 640)),
     }

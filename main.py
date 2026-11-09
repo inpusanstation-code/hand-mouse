@@ -38,7 +38,7 @@ from src.mouse_controller import MouseController
 from src.scroll_target import ScrollTargetFinder
 from src.window_probe import window_center_at
 from src.settings_panel import SettingsPanel
-from src.hotkeys import VK_0, VK_F2, VK_NUMPAD0, VK_O, KeyPoller
+from src.hotkeys import VK_0, VK_F2, VK_O, KeyPoller, settings_key_pressed
 from src.win_perf import keep_responsive_in_background
 from src.perf_log import PerfLog
 from src.pipeline import InferencePipeline, Snapshot
@@ -286,6 +286,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--ui", choices=("tk", "qt"), default=None,
                         help="Desktop dashboard (tk or qt). Default: camera window + tray icon")
+    parser.add_argument("--tcn-app", action="store_true",
+                        help="Use the standalone TCN app identity and palm-mode defaults")
     return parser.parse_args()
 
 
@@ -310,7 +312,7 @@ def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
     newest snapshot (src/qt_runtime.py), so a slow UI frame never delays the cursor.
     """
     from PySide6.QtWidgets import QApplication, QSystemTrayIcon
-    from src.qt_dashboard import QtDashboard
+    from src.qt_dashboard import QtDashboard, text_input_has_focus
     from src.qt_runtime import QtRuntime
 
     QApplication.instance() or QApplication([])
@@ -323,6 +325,7 @@ def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
         dry_run=args.dry_run, hide_to_tray=tray_ok, start_hidden=args.headless and tray_ok,
         overlay=(args.headless or args.overlay) and not args.no_overlay,
         overlay_corner=args.overlay_corner,
+        tcn_app=args.tcn_app,
     )
     tray = None
     if tray_ok:
@@ -370,8 +373,7 @@ def run_qt(args, perf, engine, camera, tracker, mouse, settings, keys, perf_log)
                 runtime.post("failure_mark")
             want_settings = key in (ord("o"), ord("O"), ord("0"))
             if keys.available:
-                want_settings = want_settings or keys.pressed([VK_F2]) or keys.pressed(
-                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True)
+                want_settings = settings_key_pressed(keys, text_input_has_focus()) or want_settings
             if want_settings and dashboard.stage_name == "main":
                 runtime.post("pause")
                 settings.toggle()
@@ -526,7 +528,7 @@ def run_dashboard(args, perf, engine, camera, tracker, mouse, settings, keys, pe
             toggle_settings = key in (ord("o"), ord("O"), ord("0"))
             if keys.available:
                 toggle_settings = toggle_settings or keys.pressed([VK_F2]) or keys.pressed(
-                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True
+                    [VK_O, VK_0], require_focus=True
                 )
             elif key in (ord("o"), ord("O"), ord("0")):
                 toggle_settings = True
@@ -863,7 +865,7 @@ def main() -> int:
             want_settings = False
             if keys.available:
                 want_settings = keys.pressed([VK_F2]) or keys.pressed(
-                    [VK_O, VK_0, VK_NUMPAD0], require_focus=True
+                    [VK_O, VK_0], require_focus=True
                 )
             elif key in (ord("o"), ord("O"), ord("0")):
                 want_settings = True

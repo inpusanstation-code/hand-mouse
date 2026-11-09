@@ -14,15 +14,24 @@ the current frame, `view(now)` what the screen shows.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from src.recording_plan import normalise, condition_key, description, orientation_guide, distance_label
+from src.gesture_catalog import Task, TASKS, tasks_for
 
 DEFAULTS: Dict[str, float] = {
-    "rec_reps": 15.0,          # repetitions per set
-    "rec_prep": 1.0,           # s "get ready"
-    "rec_do": 1.6,             # s "do it"
-    "rec_rest": 1.6,           # s "rest"
+    "rec_reps": 1.0,           # continuous hold by default (or >1 when repeating)
+    "rec_prep": 0.0,           # s "get ready" (0 = no prep interruption)
+    "rec_do": 15.0,            # s "do it" (continuous gesture hold)
+    "rec_rest": 0.0,           # s "rest" (0 = no rest interruption)
     "rec_free_seconds": 180.0,  # s of a free (unlabelled-gesture) stretch per posture
+    # Recording alone, far from the screen: after [start] the set waits this long (the countdown is on screen) so you can
+    # walk back to your place; 0 = start at once.
+    "rec_start_delay": 0.0,
+    # > 0: when a set ends the next one starts by itself after this many seconds (you stay in place; 0 = wait for [start]).
+    "rec_auto_next": 0.0,
+    # > 0: when the last set is over the recording is saved by itself after this many seconds (no trip back to press
+    # "녹화 끝 (저장)"); 0 = wait for the button.
+    "rec_auto_save": 0.0,
 }
 
 CONDITIONS = (
@@ -32,40 +41,30 @@ CONDITIONS = (
 )
 
 
-@dataclass(frozen=True)
-class Task:
-    key: str          # the label of its "do it" frames
-    name: str
-    do: str           # what to do, on screen
-    free: bool = False
-
-
-TASKS = (
-    Task("thumb_ring", "엄지+약지 (우클릭)", "엄지를 약지 끝에 붙였다 떼세요"),
-    Task("thumb_index", "엄지+검지 (스크롤 잡기)", "엄지와 검지로 집어서 위나 아래로 조금 끌고 놓으세요"),
-    Task("none", "반주먹 이동 (아무 동작 아님)", "반주먹으로 커서를 이리저리 움직이고, 가끔 손을 폈다 다시 쥐세요", free=True),
-)
-
-
-def tasks_for(focus: str = ""):
-    """All tasks, or only the one gesture the training center asked to record more of ("focused recording")."""
-    picked = tuple(t for t in TASKS if t.key == focus)
-    return picked or TASKS
-
-
 class GuidedSession:
-    def __init__(self, config: Optional[Dict[str, Any]] = None, tasks=TASKS, conditions=CONDITIONS) -> None:
+    def __init__(self, config: Optional[Dict[str, Any]] = None, tasks=TASKS, conditions=CONDITIONS, plan=None) -> None:
         self.config: Dict[str, float] = dict(DEFAULTS)
         if config:
             self.config.update({k: float(v) for k, v in config.items() if k in DEFAULTS})
+        self.plan = normalise(plan) if plan is not None else None
+        self.rows = [r for r in self.plan["conditions"] if r["enabled"]] if self.plan else []
+        if self.rows:
+            conditions = tuple(r["name"] for r in self.rows)
         self.sets: List[Tuple[int, Task]] = [(c, t) for c in range(len(conditions)) for t in tasks]
         self.conditions = conditions
         self.index = 0                 # current set
         self.running = False           # False = waiting for "start"
         self._t0 = 0.0
         self.done = False
+        self.paused = False
+        self.hold_reason = ""
+        self._last_update = None
+        self._held = False
 
     def cfg(self, key: str) -> float:
+        names = {"rec_reps": "reps", "rec_prep": "prep", "rec_do": "hold", "rec_rest": "rest", "rec_free_seconds": "free_seconds"}
+        if self.rows and self.current is not None:
+            return float(self.rows[self.current[0]][names[key]])
         return float(self.config[key])
 
     @property
@@ -76,22 +75,43 @@ class GuidedSession:
         """Start the waiting set (the user pressed start)."""
         if not self.done and not self.running:
             self.running = True
-            self._t0 = now
+            self._t0 = now + max(0.0, float(self.config.get("rec_start_delay", 0.0)))   # the countdown is before _t0
+            self._last_update = now
+            self._held = False
+
+    def countdown(self, now: float) -> float:
+        """Seconds until the running set really starts (0 when it has started or nothing runs)."""
+        return max(0.0, self._t0 - now) if (self.running and self.current is not None) else 0.0
 
     def _set_length(self, task: Task) -> float:
         if task.free:
             return self.cfg("rec_free_seconds")
         return self.cfg("rec_reps") * (self.cfg("rec_prep") + self.cfg("rec_do") + self.cfg("rec_rest"))
 
-    def update(self, now: float) -> bool:
+    def update(self, now: float, available=True) -> bool:
         """Move on when the running set is over. True when a set just finished."""
         cur = self.current
         if cur is None or not self.running:
+            return False
+        # While counting down the person is walking back to their place: the hand is not expected to be visible yet
+        held = self.paused or (not available and now >= self._t0)
+        if held or self._held:
+            self._t0 += max(0.0, now - (self._last_update if self._last_update is not None else now))
+        self._last_update = now
+        self._held = held
+        self.hold_reason = "일시정지 · 스페이스바 또는 [계속]을 눌러주세요" if self.paused else "손의 3D 관절을 찾는 중 · 타이머가 멈췄어요" if not available else ""
+        if held:
             return False
         if now - self._t0 >= self._set_length(cur[1]):
             self.running = False
             self.index += 1
             self.done = self.index >= len(self.sets)
+            auto = float(self.config.get("rec_auto_next", 0.0))
+            if auto > 0 and not self.done:
+                self.running = True                 # the next set starts by itself after the countdown
+                self._t0 = now + auto
+                self._last_update = now
+                self._held = False
             return True
         return False
 
@@ -113,27 +133,67 @@ class GuidedSession:
         if cur is None or not self.running:
             return {"target": "idle", "phase": "waiting"}
         cond, task = cur
+        if now < self._t0:                       # countdown before the set: not training data
+            return {"target": "idle", "phase": "waiting"}
         phase, rep, _ = self._step(now)
-        target = {"prep": "transition", "do": task.key, "rest": "none", "free": task.key}[phase]
-        return {"target": target, "task": task.key, "phase": phase, "rep": rep, "condition": self.conditions[cond],
-                "condition_index": cond, "set": self.index}
+        target = {"prep": "transition", "do": task.label, "rest": "none", "free": task.label}[phase]
+        label = {"target": "idle" if self._held else target, "task": task.key, "phase": "paused" if self._held else phase,
+                 "rep": rep, "condition": self.conditions[cond], "condition_index": cond, "set": self.index}
+        if self.rows:
+            label["condition_key"] = condition_key(self.rows[cond])
+            pos = self.rows[cond].get("position")
+            if pos:
+                label["position"] = str(pos)
+        return label
 
     def view(self, now: float) -> Dict[str, Any]:
         """Big prompt, smaller line, progress of the set, progress of everything, waiting for start?"""
         overall = self.index / len(self.sets) if self.sets else 1.0
         if self.done:
-            return {"prompt": "녹화 끝! 수고하셨어요", "sub": "", "progress": 1.0, "overall": 1.0, "waiting": False}
+            return {"prompt": "녹화 끝! 수고하셨어요", "sub": "", "progress": 1.0, "overall": 1.0, "waiting": False,
+                    "finished": True, "auto_save": max(0.0, float(self.config.get("rec_auto_save", 0.0)))}
         cond, task = self.current
         head = f"[{self.index + 1}/{len(self.sets)}] {self.conditions[cond]} · {task.name}"
+        details = description(self.rows[cond], focus=task.key) if self.rows else ""
+        extra = {"condition_detail": details, "paused": self.paused,
+                 "position": self.rows[cond]["position"] if self.rows else "자유 이동"}
         if not self.running:
-            return {"prompt": f"{self.conditions[cond]}로 앉은 뒤 [시작]을 누르세요", "sub": head,
-                    "progress": 0.0, "overall": overall, "waiting": True}
+            orient = self.rows[cond].get("orientation", "") if self.rows else ""
+            guide = orientation_guide(orient, focus=task.key)
+            guide_txt = f" [{guide}]" if guide else ""
+            ready_suffix = "모션 시작 위치에 손을 준비한 뒤 스페이스바(또는 [시작])를 누르세요" if task.track == "motion" else "자세를 잡은 뒤 스페이스바(또는 [시작])를 누르세요"
+            return {"prompt": f"{self.conditions[cond]}{guide_txt} · {ready_suffix}", "sub": head,
+                    "progress": 0.0, "overall": overall, "waiting": True, **extra}
+        if now < self._t0:
+            left = int(self._t0 - now) + 1
+            where = str(self.rows[cond].get("distance", "")) if self.rows else ""
+            spot = f"{distance_label(where)} 자리로 가세요" if where and where != "직접 지정" else "자리를 잡으세요"
+            return {"prompt": f"{left}초 뒤 시작 · {spot}", "sub": head, "progress": 0.0, "overall": overall,
+                    "waiting": False, "phase": "prep", "big": str(left), "big_kind": "countdown", **extra}
         phase, rep, progress = self._step(now)
         if phase == "free":
             prompt = task.do
             sub = f"{head} · 남은 시간 {max(0, int(self._set_length(task) - (now - self._t0)))}초"
+        elif self.cfg("rec_prep") == 0 and self.cfg("rec_rest") == 0 and int(self.cfg("rec_reps")) == 1:
+            prompt = task.do
+            sub = f"{head} · 남은 시간 {max(0, int(self._set_length(task) - (now - self._t0)))}초"
         else:
-            prompt = {"prep": "준비…", "do": task.do, "rest": "쉬세요 (손을 편하게)"}[phase]
+            if task.track == "motion" or task.direction:
+                prompt = {
+                    "prep": f"준비 ({rep}/{int(self.cfg('rec_reps'))}회) · 시작 위치에 손을 두세요 ({task.name})",
+                    "do": f"지금 쓸기! · {task.do}",
+                    "rest": "쉬세요 · 다음 횟수를 위해 시작 위치로 천천히 돌아오세요 (복귀 구간은 학습 제외)",
+                }[phase]
+            else:
+                prompt = {"prep": "준비… " + task.do, "do": task.do,
+                          "rest": "쉬세요 (손을 편하게)"}[phase]
             sub = f"{head} · {rep}/{int(self.cfg('rec_reps'))}회"
-        return {"prompt": prompt, "sub": sub, "progress": progress, "overall": overall + progress / len(self.sets),
-                "waiting": False, "phase": phase}
+        # What to read from 3 m away: one big word (or the countdown number), coloured by what to do now
+        if self._held:
+            big, kind = "멈춤", "hold"              # the timer waits (hand lost or paused)
+        else:
+            big, kind = {"prep": ("준비", "prep"), "do": ("지금!" if int(self.cfg("rec_reps")) > 1 or self.cfg("rec_rest") > 0 else "유지", "do"),
+                         "rest": ("쉬세요", "rest"), "free": ("진행 중", "do")}[phase]
+        return {"prompt": self.hold_reason or prompt, "sub": sub, "progress": progress,
+                "overall": overall + progress / len(self.sets), "waiting": False, "phase": phase,
+                "big": big, "big_kind": kind, **extra}

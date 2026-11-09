@@ -91,7 +91,7 @@ def test_tracker_options_default_to_mediapipe_tracking_and_read_config():
 
     opts = tracker_options({})
     assert opts["min_tracking_confidence"] == 0.5 and opts["min_presence_confidence"] == 0.5
-    assert opts["min_detection_confidence"] == 0.6 and opts["detect_max_width"] == 640
+    assert opts["min_detection_confidence"] == 0.6 and opts["detect_max_width"] == 960
     opts = tracker_options({"tracker_min_tracking_confidence": 0.35, "tracker_detect_max_width": 0,
                             "tracker_min_presence_confidence": "x", "tracker_min_detection_confidence": 2})
     assert opts["min_tracking_confidence"] == 0.35 and opts["detect_max_width"] == 0

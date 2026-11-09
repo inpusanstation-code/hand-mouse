@@ -46,7 +46,59 @@ def hand_frame(world: np.ndarray) -> Optional[np.ndarray]:
 
 def frame_features(frames: Sequence[dict], aspect: float, fps: float = 30.0) -> np.ndarray:
     """(n, FEATURES) for a run of recorded frames (dicts with "world", "lm", "t")."""
-    out = np.zeros((len(frames), FEATURES), dtype=np.float32)
+    n = len(frames)
+    out = np.zeros((n, FEATURES), dtype=np.float32)
+    if n == 0:
+        return out
+    try:
+        if all(
+            f.get("world") is not None and f.get("lm") is not None
+            and len(f["world"]) == 21 and len(f["lm"]) == 21
+            for f in frames
+        ):
+            worlds = np.asarray([f["world"] for f in frames], dtype=np.float64)
+            lms = np.asarray([f["lm"] for f in frames], dtype=np.float64)
+            if worlds.shape == (n, 21, 3) and lms.shape == (n, 21, 3):
+                w = worlds - worlds[:, 0:1, :]
+                y = w[:, 9, :]
+                size = np.linalg.norm(y, axis=1)
+                if np.all(size >= 1e-6):
+                    y = y / size[:, None]
+                    x = w[:, 5, :] - w[:, 17, :]
+                    x = x - np.sum(x * y, axis=1, keepdims=True) * y
+                    nx = np.linalg.norm(x, axis=1)
+                    if np.all(nx >= 1e-6):
+                        x = x / nx[:, None]
+                        z = np.cross(x, y)
+                        basis = np.stack([x, y, z], axis=2)
+                        local = (w @ basis) / size[:, None, None]
+                        img = lms[:, :, :2] * np.array([1.0, aspect], dtype=np.float64)
+                        size_img = np.maximum(np.linalg.norm(img[:, 9, :] - img[:, 0, :], axis=1), 1e-6)
+                        palm = img[:, list(PALM), :].mean(axis=1)
+                        t = np.array([float(f.get("t", i / fps)) for i, f in enumerate(frames)], dtype=np.float64)
+                        out[:, 0:63] = local.reshape(n, 63)
+                        if n > 1:
+                            out[1:, 63:126] = (local[1:] - local[:-1]).reshape(n - 1, 63)
+                        thumb = local[:, THUMB_TIP:THUMB_TIP + 1, :]
+                        tips = local[:, list(TIPS), :]
+                        out[:, 126:130] = np.linalg.norm(thumb - tips, axis=2)
+                        if n > 1:
+                            dt = t[1:] - t[:-1]
+                            valid_dt = dt > 0
+                            if np.any(valid_dt):
+                                vel = np.zeros((n - 1, 2), dtype=np.float64)
+                                vel[valid_dt] = (
+                                    (palm[1:][valid_dt] - palm[:-1][valid_dt])
+                                    / size_img[1:, None][valid_dt]
+                                    / dt[valid_dt, None]
+                                    / 10.0
+                                )
+                                out[1:, 130:132] = vel
+                        out[:, 132] = 1.0
+                        return out
+    except (TypeError, ValueError, KeyError):
+        out.fill(0.0)
+
     prev_local: Optional[np.ndarray] = None
     prev_palm = None
     prev_t = None

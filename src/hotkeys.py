@@ -61,3 +61,14 @@ class KeyPoller:
         if hit and require_focus:
             return self._foreground_is_ours()
         return hit
+
+
+def settings_key_pressed(keys: KeyPoller, typing: bool) -> bool:
+    """F2 anywhere, or O / 0 in our window unless those letters are going into a text field.
+
+    The physical keys are read even while typing: GetAsyncKeyState remembers a press until the next read, so skipping
+    the read would open the settings the moment the text field loses focus.
+    """
+    function_key = keys.pressed([VK_F2])
+    letter = keys.pressed([VK_O, VK_0], require_focus=True)
+    return function_key or (letter and not typing)

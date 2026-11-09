@@ -26,10 +26,16 @@ swipes are is not measured yet.
 """
 from __future__ import annotations
 
+import json
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MOTION_TEMPLATES_PATH = ROOT / "models" / "motion_templates.json"
 
 WRIST, MIDDLE_MCP = 0, 9
 THUMB_TIP = 4
@@ -135,7 +141,53 @@ def hand_features(landmarks: Sequence[Any]) -> Dict[str, Any]:
     tdx, tdy = pts[THUMB_TIP][0] - pts[2][0], pts[THUMB_TIP][1] - pts[2][1]
     thumb_up = -tdy / math.hypot(tdx, tdy) if math.hypot(tdx, tdy) > 1e-6 else 0.0   # cos of the angle between the thumb and "up" on the screen
     palm_ratio = d2(pts[5], pts[17]) / palm_len           # palm width / length: ~0.9-1.3 palm to the camera, 2+ when a fist points AT it
-    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy)}
+    depth_3d = max((abs(p[2] - wrist[2]) for p in pts), default=0.0)
+    # thumb tip -> index / middle / ring / pinky tip, in palm lengths (a pinch is ~0.1-0.25)
+    pinch = tuple(d2(pts[THUMB_TIP], pts[tip]) / palm_len for tip in (8, 12, 16, 20))
+    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy), "depth_3d": depth_3d, "pinch": pinch}
+
+
+def _thumbs_up(f: Dict[str, Any]) -> bool:
+    """Same test as motion mode's entry pose (four fingers folded, thumb pointing up; a knuckles-up fist is not one)."""
+    global _ENTRY_CHECK
+    if _ENTRY_CHECK is None:
+        _ENTRY_CHECK = MotionMode()
+    return bool(_ENTRY_CHECK.entry_pose(f))
+
+
+_ENTRY_CHECK = None
+CUSTOM_PINCH_MAX = 0.32      # thumb tip within this many palm lengths of a fingertip = that pinch
+_PINCH_FINGER = {"thumb_index": 0, "thumb_middle": 1, "thumb_ring": 2, "thumb_pinky": 3}
+
+
+def custom_posture_ok(posture: str, f: Dict[str, Any]) -> bool:
+    """Does the hand (hand_features) have the shape a user-registered motion asks for?
+
+    Every posture the registration form offers (action_bindings.POSTURE_NAMES_KO) is checked here;
+    an unknown name never matches, so a typo cannot turn into "any hand shape"."""
+    curls = f.get("curl", (1.5, 1.5, 1.5, 1.5))
+    tuck = float(f.get("thumb_tuck", 0.8))
+    if posture == "any":
+        return True
+    if posture == "open_hand":
+        return min(curls) >= 1.22
+    if posture == "thumb_tucked":
+        return min(curls) >= 1.05 and tuck <= 0.52
+    if posture == "v_sign":
+        return curls[0] >= 1.45 and curls[1] >= 1.45 and curls[2] <= 1.25 and curls[3] <= 1.25
+    if posture == "rock_sign":
+        return curls[0] >= 1.45 and curls[3] >= 1.38 and curls[1] <= 1.25 and curls[2] <= 1.25
+    if posture == "fist":
+        return max(curls) <= 1.18 and not _thumbs_up(f)
+    if posture == "thumbs_up":
+        return _thumbs_up(f)
+    if posture in _PINCH_FINGER:
+        pinch = f.get("pinch")
+        if not pinch:
+            return False
+        i = _PINCH_FINGER[posture]
+        return pinch[i] <= CUSTOM_PINCH_MAX and pinch[i] == min(pinch)
+    return False
 
 
 @dataclass
@@ -224,12 +276,46 @@ class MotionMode:
         # little-finger knuckles", which depends on where the thumb is: a thumbs-up pointing sideways failed, a fist with the
         # thumb bent underneath passed.
         straight = f.get("thumb_straight")
-        thumb_out = (straight >= self.cfg("motion_thumb_straight")) if straight is not None             else f["thumb_tuck"] >= self.cfg("motion_thumb_out")
+        thumb_out = (straight >= self.cfg("motion_thumb_straight")) if straight is not None else f["thumb_tuck"] >= self.cfg("motion_thumb_out")
+        curls = sorted(float(c) for c in f["curl"])
+        fold_limit = self.cfg("motion_fold_ratio")
+        curl_mean = sum(curls) / max(1, len(curls))
+        palm_r = f.get("palm_ratio", 1.0)
+        real_3d = float(f.get("depth_3d", 0.0)) > 1e-4
+        angled_thumbs_up = (
+            straight is not None
+            and straight >= 0.94
+            and f.get("thumb_up", 1.0) >= 0.78
+            and (palm_r >= 1.15 or (real_3d and straight >= 0.97 and f.get("thumb_up", 1.0) >= 0.88))
+        )
+        folded = (
+            curls[-1] <= fold_limit
+            or (
+                fold_limit >= 1.0
+                and len(curls) >= 4
+                and curls[2] <= fold_limit
+                and curls[-1] <= fold_limit + 0.22
+                and curl_mean <= 1.05
+            )
+            or (
+                angled_thumbs_up
+                and fold_limit >= 1.0
+                and len(curls) >= 4
+                and curls[0] <= 1.12
+                and curls[1] <= 1.30
+                and curl_mean <= 1.28
+            )
+        )
+        min_palm = self.cfg("motion_min_palm_ratio")
+        max_palm = self.cfg("motion_max_palm_ratio")
+        if straight is not None and straight >= 0.90 and (curl_mean <= 1.05 or angled_thumbs_up):
+            min_palm = min(min_palm, 0.55)
+            max_palm = max(max_palm, 30.0)
         return (thumb_out
                 and f.get("thumb_up", 1.0) >= self.cfg("motion_thumb_up")
                 and f.get("thumb_len", 9.9) >= self.cfg("motion_thumb_len")
-                and self.cfg("motion_min_palm_ratio") <= f.get("palm_ratio", 1.0) <= self.cfg("motion_max_palm_ratio")
-                and max(f["curl"]) <= self.cfg("motion_fold_ratio"))
+                and min_palm <= palm_r <= max_palm
+                and folded)
 
     def open_hand(self, f: Dict[str, Any]) -> bool:
         """All four fingers fully extended (a swipe is only read from a completely open hand, so that other
@@ -341,10 +427,18 @@ class MotionMode:
         palm = feats["palm"]
         if self._enter_since is None:
             self._enter_since, self._enter_anchor = now, palm
+            self._enter_history = [(now, palm)]
             return None
-        if math.hypot(palm[0] - self._enter_anchor[0], palm[1] - self._enter_anchor[1]) > self.cfg("motion_enter_still"):
-            self._enter_since, self._enter_anchor = now, palm       # the hand is travelling: hold starts over
-            return None
+        still_limit = self.cfg("motion_enter_still")
+        if float(feats.get("depth_3d", 0.0)) > 1e-4:
+            still_limit = max(still_limit, 0.06)
+        hist = getattr(self, "_enter_history", None) or []
+        hist.append((now, palm))
+        self._enter_history = hist
+        if math.hypot(palm[0] - self._enter_anchor[0], palm[1] - self._enter_anchor[1]) > still_limit:
+            while len(hist) > 1 and math.hypot(palm[0] - hist[0][1][0], palm[1] - hist[0][1][1]) > still_limit:
+                hist.pop(0)
+            self._enter_since, self._enter_anchor = hist[0]
         if now - self._enter_since >= self.cfg("motion_enter_hold"):
             return self._enter(now, "pose")
         return None
@@ -392,6 +486,9 @@ class MotionMode:
             down = self._down_stroke(now, h)
             if down is not None:
                 return down
+        custom_ev = self._custom_motion_stroke(now, h, f)
+        if custom_ev is not None:
+            return custom_ev
         best_miss: Optional[Dict[str, Any]] = None
         for start in range(len(h) - 3):
             ev, miss = self._stroke(now, h[start:], h)
@@ -401,6 +498,90 @@ class MotionMode:
             if miss is not None and (best_miss is None or abs(miss["dx"]) > abs(best_miss["dx"])):
                 best_miss = miss
         self.last_miss = best_miss
+        return None
+
+    def _custom_motion_stroke(
+        self,
+        now: float,
+        h: List[Tuple[float, float, float, bool, Optional[str], float, float]],
+        f: Dict[str, Any],
+    ) -> Optional[MotionEvent]:
+        """Evaluate user-registered temporal motion gestures (e.g. up/down/diagonal/custom posture swipes)."""
+        if len(h) < 4:
+            return None
+        try:
+            from src.action_bindings import get_action_registry
+            custom_motions = get_action_registry().custom_motions
+        except Exception:
+            return None
+        if not custom_motions:
+            return None
+
+        for m_key, m_def in custom_motions.items():
+            if not m_def.get("enabled", True):
+                continue
+            req_posture = str(m_def.get("posture", "open_hand"))
+            if not custom_posture_ok(req_posture, f):
+                continue
+
+            min_dist = float(m_def.get("min_distance", 0.14))
+            min_spd = float(m_def.get("min_speed", 0.25))
+            target_dir = str(m_def.get("direction", "right"))
+
+            for start in range(len(h) - 3):
+                seg = h[start:]
+                dt = seg[-1][0] - seg[0][0]
+                if dt < 0.08:
+                    continue
+                dx = seg[-1][1] - seg[0][1]
+                dy = seg[-1][2] - seg[0][2]
+                dist = math.hypot(dx, dy)
+                if dist < min_dist:
+                    continue
+                speed = dist / dt
+                if speed < min_spd:
+                    continue
+                path = sum(math.hypot(seg[k + 1][1] - seg[k][1], seg[k + 1][2] - seg[k][2]) for k in range(len(seg) - 1))
+                if path > 1.65 * dist:
+                    continue
+                dir_ok = False
+                if target_dir == "left" and dx <= -min_dist and abs(dx) >= abs(dy) * 1.3:
+                    dir_ok = True
+                elif target_dir == "right" and dx >= min_dist and abs(dx) >= abs(dy) * 1.3:
+                    dir_ok = True
+                elif target_dir == "up" and dy <= -min_dist and abs(dy) >= abs(dx) * 1.3:
+                    dir_ok = True
+                elif target_dir == "down" and dy >= min_dist and abs(dy) >= abs(dx) * 1.3:
+                    dir_ok = True
+                elif target_dir == "diag_up_left" and dx <= -min_dist * 0.55 and dy <= -min_dist * 0.55:
+                    dir_ok = True
+                elif target_dir == "diag_up_right" and dx >= min_dist * 0.55 and dy <= -min_dist * 0.55:
+                    dir_ok = True
+                elif target_dir == "diag_down_left" and dx <= -min_dist * 0.55 and dy >= min_dist * 0.55:
+                    dir_ok = True
+                elif target_dir == "diag_down_right" and dx >= min_dist * 0.55 and dy >= min_dist * 0.55:
+                    dir_ok = True
+
+                if dir_ok:
+                    self._last_swipe_t = self._last_activity = now
+                    self._last_swipe_speed = speed
+                    self._settled = False
+                    self._paused_ok = False
+                    self._pause_since = None
+                    self._hist.clear()
+                    info = {
+                        "variant": req_posture,
+                        "side": target_dir,
+                        "action": m_key,
+                        "dx": round(dx, 3),
+                        "dy": round(dy, 3),
+                        "seconds": round(dt, 2),
+                        "speed": round(speed, 2),
+                        "frames": len(seg),
+                        "straight": round(path / max(1e-6, dist), 2),
+                    }
+                    self.last_swipe = info
+                    return MotionEvent("swipe", info, m_key)
         return None
 
     def _down_stroke(self, now: float, h: List[Tuple[float, float, float, bool, Optional[str], float, float]]
@@ -509,3 +690,403 @@ class MotionMode:
                 "straight": round(path / max(1e-6, math.hypot(dx, dy)), 2)}
         self.last_swipe = info
         return MotionEvent("swipe", info, action), None
+
+
+# ---------------------------------------------------------------------------
+# Dedicated Time-Series Motion Learning & Trajectory Template Engine
+# (Separate from Static Single-Frame Posture Learning)
+# ---------------------------------------------------------------------------
+def _resample_series_1d(values: Sequence[float], steps: int = 16) -> List[float]:
+    if not values:
+        return [0.0] * steps
+    if len(values) == 1:
+        return [float(values[0])] * steps
+    n = len(values)
+    out: List[float] = []
+    for k in range(steps):
+        pos = (k / max(1, steps - 1)) * (n - 1)
+        i0 = int(math.floor(pos))
+        i1 = min(n - 1, i0 + 1)
+        frac = pos - i0
+        v = float(values[i0]) * (1.0 - frac) + float(values[i1]) * frac
+        out.append(round(v, 4))
+    return out
+
+
+def extract_motion_window_features(
+    frame_records: Sequence[Dict[str, Any]],
+    *,
+    resample_steps: int = 16,
+) -> Optional[Dict[str, Any]]:
+    """
+    Extract time-series trajectory, velocity profile, and hand posture sequence features
+    from a window of motion frames (each containing 't' and 'landmarks' or 'palm').
+
+    Unlike static single-frame learning (SpatialMLP), this captures:
+    1. Active stroke window isolation (trimming pre-stroke idle & post-stroke settle)
+    2. 16-step normalized relative 2D trajectory [(dx_k, dy_k)]
+    3. 16-step velocity profile [v_k] (acceleration -> peak -> deceleration)
+    4. Net displacement, primary direction vector, path straightness, and finger/thumb state over time.
+    """
+    samples: List[Tuple[float, float, float, float, float, float]] = []
+    for rec in frame_records:
+        t = float(rec.get("t", len(samples) / 30.0))
+        lm = rec.get("landmarks")
+        if lm and len(lm) >= 21:
+            hf = hand_features(lm)
+            px, py = hf["palm"]
+            curl_min = float(min(hf["curl"]))
+            curl_mean = float(sum(hf["curl"]) / len(hf["curl"]))
+            tuck = float(hf["thumb_tuck"])
+            samples.append((t, px, py, curl_min, curl_mean, tuck))
+        elif "palm" in rec and rec["palm"]:
+            px, py = float(rec["palm"][0]), float(rec["palm"][1])
+            samples.append((t, px, py, float(rec.get("curl_min", 1.5)), float(rec.get("curl_mean", 1.5)), float(rec.get("thumb_tuck", 0.8))))
+
+    if len(samples) < 4:
+        return None
+
+    # Find the sub-segment with strongest directional stroke momentum
+    best_seg = samples
+    best_score = -1.0
+    n = len(samples)
+    for i in range(n - 3):
+        for j in range(i + 3, n):
+            dt = samples[j][0] - samples[i][0]
+            if dt < 0.08 or dt > 1.25:
+                continue
+            dx = samples[j][1] - samples[i][1]
+            dy = samples[j][2] - samples[i][2]
+            dist = math.hypot(dx, dy)
+            if dist < 0.05:
+                continue
+            path = sum(
+                math.hypot(samples[k + 1][1] - samples[k][1], samples[k + 1][2] - samples[k][2])
+                for k in range(i, j)
+            )
+            straight_ratio = path / max(1e-6, dist)
+            if straight_ratio > 2.2:
+                continue
+            spd = dist / dt
+            score = dist * (1.0 + 0.35 * min(2.5, spd)) / max(1.0, straight_ratio)
+            if score > best_score:
+                best_score = score
+                best_seg = samples[i : j + 1]
+
+    t0, x0, y0 = best_seg[0][0], best_seg[0][1], best_seg[0][2]
+    t1, x1, y1 = best_seg[-1][0], best_seg[-1][1], best_seg[-1][2]
+    dt = max(1e-3, t1 - t0)
+    dx = x1 - x0
+    dy = y1 - y0
+    net_dist = math.hypot(dx, dy)
+    if net_dist < 0.04:
+        return None
+
+    path_len = sum(
+        math.hypot(best_seg[k + 1][1] - best_seg[k][1], best_seg[k + 1][2] - best_seg[k][2])
+        for k in range(len(best_seg) - 1)
+    )
+    straightness = path_len / max(1e-6, net_dist)
+    mean_speed = net_dist / dt
+
+    inst_speeds: List[float] = [0.0]
+    for k in range(len(best_seg) - 1):
+        sdt = max(1e-3, best_seg[k + 1][0] - best_seg[k][0])
+        sd = math.hypot(best_seg[k + 1][1] - best_seg[k][1], best_seg[k + 1][2] - best_seg[k][2])
+        inst_speeds.append(sd / sdt)
+    peak_speed = max(inst_speeds) if inst_speeds else mean_speed
+
+    scale = max(0.05, net_dist)
+    rel_x = [(s[1] - x0) / scale for s in best_seg]
+    rel_y = [(s[2] - y0) / scale for s in best_seg]
+    norm_v = [v / max(1e-3, peak_speed) for v in inst_speeds]
+
+    traj_x = _resample_series_1d(rel_x, resample_steps)
+    traj_y = _resample_series_1d(rel_y, resample_steps)
+    vel_prof = _resample_series_1d(norm_v, resample_steps)
+
+    ux, uy = dx / net_dist, dy / net_dist
+    angle_deg = math.degrees(math.atan2(dy, dx))
+    curl_mins = [s[3] for s in best_seg]
+    curl_means = [s[4] for s in best_seg]
+    tucks = [s[5] for s in best_seg]
+
+    return {
+        "duration": round(dt, 4),
+        "dx": round(dx, 4),
+        "dy": round(dy, 4),
+        "net_dist": round(net_dist, 4),
+        "path_len": round(path_len, 4),
+        "straightness": round(straightness, 4),
+        "mean_speed": round(mean_speed, 4),
+        "peak_speed": round(peak_speed, 4),
+        "direction_unit": [round(ux, 4), round(uy, 4)],
+        "direction_angle_deg": round(angle_deg, 2),
+        "curl_min": round(min(curl_mins), 4),
+        "curl_mean": round(sum(curl_means) / len(curl_means), 4),
+        "thumb_tuck_mean": round(sum(tucks) / len(tucks), 4),
+        "thumb_tuck_min": round(min(tucks), 4),
+        "trajectory_x": traj_x,
+        "trajectory_y": traj_y,
+        "velocity_profile": vel_prof,
+        "frames": len(best_seg),
+    }
+
+
+class MotionTrajectoryModel:
+    """
+    Time-series motion template classifier & verifier.
+    Evaluates temporal trajectory similarity, velocity envelope, and hand-shape sequence consistency.
+    """
+
+    def __init__(self, templates: Optional[Dict[str, Dict[str, Any]]] = None, path: Optional[Path] = None) -> None:
+        self.path = Path(path) if path is not None else DEFAULT_MOTION_TEMPLATES_PATH
+        self.templates: Dict[str, Dict[str, Any]] = dict(templates or {})
+
+    @classmethod
+    def load(cls, path: Optional[Path] = None) -> "MotionTrajectoryModel":
+        target = Path(path) if path is not None else DEFAULT_MOTION_TEMPLATES_PATH
+        if target.is_file():
+            try:
+                data = json.loads(target.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("templates"), dict):
+                    return cls(templates=data["templates"], path=target)
+            except Exception:
+                pass
+        return cls(templates={}, path=target)
+
+    def save(self, path: Optional[Path] = None) -> Path:
+        target = Path(path) if path is not None else self.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": "motion-trajectory-v1",
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "templates": self.templates,
+        }
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return target
+
+    def score_stroke(self, gesture_key: str, stroke_feats: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute time-series trajectory match score (0.0 .. 1.0) against a learned motion template."""
+        tmpl = self.templates.get(gesture_key)
+        if not tmpl or not stroke_feats:
+            return {"matched": False, "overall_score": 0.0, "reason": "no_template"}
+
+        ux, uy = stroke_feats.get("direction_unit", [0.0, 0.0])
+        t_ux, t_uy = tmpl.get("direction_unit", [1.0, 0.0])
+        dir_cos = float(ux * t_ux + uy * t_uy)
+
+        tx = stroke_feats.get("trajectory_x") or []
+        ty = stroke_feats.get("trajectory_y") or []
+        px = tmpl.get("prototype_trajectory_x") or []
+        py = tmpl.get("prototype_trajectory_y") or []
+        if len(tx) == len(px) and len(tx) > 0:
+            mse = sum((tx[k] - px[k]) ** 2 + (ty[k] - py[k]) ** 2 for k in range(len(tx))) / len(tx)
+            traj_sim = math.exp(-2.0 * mse)
+        else:
+            traj_sim = max(0.0, dir_cos)
+
+        vp = stroke_feats.get("velocity_profile") or []
+        pvp = tmpl.get("prototype_velocity") or []
+        if len(vp) == len(pvp) and len(vp) > 0:
+            v_mse = sum((vp[k] - pvp[k]) ** 2 for k in range(len(vp))) / len(vp)
+            vel_sim = math.exp(-1.5 * v_mse)
+        else:
+            vel_sim = 0.8
+
+        dist_ok = float(stroke_feats.get("net_dist", 0.0)) >= float(tmpl.get("min_distance_thr", 0.10))
+        spd_ok = float(stroke_feats.get("mean_speed", 0.0)) >= float(tmpl.get("min_speed_thr", 0.25))
+        str_ok = float(stroke_feats.get("straightness", 9.9)) <= float(tmpl.get("max_straightness_thr", 1.75))
+
+        overall = max(0.0, min(1.0, 0.45 * max(0.0, dir_cos) + 0.35 * traj_sim + 0.20 * vel_sim))
+        matched = bool(dir_cos >= 0.72 and dist_ok and spd_ok and str_ok and overall >= 0.68)
+        return {
+            "matched": matched,
+            "overall_score": round(overall, 4),
+            "direction_cosine": round(dir_cos, 4),
+            "trajectory_similarity": round(traj_sim, 4),
+            "velocity_similarity": round(vel_sim, 4),
+            "dist_ok": dist_ok,
+            "speed_ok": spd_ok,
+            "straight_ok": str_ok,
+        }
+
+    def score_window(
+        self,
+        gesture_key: str,
+        samples: Sequence[Any],
+    ) -> Tuple[bool, float, Dict[str, Any]]:
+        """Score a raw time-series window of `(t, x, y)` or frame dicts against `gesture_key` template."""
+        records: List[Dict[str, Any]] = []
+        for s in samples:
+            if isinstance(s, dict):
+                records.append(s)
+            elif isinstance(s, (tuple, list)) and len(s) >= 3:
+                records.append({"t": float(s[0]), "palm": (float(s[1]), float(s[2]))})
+        feats = extract_motion_window_features(records)
+        if feats is None:
+            return False, 0.0, {"matched": False, "overall_score": 0.0, "reason": "short_window"}
+        res = self.score_stroke(gesture_key, feats)
+        return bool(res.get("matched", False)), float(res.get("overall_score", 0.0)), res
+
+
+def train_motion_templates_from_recordings(
+    rec_dir: Optional[Path] = None,
+    target_keys: Optional[Sequence[str]] = None,
+    output_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Dedicated Time-Series Motion Learning Pipeline.
+    Scans finished recordings for temporal motion repetitions ('do' phase vs 'rest' return phase),
+    builds 16-step trajectory & velocity prototypes per motion gesture, evaluates hold-out trajectory
+    recognition & return-stroke suppression rates, and saves `models/motion_templates.json`.
+    """
+    from src.gesture_catalog import BY_KEY, is_motion_task
+    from src.recorder import finished_recordings, read_session
+
+    folder = Path(rec_dir) if rec_dir is not None else (ROOT / "recordings")
+    out_file = Path(output_path) if output_path is not None else DEFAULT_MOTION_TEMPLATES_PATH
+    model = MotionTrajectoryModel.load(out_file)
+
+    wanted = set(target_keys) if target_keys else {k for k in BY_KEY if is_motion_task(k)}
+    wanted = {k for k in wanted if k in BY_KEY and is_motion_task(k)}
+
+    do_strokes_by_key: Dict[str, List[Dict[str, Any]]] = {k: [] for k in wanted}
+    rest_strokes_by_key: Dict[str, List[Dict[str, Any]]] = {k: [] for k in wanted}
+    postures_by_key: Dict[str, set] = {k: set() for k in wanted}
+
+    complete_paths, _incomplete = finished_recordings(folder)
+    for rec_path in complete_paths:
+        try:
+            meta, frames, _events = read_session(rec_path)
+        except Exception:
+            continue
+        cur_task = ""
+        cur_phase = ""
+        cur_rep = -1
+        cur_cond = str(meta.get("condition_key") or meta.get("posture") or meta.get("pc_alias") or rec_path.stem)
+        buf: List[Dict[str, Any]] = []
+
+        def flush_segment(task_key: str, phase_name: str, cond_key: str, frames_buf: List[Dict[str, Any]]) -> None:
+            if task_key not in wanted or len(frames_buf) < 4:
+                return
+            feats = extract_motion_window_features(frames_buf)
+            if feats is None:
+                return
+            feats["condition"] = cond_key
+            if phase_name == "do":
+                do_strokes_by_key[task_key].append(feats)
+                postures_by_key[task_key].add(cond_key)
+            elif phase_name == "rest":
+                rest_strokes_by_key[task_key].append(feats)
+
+        for row in frames:
+            lbl = row.get("label") or {}
+            t_key = str(lbl.get("task") or "")
+            phase = str(lbl.get("phase") or "")
+            rep = int(lbl.get("rep") or 0)
+            cond = str(lbl.get("condition_key") or lbl.get("condition") or cur_cond or "default")
+            if (t_key, phase, rep) != (cur_task, cur_phase, cur_rep):
+                flush_segment(cur_task, cur_phase, cur_cond, buf)
+                buf = []
+                cur_task, cur_phase, cur_rep, cur_cond = t_key, phase, rep, cond
+            lm = row.get("lm") or row.get("landmarks")
+            if not lm and isinstance(row.get("hands"), list) and row["hands"]:
+                lm = row["hands"][0].get("landmarks")
+            if t_key in wanted and phase in ("do", "rest") and lm:
+                buf.append({"t": float(row.get("t", 0.0)), "landmarks": lm})
+        flush_segment(cur_task, cur_phase, cur_cond, buf)
+
+    trained_summary: Dict[str, Dict[str, Any]] = {}
+    for key in wanted:
+        strokes = do_strokes_by_key.get(key) or []
+        task = BY_KEY.get(key)
+        expected_dir = str(getattr(task, "direction", "") or "right")
+        dir_vec_map = {
+            "left": (-1.0, 0.0),
+            "right": (1.0, 0.0),
+            "up": (0.0, -1.0),
+            "down": (0.0, 1.0),
+            "diag_up_left": (-0.7071, -0.7071),
+            "diag_up_right": (0.7071, -0.7071),
+            "diag_down_left": (-0.7071, 0.7071),
+            "diag_down_right": (0.7071, 0.7071),
+        }
+        exp_ux, exp_uy = dir_vec_map.get(expected_dir, (1.0, 0.0))
+
+        # Filter strokes that align reasonably with the intended motion direction
+        valid_strokes = [
+            s for s in strokes
+            if (s["direction_unit"][0] * exp_ux + s["direction_unit"][1] * exp_uy) >= 0.45
+        ]
+        if not valid_strokes and strokes:
+            valid_strokes = strokes
+
+        if not valid_strokes:
+            continue
+
+        n_s = len(valid_strokes)
+        mean_ux = sum(s["direction_unit"][0] for s in valid_strokes) / n_s
+        mean_uy = sum(s["direction_unit"][1] for s in valid_strokes) / n_s
+        unorm = max(1e-6, math.hypot(mean_ux, mean_uy))
+        mean_ux, mean_uy = mean_ux / unorm, mean_uy / unorm
+
+        steps = len(valid_strokes[0]["trajectory_x"])
+        proto_x = [round(sum(s["trajectory_x"][k] for s in valid_strokes) / n_s, 4) for k in range(steps)]
+        proto_y = [round(sum(s["trajectory_y"][k] for s in valid_strokes) / n_s, 4) for k in range(steps)]
+        proto_v = [round(sum(s["velocity_profile"][k] for s in valid_strokes) / n_s, 4) for k in range(steps)]
+
+        dists = sorted(s["net_dist"] for s in valid_strokes)
+        speeds = sorted(s["mean_speed"] for s in valid_strokes)
+        straights = sorted(s["straightness"] for s in valid_strokes)
+
+        min_dist_thr = max(0.06, round(dists[max(0, int(n_s * 0.15))] * 0.82, 4))
+        min_speed_thr = max(0.18, round(speeds[max(0, int(n_s * 0.15))] * 0.78, 4))
+        max_straight_thr = min(2.0, max(1.35, round(straights[min(n_s - 1, int(n_s * 0.88))] * 1.12, 4)))
+
+        tmpl = {
+            "gesture_key": key,
+            "name": getattr(task, "name", key),
+            "track": "motion",
+            "expected_direction": expected_dir,
+            "trained_at": time.strftime("%Y-%m-%d %H:%M"),
+            "sample_count": len(strokes),
+            "positive_reps": len(strokes),
+            "valid_stroke_count": n_s,
+            "posture_count": len(postures_by_key.get(key) or ()),
+            "direction_unit": [round(mean_ux, 4), round(mean_uy, 4)],
+            "prototype_trajectory_x": proto_x,
+            "prototype_trajectory_y": proto_y,
+            "prototype_velocity": proto_v,
+            "mean_distance": round(sum(dists) / n_s, 4),
+            "min_distance_thr": min_dist_thr,
+            "mean_speed": round(sum(speeds) / n_s, 4),
+            "min_speed_thr": min_speed_thr,
+            "mean_straightness": round(sum(straights) / n_s, 4),
+            "max_straightness_thr": max_straight_thr,
+            "thumb_tuck_mean": round(sum(s["thumb_tuck_mean"] for s in valid_strokes) / n_s, 4),
+            "curl_min_mean": round(sum(s["curl_min"] for s in valid_strokes) / n_s, 4),
+        }
+        model.templates[key] = tmpl
+
+        # Evaluate recognition rate across recorded 'do' strokes and return-stroke rejection across 'rest' strokes
+        hits = sum(1 for s in strokes if model.score_stroke(key, s)["matched"])
+        rec_rate = hits / max(1, len(strokes))
+        rest_list = rest_strokes_by_key.get(key) or []
+        false_returns = sum(1 for r in rest_list if model.score_stroke(key, r)["matched"])
+        ret_supp_rate = 1.0 - (false_returns / max(1, len(rest_list))) if rest_list else 1.0
+
+        tmpl["trajectory_recognition_rate"] = round(rec_rate, 4)
+        tmpl["return_suppression_rate"] = round(ret_supp_rate, 4)
+        trained_summary[key] = tmpl
+
+    if trained_summary:
+        model.save(out_file)
+
+    return {
+        "ok": len(trained_summary) > 0,
+        "trained_count": len(trained_summary),
+        "templates": trained_summary,
+        "path": str(out_file),
+    }
+

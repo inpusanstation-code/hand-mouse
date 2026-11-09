@@ -1,0 +1,140 @@
+{
+  "diagnosis_version": 2,
+  "available": true,
+  "overall_status": "improved",
+  "has_before_model": true,
+  "headline": "[선택 동작 학습 효과] 직전 모델 대비 평균 인식률 +3.1%p · 이동 오작동 2.3회/분 (규칙 8.8) · 96차원 전용 MLP 91.4%",
+  "improved_count": 1,
+  "regressed_count": 0,
+  "can_rollback": false,
+  "backup_id": "",
+  "spatial_accuracy_after": 91.38,
+  "spatial_accuracy_before": 91.38,
+  "spatial_accuracy_delta": 0.0,
+  "items": [
+    {
+      "label": "thumb_middle",
+      "name": "좌클릭 · 드래그 (중지)",
+      "status": "improved",
+      "badge": "인식 +3%p ▲",
+      "detail": "인식률 97% → 100% (+3%p) · 규칙 100% 대비 0%p · 학습일치 100% · 전용MLP 97%",
+      "diagnosis_summary": "적응형 자세 재학습(1회) 완료: 이질적인 각도·자세 [화면 중앙 (미학습 교차 85% → 재학습 후 100%), 손목 왼쪽 회전 (10시) · 좌측 (미학습 교차 49% → 재학습 후 100%)]를 집중 추가 학습하여 인식률을 끌어올렸습니다. / 이질적인 자세·각도 차이: 기본 자세[전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향) 100%]와 달리 [손목 왼쪽 회전 (10시) · 좌측(49%)] 자세는 손목 회전·카메라 각도가 이질적이라 해당 자세를 제외하고 채점하는 미학습 교차검증(Zero-shot) 점수가 낮게 측정되었습니다. / 실제 최종 모델 성능 정상: 학습 데이터 일치도(100%)와 모든 자세를 학습한 최종 모델 인식률(100%)은 정상입니다.",
+      "diagnosis_reasons": [
+        "이질적인 자세·각도 차이: 기본 자세[전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향) 100%]와 달리 [손목 왼쪽 회전 (10시) · 좌측(49%)] 자세는 손목 회전·카메라 각도가 이질적이라 해당 자세를 제외하고 채점하는 미학습 교차검증(Zero-shot) 점수가 낮게 측정되었습니다.",
+        "실제 최종 모델 성능 정상: 학습 데이터 일치도(100%)와 모든 자세를 학습한 최종 모델 인식률(100%)은 정상입니다."
+      ],
+      "boost_summary": "적응형 자세 재학습(1회) 완료: 이질적인 각도·자세 [화면 중앙 (미학습 교차 85% → 재학습 후 100%), 손목 왼쪽 회전 (10시) · 좌측 (미학습 교차 49% → 재학습 후 100%)]를 집중 추가 학습하여 인식률을 끌어올렸습니다.",
+      "rate_after": 100.0,
+      "rate_before": 96.9,
+      "zero_shot_rate": 74.8,
+      "final_rate": 100.0,
+      "rules_rate": 100.0,
+      "delta_prev_pp": 3.1,
+      "delta_rules_pp": 0.0
+    },
+    {
+      "label": "none",
+      "name": "커서 이동 중 오작동 억제",
+      "status": "same",
+      "badge": "오작동 유지 =",
+      "detail": "자유이동 오작동 2.3 → 2.3회/분 (0.0) · 규칙 8.8회/분 (-6.6)",
+      "diagnosis_summary": "",
+      "diagnosis_reasons": [],
+      "boost_summary": "",
+      "misfires_after": 2.27,
+      "misfires_before": 2.27,
+      "rules_misfires": 8.84,
+      "delta_prev": 0.0,
+      "delta_rules": -6.57
+    }
+  ],
+  "by_task": {
+    "thumb_middle": {
+      "label": "thumb_middle",
+      "name": "좌클릭 · 드래그 (중지)",
+      "status": "improved",
+      "badge": "인식 +3%p ▲",
+      "detail": "인식률 97% → 100% (+3%p) · 규칙 100% 대비 0%p · 학습일치 100% · 전용MLP 97%",
+      "diagnosis_summary": "적응형 자세 재학습(1회) 완료: 이질적인 각도·자세 [화면 중앙 (미학습 교차 85% → 재학습 후 100%), 손목 왼쪽 회전 (10시) · 좌측 (미학습 교차 49% → 재학습 후 100%)]를 집중 추가 학습하여 인식률을 끌어올렸습니다. / 이질적인 자세·각도 차이: 기본 자세[전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향) 100%]와 달리 [손목 왼쪽 회전 (10시) · 좌측(49%)] 자세는 손목 회전·카메라 각도가 이질적이라 해당 자세를 제외하고 채점하는 미학습 교차검증(Zero-shot) 점수가 낮게 측정되었습니다. / 실제 최종 모델 성능 정상: 학습 데이터 일치도(100%)와 모든 자세를 학습한 최종 모델 인식률(100%)은 정상입니다.",
+      "diagnosis_reasons": [
+        "이질적인 자세·각도 차이: 기본 자세[전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향) 100%]와 달리 [손목 왼쪽 회전 (10시) · 좌측(49%)] 자세는 손목 회전·카메라 각도가 이질적이라 해당 자세를 제외하고 채점하는 미학습 교차검증(Zero-shot) 점수가 낮게 측정되었습니다.",
+        "실제 최종 모델 성능 정상: 학습 데이터 일치도(100%)와 모든 자세를 학습한 최종 모델 인식률(100%)은 정상입니다."
+      ],
+      "boost_summary": "적응형 자세 재학습(1회) 완료: 이질적인 각도·자세 [화면 중앙 (미학습 교차 85% → 재학습 후 100%), 손목 왼쪽 회전 (10시) · 좌측 (미학습 교차 49% → 재학습 후 100%)]를 집중 추가 학습하여 인식률을 끌어올렸습니다.",
+      "rate_after": 100.0,
+      "rate_before": 96.9,
+      "zero_shot_rate": 74.8,
+      "final_rate": 100.0,
+      "rules_rate": 100.0,
+      "delta_prev_pp": 3.1,
+      "delta_rules_pp": 0.0
+    },
+    "thumb_middle_drag": {
+      "label": "thumb_middle",
+      "name": "좌클릭 · 드래그 (중지)",
+      "status": "improved",
+      "badge": "인식 +3%p ▲",
+      "detail": "인식률 97% → 100% (+3%p) · 규칙 100% 대비 0%p · 학습일치 100% · 전용MLP 97%",
+      "diagnosis_summary": "적응형 자세 재학습(1회) 완료: 이질적인 각도·자세 [화면 중앙 (미학습 교차 85% → 재학습 후 100%), 손목 왼쪽 회전 (10시) · 좌측 (미학습 교차 49% → 재학습 후 100%)]를 집중 추가 학습하여 인식률을 끌어올렸습니다. / 이질적인 자세·각도 차이: 기본 자세[전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향) 100%]와 달리 [손목 왼쪽 회전 (10시) · 좌측(49%)] 자세는 손목 회전·카메라 각도가 이질적이라 해당 자세를 제외하고 채점하는 미학습 교차검증(Zero-shot) 점수가 낮게 측정되었습니다. / 실제 최종 모델 성능 정상: 학습 데이터 일치도(100%)와 모든 자세를 학습한 최종 모델 인식률(100%)은 정상입니다.",
+      "diagnosis_reasons": [
+        "이질적인 자세·각도 차이: 기본 자세[전체 화면 · 손목 오른쪽 살짝 회전 (2시 방향) 100%]와 달리 [손목 왼쪽 회전 (10시) · 좌측(49%)] 자세는 손목 회전·카메라 각도가 이질적이라 해당 자세를 제외하고 채점하는 미학습 교차검증(Zero-shot) 점수가 낮게 측정되었습니다.",
+        "실제 최종 모델 성능 정상: 학습 데이터 일치도(100%)와 모든 자세를 학습한 최종 모델 인식률(100%)은 정상입니다."
+      ],
+      "boost_summary": "적응형 자세 재학습(1회) 완료: 이질적인 각도·자세 [화면 중앙 (미학습 교차 85% → 재학습 후 100%), 손목 왼쪽 회전 (10시) · 좌측 (미학습 교차 49% → 재학습 후 100%)]를 집중 추가 학습하여 인식률을 끌어올렸습니다.",
+      "rate_after": 100.0,
+      "rate_before": 96.9,
+      "zero_shot_rate": 74.8,
+      "final_rate": 100.0,
+      "rules_rate": 100.0,
+      "delta_prev_pp": 3.1,
+      "delta_rules_pp": 0.0
+    },
+    "none": {
+      "label": "none",
+      "name": "커서 이동 중 오작동 억제",
+      "status": "same",
+      "badge": "오작동 유지 =",
+      "detail": "자유이동 오작동 2.3 → 2.3회/분 (0.0) · 규칙 8.8회/분 (-6.6)",
+      "diagnosis_summary": "",
+      "diagnosis_reasons": [],
+      "boost_summary": "",
+      "misfires_after": 2.27,
+      "misfires_before": 2.27,
+      "rules_misfires": 8.84,
+      "delta_prev": 0.0,
+      "delta_rules": -6.57
+    },
+    "open_move": {
+      "label": "none",
+      "name": "커서 이동 중 오작동 억제",
+      "status": "same",
+      "badge": "오작동 유지 =",
+      "detail": "자유이동 오작동 2.3 → 2.3회/분 (0.0) · 규칙 8.8회/분 (-6.6)",
+      "diagnosis_summary": "",
+      "diagnosis_reasons": [],
+      "boost_summary": "",
+      "misfires_after": 2.27,
+      "misfires_before": 2.27,
+      "rules_misfires": 8.84,
+      "delta_prev": 0.0,
+      "delta_rules": -6.57
+    },
+    "fist_move": {
+      "label": "none",
+      "name": "커서 이동 중 오작동 억제",
+      "status": "same",
+      "badge": "오작동 유지 =",
+      "detail": "자유이동 오작동 2.3 → 2.3회/분 (0.0) · 규칙 8.8회/분 (-6.6)",
+      "diagnosis_summary": "",
+      "diagnosis_reasons": [],
+      "boost_summary": "",
+      "misfires_after": 2.27,
+      "misfires_before": 2.27,
+      "rules_misfires": 8.84,
+      "delta_prev": 0.0,
+      "delta_rules": -6.57
+    }
+  },
+  "evaluated_at": "2026-11-09 01:53:40",
+  "dismissed": false
+}

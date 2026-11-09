@@ -141,3 +141,82 @@ def test_summary_flags_hand_seen_but_filtered_out(tmp_path):
     path = rec.poll(t0 + 2, {"frame_px": [1280, 720]})
     s = json.loads(path.read_text(encoding="utf-8"))["summary"]
     assert s["raw_hands_during_loss"] == 10 and any("handedness" in h for h in s["hints"])
+
+
+def test_crop_is_held_briefly_after_a_miss_then_dropped():
+    crop = HandCrop(hold_seconds=0.8)
+    roi = crop.update(hand(.5, .5, .06), W, H, now=10.0)
+    crop.miss(10.3)
+    assert crop.roi == roi                 # still looking there: a far hand flickers for a few frames
+    crop.miss(10.7)
+    assert crop.roi == roi
+    crop.miss(11.0)                        # 1.0 s without the hand: back to the whole frame
+    assert crop.roi is None
+    assert crop.update(hand(.5, .5, .06), W, H, now=12.0) is not None  # a new detection starts a crop again
+
+
+def test_far_hand_gets_more_cursor_gain_and_a_close_hand_none():
+    from src.mouse_controller import MouseController
+    mc = MouseController.__new__(MouseController)
+    mc.hand_size, mc._size_ema, mc._size_t, mc.distance_scale = None, None, 0.0, 1.0
+    cfg = {"distance_gain_ref": 0.11, "distance_gain_max": 3.0}
+    mc.hand_size = 0.055
+    assert mc._distance_scale(cfg, 1.0) == pytest.approx(2.0)      # half the reference size: twice the gain
+    mc.hand_size = None
+    assert mc._distance_scale(cfg, 1.1) == pytest.approx(2.0)      # hand lost: the last factor is kept
+    mc._size_ema = None
+    mc.hand_size = 0.15
+    assert mc._distance_scale(cfg, 5.0) == 1.0                     # bigger than the reference: never below 1
+    mc._size_ema = None
+    mc.hand_size = 0.02
+    assert mc._distance_scale(cfg, 9.0) == 3.0                     # capped
+    assert mc._distance_scale({"distance_gain_ref": 0}, 10.0) == 1.0  # switched off
+
+
+def test_a_far_hands_small_crop_is_enlarged_before_mediapipe_and_mapped_back_unchanged():
+    import numpy as np
+    from src.hand_tracker import HandTracker
+
+    seen = {}
+
+    class FakeLandmarker:
+        def detect_for_video(self, image, ts):
+            seen["shape"] = image.numpy_view().shape
+            lm = [SimpleNamespace(x=0.5, y=0.5, z=0.0) for _ in range(21)]
+            return SimpleNamespace(hand_landmarks=[lm], handedness=[], hand_world_landmarks=[])
+
+    tracker = HandTracker.__new__(HandTracker)
+    tracker._crop_landmarker = FakeLandmarker()
+    tracker._crop_timestamp_ms = 0
+    tracker.crop_max_side = 480
+    tracker.crop_upscale_side = 256
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    found = tracker._detect_crop(frame, (600, 300, 700, 400))        # a 100 px crop around a far hand
+    assert max(seen["shape"][:2]) == 256                               # enlarged to the configured side
+    assert found[0].landmarks[0].x == pytest.approx((600 + 0.5 * 100) / 1280)   # still the whole-frame position
+    tracker.crop_upscale_side = 0
+    tracker._detect_crop(frame, (600, 300, 700, 400))
+    assert max(seen["shape"][:2]) == 100                               # off: as before
+
+
+def test_the_zoom_of_a_tiny_crop_goes_as_far_as_the_configured_limit():
+    import numpy as np
+    from src.hand_tracker import HandTracker
+
+    seen = {}
+
+    class FakeLandmarker:
+        def detect_for_video(self, image, ts):
+            seen["side"] = max(image.numpy_view().shape[:2])
+            return SimpleNamespace(hand_landmarks=[], handedness=[], hand_world_landmarks=[])
+
+    tracker = HandTracker.__new__(HandTracker)
+    tracker._crop_landmarker, tracker._crop_timestamp_ms = FakeLandmarker(), 0
+    tracker.crop_max_side, tracker.crop_upscale_side = 640, 512
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    tracker.crop_max_zoom = 16.0
+    tracker._detect_crop(frame, (600, 300, 640, 340))                 # a 40 px crop: 12.8x to reach 512
+    assert seen["side"] == 512
+    tracker.crop_max_zoom = 4.0
+    tracker._detect_crop(frame, (600, 300, 640, 340))                 # the old limit
+    assert seen["side"] == 160

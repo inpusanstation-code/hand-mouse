@@ -75,6 +75,109 @@ def load_profile(config_dir: Path, name: str, known_keys: Optional[set] = None) 
             if isinstance(v, (int, float)) and not isinstance(v, bool) and (known_keys is None or k in known_keys)}
 
 
+def load_profile_document(config_dir: Path, name: str) -> Optional[Dict[str, Any]]:
+    """Return the full JSON document of a profile (including `report`, `custom_gestures`, `rollback_points`)."""
+    try:
+        data = json.loads(profile_path(config_dir, name).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def save_profile_adaptation(
+    config_dir: Path,
+    name: str,
+    *,
+    onboarding_adaptation: Optional[Dict[str, Any]] = None,
+    custom_gesture: Optional[Dict[str, Any]] = None,
+    rollback_point: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """Persist Stage 8 user onboarding prototypes/OOD thresholds, custom gestures, and rollback points into a profile."""
+    path = profile_path(config_dir, name)
+    doc = load_profile_document(config_dir, name) or {
+        "name": name.strip(),
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "updates": {},
+        "report": {},
+    }
+    if onboarding_adaptation:
+        report = doc.setdefault("report", {})
+        if isinstance(report, dict):
+            report["onboarding_adaptation"] = dict(onboarding_adaptation)
+    if custom_gesture and isinstance(custom_gesture.get("label"), str):
+        custom_map = doc.setdefault("custom_gestures", {})
+        if isinstance(custom_map, dict):
+            custom_map[str(custom_gesture["label"])] = dict(custom_gesture)
+    if rollback_point:
+        rb_list = doc.setdefault("rollback_points", [])
+        if isinstance(rb_list, list):
+            rb_list.append(dict(rollback_point))
+            if len(rb_list) > 10:
+                del rb_list[:-10]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def apply_profile_adaptation_to_model(
+    config_dir: Path,
+    name: str,
+    spatial_model: Any,
+) -> Dict[str, Any]:
+    """Overlay a profile's Stage 8 onboarding prototypes, OOD thresholds, and custom gestures onto `spatial_model`."""
+    import numpy as np
+
+    doc = load_profile_document(config_dir, name)
+    if not doc or spatial_model is None:
+        return {"applied": False, "reason": "no_profile_or_model"}
+    spatial_model.create_rollback_point(f"pre_profile_{name}")
+    report = doc.get("report") if isinstance(doc.get("report"), dict) else {}
+    onboard = report.get("onboarding_adaptation") if isinstance(report.get("onboarding_adaptation"), dict) else {}
+    updated_protos: List[str] = []
+    if onboard:
+        u_protos = onboard.get("user_prototypes") if isinstance(onboard.get("user_prototypes"), dict) else {}
+        if u_protos and getattr(spatial_model, "prototypes", None) is not None:
+            for cls_name, vec in u_protos.items():
+                if cls_name in spatial_model.base_classes:
+                    idx = spatial_model.base_classes.index(cls_name)
+                    arr = np.asarray(vec, dtype=np.float64).reshape(-1)
+                    if arr.size == spatial_model.hidden_units:
+                        arr = arr / max(float(np.linalg.norm(arr)), 1e-8)
+                        spatial_model.prototypes[idx] = arr
+                        updated_protos.append(cls_name)
+            if updated_protos:
+                spatial_model._prototypes_adapted = True
+                spatial_model.metadata["prototypes_adapted"] = True
+        u_ood = onboard.get("user_ood_thresholds") if isinstance(onboard.get("user_ood_thresholds"), dict) else {}
+        for k, v in u_ood.items():
+            if isinstance(v, (int, float)):
+                spatial_model.ood_thresholds[str(k)] = float(v)
+
+    custom_loaded: List[str] = []
+    custom_map = doc.get("custom_gestures") if isinstance(doc.get("custom_gestures"), dict) else {}
+    for c_label, c_info in custom_map.items():
+        if not isinstance(c_info, dict) or "prototype" not in c_info:
+            continue
+        arr = np.asarray(c_info["prototype"], dtype=np.float64).reshape(-1)
+        if arr.size != spatial_model.hidden_units:
+            continue
+        arr = arr / max(float(np.linalg.norm(arr)), 1e-8)
+        spatial_model.custom_prototypes[str(c_label)] = arr
+        spatial_model._anchor_custom_prototypes[str(c_label)] = arr.copy()
+        if isinstance(c_info.get("ood_threshold"), (int, float)):
+            spatial_model.ood_thresholds[str(c_label)] = float(c_info["ood_threshold"])
+        if str(c_label) not in spatial_model.classes:
+            spatial_model.classes = tuple(list(spatial_model.classes) + [str(c_label)])
+        custom_loaded.append(str(c_label))
+
+    return {
+        "applied": bool(updated_protos or custom_loaded),
+        "profile": name,
+        "updated_prototypes": updated_protos,
+        "custom_gestures": custom_loaded,
+    }
+
+
 def delete_profile(config_dir: Path, name: str) -> bool:
     path = profile_path(config_dir, name)
     if not path.exists():

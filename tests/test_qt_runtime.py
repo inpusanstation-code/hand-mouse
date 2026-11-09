@@ -271,3 +271,44 @@ def test_elbow_pivot_straightens_a_bend_toward_the_hidden_elbow(tmp_path):
     end = rt.mouse.last_screen_pos
     assert end[1] - start[1] > 20 and abs(end[0] - start[0]) < 0.2 * (end[1] - start[1]), (start, end)
 
+
+
+def test_saving_a_recording_does_not_freeze_the_loop_while_the_quality_check_runs(tmp_path, monkeypatch):
+    """The quality check / cleaning / augmentation of a saved recording took ~4 s on the camera thread (docs/far-hand-loss.md)."""
+    import src.training_center as tc
+    from src.recorder import SessionRecorder
+
+    def slow_pipeline(path, config=None, *, training_job=None, epochs=25):
+        time.sleep(1.0)
+        return {"path": str(path), "status": "pass", "score": 0.9, "message": "품질 양호", "retrain_eligible": False,
+                "retrain_started": False}
+
+    monkeypatch.setattr(tc, "run_post_recording_pipeline", slow_pipeline)
+    rt = runtime(tmp_path)
+    rt._rec = SessionRecorder(tmp_path, "guided", {}, now=0.0)
+    began = time.perf_counter()
+    rt._stop_recording(began)
+    assert time.perf_counter() - began < 0.5                       # the loop is free at once
+    assert rt._last_pipeline_result["status"] == "pending"
+    assert "품질 검사 중" in rt._rec_view(began)["sub"]
+    for _ in range(60):
+        if rt._last_pipeline_result["status"] != "pending":
+            break
+        time.sleep(0.1)
+    assert rt._last_pipeline_result["status"] == "pass" and rt._last_pipeline_result["score"] == 0.9
+    assert "품질 양호" in rt._rec_note
+
+
+def test_a_late_quality_result_of_an_older_recording_is_dropped(tmp_path, monkeypatch):
+    import src.training_center as tc
+    from src.recorder import SessionRecorder
+
+    monkeypatch.setattr(tc, "run_post_recording_pipeline",
+                        lambda path, config=None, **kw: (time.sleep(0.5), {"path": str(path), "status": "fail"})[1])
+    rt = runtime(tmp_path)
+    rt._rec = SessionRecorder(tmp_path, "guided", {}, now=0.0)
+    rt._stop_recording(time.perf_counter())
+    rt._pipeline_token += 1                                         # a newer recording was saved meanwhile
+    rt._last_pipeline_result = {"status": "newer"}
+    time.sleep(1.2)
+    assert rt._last_pipeline_result == {"status": "newer"}
