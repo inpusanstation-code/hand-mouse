@@ -25,7 +25,8 @@ from src.online.replay import BalancedBuffer, ReservoirBuffer  # noqa: E402
 from src.online.samples import GUIDED_SCHEDULED, SampleStore  # noqa: E402
 from src.online.trainer import OnlineLearner  # noqa: E402
 
-OUT = ROOT / "logs" / ("online_cl_tune.json" if "--tune" in sys.argv else "online_cl.json")
+TUNE2 = "--tune2" in sys.argv
+OUT = ROOT / "logs" / ("online_cl_tune2.json" if TUNE2 else "online_cl_tune.json" if "--tune" in sys.argv else "online_cl.json")
 ORDER = ["none", "thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "palm_side", "v_sign", "thumbs_up"]
 BASE = 3
 WINDOW, EPOCHS, STREAM_BATCH, STRIDE = 15, 15, 16, 2
@@ -33,6 +34,12 @@ TUNE = "--tune" in sys.argv
 # method: (kind, capacity, buffer, passes, lr)
 TUNED = {"er_res": ("er", 5000, "reservoir", 1, 5e-4), "er_bal": ("er", 5000, "balanced", 1, 5e-4), "derpp_bal": ("derpp", 5000, "balanced", 1, 5e-4),
          "er_bal_x3": ("er", 5000, "balanced", 3, 5e-4), "derpp_bal_x3": ("derpp", 5000, "balanced", 3, 5e-4), "er_bal_x3_lr1e-3": ("er", 5000, "balanced", 3, 1e-3)}
+# 2026-11-10 second round, from the best of the first (ER, balanced, 3 passes, lr 1e-3):
+# (kind, capacity, buffer, passes, lr, alpha, beta, replay_batch). DER++ alpha/beta were never chosen before; beta 0 = DER.
+TUNED2 = {"er_ref": ("er", 5000, "balanced", 3, 1e-3, .5, .5, 32), "er_x5": ("er", 5000, "balanced", 5, 1e-3, .5, .5, 32),
+          "er_rb64": ("er", 5000, "balanced", 3, 1e-3, .5, .5, 64),
+          "derpp_a01_b05": ("derpp", 5000, "balanced", 3, 1e-3, .1, .5, 32), "derpp_a03_b10": ("derpp", 5000, "balanced", 3, 1e-3, .3, 1.0, 32),
+          "derpp_a10_b05": ("derpp", 5000, "balanced", 3, 1e-3, 1.0, .5, 32), "der_a03_b0": ("derpp", 5000, "balanced", 3, 1e-3, .3, 0.0, 32)}
 METHODS = {"none": None, "naive": ("naive", 0), "er_1000": ("er", 1000), "er_5000": ("er", 5000), "derpp_1000": ("derpp", 1000), "derpp_5000": ("derpp", 5000), "joint": None}
 
 
@@ -74,9 +81,14 @@ def run_one(data, base_model, method, fold_sessions, seed, device):
         # nothing learned after the start: the head only knows the first classes, so later classes stay at zero
         report = test_report(model, data, base_classes, test_set, device)
         return {"final": strip(report), "recall": recalls(report, base_classes), "history": [], "seconds": 0.0, "update_ms": None}
-    kind, capacity, store, passes, lr = TUNED[method] if method in TUNED else (*METHODS[method], "reservoir", 1, 5e-4)
+    if method in TUNED2:
+        kind, capacity, store, passes, lr, alpha, beta, replay_batch = TUNED2[method]
+    else:
+        kind, capacity, store, passes, lr = TUNED[method] if method in TUNED else (*METHODS[method], "reservoir", 1, 5e-4)
+        alpha, beta, replay_batch = .5, .5, 32
     buffer = (BalancedBuffer if store == "balanced" else ReservoirBuffer)(capacity, seed=seed) if capacity else None
-    learner = OnlineLearner(model, method=kind, buffer=buffer, device=device, seed=seed, lr=lr, augment=lambda x: augment(x))
+    learner = OnlineLearner(model, method=kind, buffer=buffer, device=device, seed=seed, lr=lr, augment=lambda x: augment(x),
+                            alpha=alpha, beta=beta, replay_batch=replay_batch)
     if buffer is not None:
         # the memory starts with what the base model was trained on, with its logits (it is what would be stored while training it)
         start = windows(set().union(*(by_class[c] for c in base_classes)))
@@ -135,7 +147,7 @@ def main() -> int:
             positions = target_positions(data, base_ids)
             torch.manual_seed(seed)
             base = None
-            for method in (TUNED if TUNE else METHODS):
+            for method in (TUNED2 if TUNE2 else TUNED if TUNE else METHODS):
                 key = f"{method}|seed{seed}|fold{f}"
                 if key in done:
                     continue
