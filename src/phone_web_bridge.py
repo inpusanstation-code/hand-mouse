@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hmac
 import ipaddress
+import secrets
 import socket
 import ssl
 import threading
@@ -203,7 +205,7 @@ MOBILE_CAMERA_HTML = """<!DOCTYPE html>
         return;
       }
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(proto + '//' + location.host + '/ws');
+      ws = new WebSocket(proto + '//' + location.host + '/ws' + location.search);  // carries the pairing key (?k=)
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
@@ -465,6 +467,9 @@ def build_waiting_qr_frame(url: str, width: int = 960, height: int = 540) -> np.
     return canvas
 
 
+MAX_PENDING_COMMANDS = 32
+
+
 class PhoneWebCameraServer:
     """Background HTTPS + WebSocket server receiving live camera frames from a smartphone browser."""
 
@@ -473,7 +478,11 @@ class PhoneWebCameraServer:
         self.host_ip = get_local_ip()
         base_dir = cert_dir or (Path(__file__).resolve().parent.parent / "models" / "certs")
         self.cert_path, self.key_path = ensure_self_signed_cert(base_dir, self.host_ip)
-        self.url = f"https://{self.host_ip}:{self.port}"
+        # A pairing key in the address (and so in the QR code): without it any device on the same network could open
+        # /ws and send its own pictures, which the hand tracker would turn into cursor moves and clicks.
+        self.token = secrets.token_urlsafe(6)
+        self.url = f"https://{self.host_ip}:{self.port}/?k={self.token}"
+        self._sockets = 0
 
         self._latest_frame: Optional[np.ndarray] = None
         self._latest_raw_jpeg: Optional[bytes] = None
@@ -496,12 +505,20 @@ class PhoneWebCameraServer:
         app.router.add_get("/ws", self._handle_ws)
         return app
 
+    def _paired(self, request: web.Request) -> bool:
+        return hmac.compare_digest(str(request.query.get("k", "")), self.token)
+
     async def _handle_index(self, request: web.Request) -> web.Response:
+        if not self._paired(request):
+            return web.Response(status=403, text="Scan the QR code shown on the PC (the address needs its pairing key).")
         return web.Response(text=MOBILE_CAMERA_HTML, content_type="text/html")
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+        if not self._paired(request):
+            return web.Response(status=403, text="pairing key missing")
         ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
         await ws.prepare(request)
+        self._sockets += 1                 # counted: one phone leaving must not show "no phone" while another is on
         self._client_connected = True
         print(f"[PhoneWebBridge] Smartphone connected from {request.remote}")
 
@@ -522,11 +539,13 @@ class PhoneWebCameraServer:
                         cmd = str(payload.get("cmd", "")).strip()
                         if cmd:
                             with self._frame_lock:
-                                self._pending_commands.append(cmd)
+                                self._pending_commands.append(cmd[:64])
+                                del self._pending_commands[:-MAX_PENDING_COMMANDS]   # nothing may grow without end
                     except Exception:
                         pass
         finally:
-            self._client_connected = False
+            self._sockets = max(0, self._sockets - 1)
+            self._client_connected = self._sockets > 0
             self._frame_event.set()
             print("[PhoneWebBridge] Smartphone disconnected")
 

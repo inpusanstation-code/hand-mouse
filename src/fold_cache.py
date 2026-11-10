@@ -16,7 +16,9 @@ from typing import Any, Dict, Iterable, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE_FILES = ("scripts/train_tcn.py", "scripts/train_selected.py", "src/spatial_mlp.py", "src/tcn_features.py", "src/capture_dataset.py",
-              "src/gesture_catalog.py", "src/evaluation.py")
+              "src/gesture_catalog.py", "src/evaluation.py",
+              # these change the frames a fold trains on (cleaning, augmenting, finger reconstruction, the gate's rule)
+              "src/data_quality.py", "src/offline_augment.py", "src/finger_kinematics.py", "src/gesture_gate.py")
 
 
 def code_hash(files: Iterable[str] = CODE_FILES, root: Path = ROOT) -> str:
@@ -34,6 +36,31 @@ def recordings_key(paths: Iterable[Path]) -> list:
     for p in sorted(Path(x) for x in paths):
         st = p.stat()
         out.append([p.name, st.st_size, st.st_mtime_ns])
+    return out
+
+
+def derived_key(paths: Iterable[Path]) -> list:
+    """What is made from the recordings and trained on instead of / next to them: the cleaned copies, the augmented
+    copies and the augmentation settings. Without it a recording cleaned or augmented again kept the same fingerprint
+    and every old fold was reused next to a new final model."""
+    out: list = []
+    folders = sorted({Path(x).parent for x in paths})
+    for folder in folders:
+        for sub in ("cleaned", "augmented"):
+            try:
+                files = sorted(f for f in (folder / sub).iterdir() if f.is_file())
+            except OSError:
+                continue
+            for f in files:
+                st = f.stat()
+                out.append([sub, f.name, st.st_size, st.st_mtime_ns])
+        for name in ("training_selection.json", ".aug_config.json"):
+            try:
+                data = json.loads((folder / name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict):
+                out.append([name, data.get("augmentation", data if name == ".aug_config.json" else None)])
     return out
 
 

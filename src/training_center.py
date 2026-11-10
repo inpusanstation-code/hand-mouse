@@ -400,10 +400,11 @@ def save_training_selection(selection: Dict[str, Any], rec_dir: Path = REC_DIR) 
         "training_mode": mode,
         "training_device": device,
     }
-    _selection_path(folder).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # written whole or not at all: a half-written file read back as "nothing excluded", and the next save kept that
+    path = _selection_path(folder)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def get_training_mode(rec_dir: Path = REC_DIR) -> str:
@@ -413,9 +414,10 @@ def get_training_mode(rec_dir: Path = REC_DIR) -> str:
 
 def set_training_mode(mode: str, rec_dir: Path = REC_DIR) -> str:
     norm = str(mode) if str(mode) in ("fast", "thorough") else "fast"
-    sel = load_training_selection(rec_dir)
-    sel["training_mode"] = norm
-    save_training_selection(sel, rec_dir)
+    with _SELECTION_LOCK:
+        sel = load_training_selection(rec_dir)
+        sel["training_mode"] = norm
+        save_training_selection(sel, rec_dir)
     return norm
 
 
@@ -429,9 +431,10 @@ def set_training_device(device: str, rec_dir: Path = REC_DIR) -> str:
     if raw == "cuda":
         raw = "gpu"
     norm = raw if raw in ("auto", "gpu", "cpu") else "auto"
-    sel = load_training_selection(rec_dir)
-    sel["training_device"] = norm
-    save_training_selection(sel, rec_dir)
+    with _SELECTION_LOCK:
+        sel = load_training_selection(rec_dir)
+        sel["training_device"] = norm
+        save_training_selection(sel, rec_dir)
     return norm
 
 
@@ -464,16 +467,17 @@ def set_augmentation_settings(
     factor: Optional[int] = None,
     rec_dir: Path = REC_DIR,
 ) -> Dict[str, Any]:
-    sel = load_training_selection(rec_dir)
-    aug = dict(sel.get("augmentation") or {})
-    if enabled is not None:
-        aug["enabled"] = bool(enabled)
-    if strength is not None and str(strength) in AUGMENT_STRENGTH_PRESETS:
-        aug["strength"] = str(strength)
-    if factor is not None:
-        aug["factor"] = max(1, min(8, int(factor)))
-    sel["augmentation"] = aug
-    save_training_selection(sel, rec_dir)
+    with _SELECTION_LOCK:
+        sel = load_training_selection(rec_dir)
+        aug = dict(sel.get("augmentation") or {})
+        if enabled is not None:
+            aug["enabled"] = bool(enabled)
+        if strength is not None and str(strength) in AUGMENT_STRENGTH_PRESETS:
+            aug["strength"] = str(strength)
+        if factor is not None:
+            aug["factor"] = max(1, min(8, int(factor)))
+        sel["augmentation"] = aug
+        save_training_selection(sel, rec_dir)
     return get_augmentation_settings(rec_dir)
 
 

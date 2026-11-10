@@ -222,6 +222,7 @@ class QtRuntime:
         self._pinch_since: Optional[float] = None      # thumb + index closed since (shape pinch)
         self._pinch_drag = False
         self._pinch_double = False                     # this press is a double click's second click
+        self._pinch_rejected = False                   # the click check dropped this press while it was held
         self._last_tap: Optional[Tuple[float, Tuple[int, int]]] = None   # (time, screen point) of the last pinch click
         self._vh_last: Optional[Dict[str, Any]] = None  # the last drawn hand, kept a moment when the camera loses the hand
         self._vh_lost: Optional[float] = None
@@ -552,6 +553,13 @@ class QtRuntime:
             if self._guided is not None:
                 self._guided.update(t0, available=False)
             pointer.frame_missing()
+            if self._had_hand or mouse.is_dragging:
+                # the camera stopped (unplugged, the phone app closed) in the middle of a drag: without this the mouse
+                # button stayed down until Pause, because the "hand lost" release below is never reached
+                mouse.close_switcher(confirm=False)
+                mouse.release_all()
+                engine.reset()
+                self._had_hand = False
             time.sleep(.03)
             return
         # The preview is drawn on `frame` itself, later in this step. What keeps pixels for later needs the camera's picture.
@@ -878,7 +886,7 @@ class QtRuntime:
                     self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
                 second = None          # a second tap soon after a click: the double click's second click, at the same point
                 if pinch_evt == "down":
-                    self._pinch_since, self._pinch_drag = t0, False
+                    self._pinch_since, self._pinch_drag, self._pinch_rejected = t0, False, False
                     last = self._last_tap
                     if last is not None and t0 - last[0] <= DOUBLE_TAP:
                         second, self._pinch_since = last[1], None      # no drag and no click on opening from this press
@@ -890,12 +898,14 @@ class QtRuntime:
                         and self._checked(check, t0)):
                     self._pinch_drag = True                # held closed: it is a drag, not a click
                 dragging = self.shape_pinch.closed and self._pinch_drag
-                tap = pinch_evt == "up" and not self._pinch_drag and not self._pinch_double and not self._pinch_triple                     and self._checked(check, t0)
+                tap = pinch_evt == "up" and not self._pinch_drag and not self._pinch_double and not self._pinch_triple \
+                    and not self._pinch_rejected and self._checked(check, t0)
                 drop = pinch_evt == "up" and self._pinch_drag     # the button comes up between the fingers, not at the palm
                 press_t = self._pinch_since                    # when the fingers met (for the click log)
                 if pinch_evt == "up" or (not self.shape_pinch.closed and not self.shape_right.closed):
                     self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
                     self._pinch_triple = False
+                    self._pinch_rejected = False
                 aiming = (self.shape_pinch.closed and not dragging) or tap or self.shape_right.closed
                 nx, ny = self.box_mapper.target(hand.landmarks, ui.virtual_box, now=t0, aim=grip is None,
                                                 hold=command_hold or grip == "scroll" or aiming
@@ -1502,6 +1512,7 @@ class QtRuntime:
         if check is None or check.allows(self._pinch_since, t0):
             return True
         self._pinch_since = None           # this press is done: no drag later, no click on opening
+        self._pinch_rejected = True        # (allows() says yes to a press without a start time, so remember the no)
         self._say("집기로 보이지 않아 클릭하지 않았어요", .8)
         return False
 
@@ -1676,10 +1687,12 @@ class QtRuntime:
             q_msg = pipeline_res.get("message", "")
             note = f"{base_note} · {q_msg}" if q_msg else base_note
         except Exception:
+            # the check itself failed: that is not a pass (it used to be shown as "pass", score 1.0)
+            base_note = f"{base_note} · 품질 검사를 하지 못했어요"
             pipeline_res = {
                 "path": str(path),
-                "status": "pass",
-                "score": 1.0,
+                "status": "warning",
+                "score": None,
                 "frames": frames,
                 "marks": marks,
                 "retrain_eligible": False,

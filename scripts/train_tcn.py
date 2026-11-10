@@ -1373,7 +1373,7 @@ def main(argv: list[str] | None = None) -> int:
                 prob = blend_tcn_and_spatial_probs(prob, classes, sp_prob, fold_spatial.classes)
         return prob
 
-    from src.fold_cache import (PAUSE_EXIT_CODE, FoldCache, clear_pause, code_hash, pause_requested,
+    from src.fold_cache import (PAUSE_EXIT_CODE, FoldCache, clear_pause, code_hash, derived_key, pause_requested,
                                 recordings_key)
     fold_cache = FoldCache(
         ROOT / "logs" / "fold_cache",
@@ -1382,6 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
          "device": opts["effective_device"], "keep_rest": a.keep_rest, "hard_negatives": a.hard_negatives,
          "hn": [a.hard_negative_thr, a.hard_negative_weight, a.hard_negative_rounds],
          "sweep": a.threshold_sweep, "augment": bool(opts["offline_augment"]), "no_cleaned": a.no_cleaned,
+         "derived": derived_key(paths), "split_mode": str(getattr(a, "split_mode", "condition") or "condition"),
          "large_batch": os.environ.get("TCN_LARGE_BATCH") == "1"},
         enabled=a.resume,
     )
@@ -1541,6 +1542,18 @@ def main(argv: list[str] | None = None) -> int:
         device=opts["effective_device"],
         sample_weights=wa,
     )
+    # The backup comes before ANY model file is written. It used to be taken after spatial_mlp.json and
+    # motion_templates.json were already replaced, so a "before-train" backup held the new spatial model next to the
+    # old TCN, and restoring it gave a pair with different classes.
+    before_rep = None
+    backup_folder = None
+    try:
+        from src.training_center import evaluate_training_improvement, model_report
+        before_rep = model_report(a.output_dir / "gesture_tcn.onnx")
+        backup_folder = backup_current_model(model=a.output_dir / "gesture_tcn.onnx",
+                                             backup_dir=a.output_dir / "backups", reason="before-train")
+    except Exception:
+        pass
     # Co-train and save 0-lag 96-dim Spatial MLP (models/spatial_mlp.json)
     spatial_meta = None
     sp_model = None
@@ -1650,14 +1663,6 @@ def main(argv: list[str] | None = None) -> int:
     train_acc = {name: round(float((pred[ya_eval == c] == c).mean()), 3) for c, name in enumerate(classes) if (ya_eval == c).any()}
     a.output_dir.mkdir(parents=True, exist_ok=True)
     out = a.output_dir / "gesture_tcn.onnx"
-    before_rep = None
-    backup_folder = None
-    try:
-        from src.training_center import evaluate_training_improvement, model_report
-        before_rep = model_report(out)
-        backup_folder = backup_current_model(model=out, backup_dir=a.output_dir / "backups", reason="before-train")
-    except Exception:
-        pass
     model = model.cpu().eval()
     emit("substage", text="최종 TCN 모델을 ONNX 파일로 내보내는 중…")
     torch.onnx.export(model, torch.zeros(1, WINDOW, FEATURES), str(out), input_names=["x"], output_names=["logits"],

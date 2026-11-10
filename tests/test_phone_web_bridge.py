@@ -174,3 +174,33 @@ def test_phone_web_camera_server_lazy_jpeg_decoding(tmp_path: Path):
     assert ok_dc is True
     assert frame_dc.shape == (540, 960, 3)
 
+
+
+def test_only_the_address_with_the_pairing_key_is_served(tmp_path):
+    """Another device on the same network must not be able to open the page or the frame socket."""
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from src.phone_web_bridge import PhoneWebCameraServer
+
+    server = PhoneWebCameraServer(port=18999, cert_dir=tmp_path)
+    assert server.url.endswith("/?k=" + server.token) and len(server.token) >= 8
+
+    async def run():
+        async with TestClient(TestServer(server.create_app())) as client:
+            assert (await client.get("/")).status == 403
+            assert (await client.get("/", params={"k": "wrong"})).status == 403
+            assert (await client.get("/", params={"k": server.token})).status == 200
+            assert (await client.get("/ws")).status == 403
+            first = await client.ws_connect("/ws?k=" + server.token)
+            second = await client.ws_connect("/ws?k=" + server.token)
+            await second.close()
+            await asyncio.sleep(.05)
+            assert server._client_connected          # one phone leaving does not hide the other
+            for i in range(100):
+                await first.send_str('{"cmd": "x%d"}' % i)
+            await first.close()
+            await asyncio.sleep(.05)
+            assert not server._client_connected
+            assert len(server.pop_commands()) <= 32
+
+    asyncio.run(run())

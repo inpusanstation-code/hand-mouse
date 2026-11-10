@@ -85,8 +85,8 @@ def run(args, training):
             )
             # Finished evaluation folds are kept per gesture (docs/training-resume.md): a pause or an unexpected stop
             # costs at most the fold that was running.
-            from src.fold_cache import (PAUSE_EXIT_CODE, FoldCache, clear_pause, code_hash, pause_requested,
-                                        recordings_key)
+            from src.fold_cache import (PAUSE_EXIT_CODE, FoldCache, clear_pause, code_hash, derived_key,
+                                        pause_requested, recordings_key)
             code_key, rec_key = code_hash(), recordings_key(paths)
             caches = {}
             for label in labels:
@@ -95,7 +95,8 @@ def run(args, training):
                     {"kind": "selected", "label": label, "recordings": rec_key, "code": code_key,
                      "seed": getattr(args, "seed", 0), "thr": args.thr, "k": args.k, "epochs": opts["epochs"],
                      "stride": opts["window_stride"], "device": opts["effective_device"],
-                     "augment": bool(opts["offline_augment"]), "no_cleaned": bool(getattr(args, "no_cleaned", False))},
+                     "augment": bool(opts["offline_augment"]), "no_cleaned": bool(getattr(args, "no_cleaned", False)),
+                     "derived": derived_key(paths)},
                     enabled=bool(getattr(args, "resume", False)),
                 )
             if getattr(args, "resume", False):

@@ -93,6 +93,7 @@ class SampleStore:
         self._lock = threading.RLock()
         self._items: Dict[str, Sample] = {}
         self._sizes: Dict[str, int] = {}
+        self._gone: set = set()          # ids this store removed (never taken back from the index on disk)
         self.samples_dir.mkdir(parents=True, exist_ok=True)
         self._load()
 
@@ -114,7 +115,33 @@ class SampleStore:
     def _path(self, sample_id: str) -> Path:
         return self.samples_dir / f"{sample_id}.npz"
 
+    def _sync_with_disk(self) -> None:
+        """Other stores write the same index (the collector, a registration, the update job each open their own). A
+        rewrite from this store's memory alone dropped what they had added since it was loaded: a newly registered
+        gesture's samples vanished from the index on the next F correction, while their files stayed on disk."""
+        try:
+            with open(self.index_path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                sample = Sample.from_dict(json.loads(line))
+            except (ValueError, TypeError):
+                continue
+            sid = sample.sample_id
+            if sid in self._items or sid in self._gone:
+                continue
+            path = self._path(sid)
+            if path.is_file():
+                self._items[sid] = sample
+                self._sizes[sid] = path.stat().st_size
+        for sid in [i for i in self._items if not self._path(i).is_file()]:    # removed by another store
+            self._items.pop(sid, None)
+            self._sizes.pop(sid, None)
+
     def _rewrite_index(self) -> None:
+        self._sync_with_disk()
         fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -195,6 +222,7 @@ class SampleStore:
             return sample
 
     def _remove(self, sample_id: str) -> None:
+        self._gone.add(sample_id)
         self._items.pop(sample_id, None)
         self._sizes.pop(sample_id, None)
         try:

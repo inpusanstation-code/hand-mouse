@@ -12,7 +12,8 @@ if errorlevel 1 call :install_uv
 if errorlevel 1 exit /b 1
 
 echo [%APP%] Preparing Python and packages (the first run takes a few minutes)...
-uv sync
+rem --inexact: keep the optional sets (qt, train, llm) that studio.bat installed; a bare sync removes them
+uv sync --inexact
 if errorlevel 1 goto fail
 
 ".venv\Scripts\python.exe" main.py %*

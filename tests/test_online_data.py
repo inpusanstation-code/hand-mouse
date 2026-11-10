@@ -342,3 +342,21 @@ def test_correction_choices_start_with_nothing_and_have_each_label_once():
     labels = [c["label"] for c in choices]
     assert labels[0] == "none" and len(labels) == len(set(labels)) and "thumb_index" in labels
     assert set(ACTION_TO_LABEL.values()) <= set(labels)
+
+
+def test_two_stores_on_one_folder_do_not_drop_each_others_samples(tmp_path):
+    """The collector, a registration and the update job each open their own store. One rewriting the index from its own
+    memory dropped what another had added since (a registered gesture's samples, on the next F correction)."""
+    from src.online.samples import USER_CONFIRMED, USER_CORRECTION, SampleStore
+    frame = {"t": 0.0, "lm": [[.5, .5, 0.0]] * 21, "world": [[0.0, 0.0, 0.0]] * 21}
+    frames = [dict(frame, t=i / 30) for i in range(5)]
+    collector = SampleStore(tmp_path)
+    mine = collector.add_frames(frames, session="s")
+    registration = SampleStore(tmp_path)
+    added = registration.add_frames(frames, label="주먹", label_source=USER_CONFIRMED, session="s", approved=True)
+    collector.set_label(mine.sample_id, "none", USER_CORRECTION)          # rewrites the index
+    again = SampleStore(tmp_path)
+    assert {s.sample_id for s in again.samples()} == {mine.sample_id, added.sample_id}
+    registration.delete([added.sample_id])
+    collector.set_label(mine.sample_id, "none", USER_CORRECTION)          # a sample removed elsewhere stays removed
+    assert {s.sample_id for s in SampleStore(tmp_path).samples()} == {mine.sample_id}
