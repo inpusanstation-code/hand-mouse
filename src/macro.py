@@ -137,19 +137,33 @@ def _paste(text: str) -> bool:
     import ctypes
     from ctypes import wintypes
     u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    # every handle needs its argtypes: without them ctypes passes a Python int as a 32-bit C int, and a 64-bit
+    # HGLOBAL above 4 GB is cut off (GlobalLock then returns NULL and the copy crashes)
+    k32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
     k32.GlobalAlloc.restype = wintypes.HGLOBAL
+    k32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
     k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+    k32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+    u32.OpenClipboard.argtypes = (wintypes.HWND,)
     u32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    u32.SetClipboardData.restype = wintypes.HANDLE
     data = text.encode("utf-16-le") + b"\0\0"
     if not u32.OpenClipboard(None):
         return False
     try:
         u32.EmptyClipboard()
         h = k32.GlobalAlloc(0x0042, len(data))
-        p = k32.GlobalLock(h)
+        p = k32.GlobalLock(h) if h else None
+        if not p:
+            if h:
+                k32.GlobalFree(h)
+            return False
         ctypes.memmove(p, data, len(data))
         k32.GlobalUnlock(h)
-        u32.SetClipboardData(13, h)      # CF_UNICODETEXT
+        if not u32.SetClipboardData(13, h):      # CF_UNICODETEXT; on failure the memory is still ours
+            k32.GlobalFree(h)
+            return False
     finally:
         u32.CloseClipboard()
     import pyautogui

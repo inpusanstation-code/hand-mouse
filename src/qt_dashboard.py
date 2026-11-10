@@ -3096,6 +3096,9 @@ class QtDashboard(QObject):
         if not done:
             self._llm_set(message="선택한 연결이 없어요.")
             return
+        if all(line.startswith("저장하지 못함") for line in done):   # nothing was saved: keep the proposals on screen
+            self._llm_set(message=" / ".join(done))
+            return
         self.llm_result = {}
         self.online_commands.append(("seq_reload",))    # a new sequence: the runtime reads the file again
         self.drawShapesChanged.emit()

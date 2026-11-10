@@ -382,6 +382,67 @@ def check(answer: Dict[str, Any], gestures: Sequence[Dict[str, Any]]) -> Dict[st
     return {"summary": str(answer.get("summary", ""))[:500], "proposals": rows, "questions": questions}
 
 
+def _apply_row(r: Dict[str, Any], registry, request: str, when: str, sequences, paths,
+               done: List[str], log: List[Dict[str, Any]]) -> None:
+    key, app = r["gesture_key"], r.get("app_match", "")
+    entry = {"time": when, "request": request[:300], "gesture_key": key, "gesture_name": r["gesture_name"],
+             "app_match": app, "action_type": r["action_type"], "action_value": r["action_value"],
+             "enabled": bool(r["enabled"]), "after": r["after"], "steps": r.get("steps") or []}
+    if r.get("new_sequence"):
+        from src.sequence import SequenceStore
+        store = sequences if sequences is not None else SequenceStore()
+        seq_key = store.add(r.get("new_name", ""), r["new_sequence"])
+        registry.set_binding(seq_key, r["action_type"], r["action_value"], track="sequence")
+        name = store.items[seq_key]["name"]
+        done.append(f"새 이어 하기 '{name}' 등록 → {r['after']}")
+        log.append({**entry, "gesture_key": seq_key, "gesture_name": name, "created": True, "sequence": True,
+                    "before": {}, "before_text": "(새로 만듦)"})
+        return
+    if r.get("new_posture") and str(r.get("new_trigger", "")).startswith(("draw_", "rotate_")):
+        from src.path_gesture import PathStore
+        store = paths if paths is not None else PathStore()
+        path_key = store.add(r.get("new_name", ""), r["new_posture"], r["new_trigger"])
+        registry.set_binding(path_key, r["action_type"], r["action_value"], track="path")
+        name = store.items[path_key]["name"]
+        done.append(f"새 손 모양 그리기 '{name}' 등록 → {r['after']}")
+        log.append({**entry, "gesture_key": path_key, "gesture_name": name, "created": True, "path": True,
+                    "before": {}, "before_text": "(새로 만듦)"})
+        return
+    if r.get("new_posture"):
+        trigger = r.get("new_trigger") or "hold"
+        if trigger.startswith("motion_"):
+            comp = registry.register_motion_gesture("", r.get("new_name", ""), r["new_posture"], trigger[7:],
+                                                    r["action_type"], r["action_value"])
+            done.append(f"새 모션 '{comp['name']}' 등록 → {r['after']} (모션 모드에서)")
+            log.append({**entry, "gesture_key": comp["key"], "gesture_name": comp["name"], "created": True,
+                        "motion": True, "before": {}, "before_text": "(새로 만듦)"})
+            return
+        comp = registry.register_composite_gesture("", r.get("new_name", ""), r["new_posture"], trigger,
+                                                   r["action_type"], r["action_value"],
+                                                   hold_seconds=(1.0 if r["new_posture"] in ("open_hand", "fist", "thumb_tucked") else HOLD_SECONDS) if trigger == "hold" else .55)
+        done.append(f"새 동작 '{comp['name']}' 등록 → {r['after']}")
+        log.append({**entry, "gesture_key": comp["key"], "gesture_name": comp["name"], "created": True,
+                    "before": {}, "before_text": "(새로 만듦)"})
+        return
+    current = registry.get_binding(key)
+    if app:
+        before = next(({"action_type": ov.get("action_type"), "action_value": ov.get("action_value")}
+                       for ov in current.get("app_overrides") or []
+                       if str(ov.get("app_match", "")).lower() == app.lower()), {})
+        registry.add_app_override(key, app, r["action_type"], r["action_value"])
+        done.append(f"{r['gesture_name']} · {app}에서 → {r['after']}")
+    else:
+        before = {"action_type": current.get("action_type"), "action_value": current.get("action_value"),
+                  "enabled": bool(current.get("enabled", True))}
+        registry.set_binding(key, r["action_type"], r["action_value"], enabled=bool(r["enabled"]),
+                             track=current.get("track"))
+        done.append(f"{r['gesture_name']} → {r['after']}")
+    entry["before"] = before
+    entry["before_text"] = (format_action_badge(str(before.get("action_type", "")), str(before.get("action_value", "")))
+                            if before else "(없음)")
+    log.append(entry)
+
+
 def apply(rows: Sequence[Dict[str, Any]], registry, history: Optional["History"] = None, request: str = "",
           sequences=None, paths=None) -> List[str]:
     """Save the ticked, valid proposals. Returns a Korean line per saved change; each is also written to `history`
@@ -392,63 +453,12 @@ def apply(rows: Sequence[Dict[str, Any]], registry, history: Optional["History"]
     for r in rows:
         if not (r.get("ok") and r.get("checked")):
             continue
-        key, app = r["gesture_key"], r.get("app_match", "")
-        entry = {"time": when, "request": request[:300], "gesture_key": key, "gesture_name": r["gesture_name"],
-                 "app_match": app, "action_type": r["action_type"], "action_value": r["action_value"],
-                 "enabled": bool(r["enabled"]), "after": r["after"], "steps": r.get("steps") or []}
-        if r.get("new_sequence"):
-            from src.sequence import SequenceStore
-            store = sequences if sequences is not None else SequenceStore()
-            seq_key = store.add(r.get("new_name", ""), r["new_sequence"])
-            registry.set_binding(seq_key, r["action_type"], r["action_value"], track="sequence")
-            name = store.items[seq_key]["name"]
-            done.append(f"새 이어 하기 '{name}' 등록 → {r['after']}")
-            log.append({**entry, "gesture_key": seq_key, "gesture_name": name, "created": True, "sequence": True,
-                        "before": {}, "before_text": "(새로 만듦)"})
-            continue
-        if r.get("new_posture") and str(r.get("new_trigger", "")).startswith(("draw_", "rotate_")):
-            from src.path_gesture import PathStore
-            store = paths if paths is not None else PathStore()
-            path_key = store.add(r.get("new_name", ""), r["new_posture"], r["new_trigger"])
-            registry.set_binding(path_key, r["action_type"], r["action_value"], track="path")
-            name = store.items[path_key]["name"]
-            done.append(f"새 손 모양 그리기 '{name}' 등록 → {r['after']}")
-            log.append({**entry, "gesture_key": path_key, "gesture_name": name, "created": True, "path": True,
-                        "before": {}, "before_text": "(새로 만듦)"})
-            continue
-        if r.get("new_posture"):
-            trigger = r.get("new_trigger") or "hold"
-            if trigger.startswith("motion_"):
-                comp = registry.register_motion_gesture("", r.get("new_name", ""), r["new_posture"], trigger[7:],
-                                                        r["action_type"], r["action_value"])
-                done.append(f"새 모션 '{comp['name']}' 등록 → {r['after']} (모션 모드에서)")
-                log.append({**entry, "gesture_key": comp["key"], "gesture_name": comp["name"], "created": True,
-                            "motion": True, "before": {}, "before_text": "(새로 만듦)"})
-                continue
-            comp = registry.register_composite_gesture("", r.get("new_name", ""), r["new_posture"], trigger,
-                                                       r["action_type"], r["action_value"],
-                                                       hold_seconds=(1.0 if r["new_posture"] in ("open_hand", "fist", "thumb_tucked") else HOLD_SECONDS) if trigger == "hold" else .55)
-            done.append(f"새 동작 '{comp['name']}' 등록 → {r['after']}")
-            log.append({**entry, "gesture_key": comp["key"], "gesture_name": comp["name"], "created": True,
-                        "before": {}, "before_text": "(새로 만듦)"})
-            continue
-        current = registry.get_binding(key)
-        if app:
-            before = next(({"action_type": ov.get("action_type"), "action_value": ov.get("action_value")}
-                           for ov in current.get("app_overrides") or []
-                           if str(ov.get("app_match", "")).lower() == app.lower()), {})
-            registry.add_app_override(key, app, r["action_type"], r["action_value"])
-            done.append(f"{r['gesture_name']} · {app}에서 → {r['after']}")
-        else:
-            before = {"action_type": current.get("action_type"), "action_value": current.get("action_value"),
-                      "enabled": bool(current.get("enabled", True))}
-            registry.set_binding(key, r["action_type"], r["action_value"], enabled=bool(r["enabled"]),
-                                 track=current.get("track"))
-            done.append(f"{r['gesture_name']} → {r['after']}")
-        entry["before"] = before
-        entry["before_text"] = (format_action_badge(str(before.get("action_type", "")), str(before.get("action_value", "")))
-                                if before else "(없음)")
-        log.append(entry)
+        # one row that cannot be saved (e.g. it clashes with a sequence that is switched off, which the check does not
+        # see) must not lose the history of the rows saved before it: they could then not be undone
+        try:
+            _apply_row(r, registry, request, when, sequences, paths, done, log)
+        except (ValueError, KeyError, OSError) as exc:
+            done.append(f"저장하지 못함: {r.get('gesture_name', r.get('gesture_key', ''))} ({exc})")
     if history is not None:
         history.add(log)
     return done

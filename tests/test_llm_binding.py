@@ -454,3 +454,29 @@ def test_the_ai_is_told_not_to_add_steps_nobody_asked_for():
     """2026-11-10: '구글 로그인 페이지로 이동' came back with 'wait 2 s, Win+Up' added."""
     text = lb.system_prompt([])
     assert "no extra steps" in text and "ONE launch_app" in text
+
+
+def test_a_row_that_cannot_be_saved_does_not_lose_the_history_of_the_rows_before_it(tmp_path):
+    """A new sequence that clashes with one that is switched off passes the check (the list has only the enabled ones)
+    and fails on saving. The row before it was already saved: it must still be in the history, to be undone."""
+    import src.action_bindings as ab
+    import src.llm_binding as lb
+    from src.sequence import SequenceStore
+    reg = ab.ActionBindingRegistry(tmp_path / "b.json")
+    seqs = SequenceStore(tmp_path / "s.json")
+    seqs.set_enabled(seqs.add("old", ["v_sign", "fist"]), False)
+    gestures = lb.gesture_list(reg)
+    res = lb.check({"proposals": [
+        {"gesture_key": "thumb_ring", "action_type": "hotkey", "action_value": "ctrl+t"},
+        {"gesture_key": lb.NEW, "new_sequence": ["v_sign", "fist"], "action_type": "hotkey", "action_value": "ctrl+w"},
+    ]}, gestures)
+    rows = [{**r, "checked": True} for r in res["proposals"]]
+    assert all(r["ok"] for r in rows)
+    history = lb.History(tmp_path / "h.json", tmp_path / "s.json")
+    done = lb.apply(rows, reg, history, "x", sequences=seqs)
+    assert len(done) == 2 and done[1].startswith("저장하지 못함")
+    assert reg.get_binding("thumb_ring")["action_value"] == "ctrl+t"
+    saved = history.load()
+    assert [e["gesture_key"] for e in saved] == ["thumb_ring"]
+    history.undo(0, reg)
+    assert reg.get_binding("thumb_ring")["action_value"] == "right_click"
