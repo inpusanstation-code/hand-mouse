@@ -227,3 +227,30 @@ def test_scroll_releases_when_tips_separate_even_if_a_joint_stays_close():
 def test_desktop_does_not_fire_during_slow_palm_drift():
     out, _ = run(PinchFeature(), [H.desktop_hand(shift=(.00145 * k, 0)) for k in range(48)], t0=5)
     assert THUMB_TUCKED_OPEN not in gestures(out, "tap")
+
+
+# ----------------------------------------------------------------------------- drag_on_move (testing-mlp d1713f2, off by default)
+def test_drag_on_move_is_off_by_default_so_a_moving_press_waits_for_the_long_press():
+    assert SETTINGS["pinch.drag_on_move"] is False
+    out, _ = run(PinchFeature(), [H.middle_pinch(shift=(0.01 * k, 0)) for k in range(8)])
+    assert not [i for i in out if i.gesture == DRAG]
+
+
+def test_drag_on_move_starts_the_drag_as_soon_as_the_press_moves():
+    on = {"pinch.drag_on_move": True}
+    out, t = run(PinchFeature(), [H.middle_pinch(shift=(0.01 * k, 0)) for k in range(8)], settings=on)
+    drag = [i for i in out if i.gesture == DRAG]
+    assert drag and drag[0].phase == "begin"
+    f = PinchFeature()
+    still, _ = run(f, [H.middle_pinch()] * 8, settings=on)        # a still press is still a click, not a drag
+    assert gestures(still, "tap") == [THUMB_MIDDLE] and not [i for i in still if i.gesture == DRAG]
+
+
+def test_drag_on_move_drag_ends_once_after_the_hand_opens():
+    on = {"pinch.drag_on_move": True}
+    f = PinchFeature()
+    out, t = run(f, [H.middle_pinch(shift=(0.01 * k, 0)) for k in range(8)], settings=on)
+    out2, _ = run(f, [H.open_hand()] * 20, t0=t, settings=on)
+    phases = [i.phase for i in out2 if i.gesture == DRAG]
+    assert phases.count("end") == 1
+    check_pairs(out + out2)

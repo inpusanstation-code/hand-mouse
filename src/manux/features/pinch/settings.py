@@ -91,6 +91,11 @@ THRESHOLDS: Dict[str, Any] = {
     "long_press_drag": True,
     "long_press_time": 1.0,
     "long_press_drag_multiplier": 15.0,
+    # drag the way testing-mlp (d1713f2) did: moving the thumb+middle press starts the drag at once, the middle
+    # press wins over an index brush, and the release is looser. Off keeps the preview (#136) behaviour.
+    "drag_on_move": False,
+    "drag_move_distance": .006,
+    "drag_move_min_time": 0.0,
     # cursor
     "approach_freeze_distance": .045,
     "cursor_anchor_ratio": .5,
