@@ -29,10 +29,12 @@ echo   - Train button: Instant 4s Spatial MLP training
 echo.
 
 call uv run python -m manux
+set "APP_EXIT=%errorlevel%"
 
-if errorlevel 1 (
+rem Closing the app closes this window too. Only on an error the window stays so the message can be read.
+if not "%APP_EXIT%"=="0" (
     echo.
-    echo [Notice] App exited with error code %errorlevel%.
+    echo [Notice] App exited with error code %APP_EXIT%. Press any key to close.
+    pause > nul
 )
-
-pause
+endlocal & exit %APP_EXIT%
