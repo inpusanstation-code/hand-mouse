@@ -28,11 +28,27 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 
 VK = {
-    "f4": 0x73,
-    "alt": 0x12, "ctrl": 0x11, "shift": 0x10, "win": 0x5B, "tab": 0x09, "esc": 0x1B,
-    "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "d": 0x44,
+    "alt": 0x12, "ctrl": 0x11, "shift": 0x10, "win": 0x5B,
+    **{c: ord(c.upper()) for c in "abcdefghijklmnopqrstuvwxyz0123456789"},
+    **{f"f{n}": 0x6F + n for n in range(1, 25)},
+    "enter": 0x0D, "space": 0x20, "backspace": 0x08, "tab": 0x09, "esc": 0x1B, "capslock": 0x14,
+    "insert": 0x2D, "delete": 0x2E, "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
+    "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+    "printscreen": 0x2C, "scrolllock": 0x91, "numlock": 0x90, "apps": 0x5D, "pause": 0x13,
+    "hangul": 0x15, "hanja": 0x19,
+    "volumemute": 0xAD, "volumedown": 0xAE, "volumeup": 0xAF, "medianext": 0xB0, "mediaprev": 0xB1,
+    "mediastop": 0xB2, "playpause": 0xB3,
+    "browserback": 0xA6, "browserforward": 0xA7, "browserrefresh": 0xA8, "browserhome": 0xAC,
+    "semicolon": 0xBA, "equal": 0xBB, "comma": 0xBC, "minus": 0xBD, "period": 0xBE, "slash": 0xBF,
+    "backquote": 0xC0, "bracketleft": 0xDB, "backslash": 0xDC, "bracketright": 0xDD, "quote": 0xDE,
+    **{f"num{n}": 0x60 + n for n in range(10)},
+    "multiply": 0x6A, "add": 0x6B, "subtract": 0x6D, "decimal": 0x6E, "divide": 0x6F,
 }
-EXTENDED = frozenset({"left", "up", "right", "down", "win"})
+# keys Windows wants with the extended flag (arrows and the editing block, Win/Menu, media and browser keys)
+EXTENDED = frozenset({"left", "up", "right", "down", "win", "apps", "insert", "delete", "home", "end", "pageup",
+                      "pagedown", "printscreen", "divide", "numlock", "volumemute", "volumedown", "volumeup",
+                      "medianext", "mediaprev", "mediastop", "playpause", "browserback", "browserforward",
+                      "browserrefresh", "browserhome"})
 _BUTTON_FLAGS = {
     ("left", True): MOUSEEVENTF_LEFTDOWN, ("left", False): MOUSEEVENTF_LEFTUP,
     ("right", True): MOUSEEVENTF_RIGHTDOWN, ("right", False): MOUSEEVENTF_RIGHTUP,

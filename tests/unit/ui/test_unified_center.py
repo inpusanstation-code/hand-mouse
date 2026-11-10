@@ -91,7 +91,13 @@ def test_register_a_gesture_from_the_pose_page_without_qml_errors(tmp_path):
         assert b.window.findChild(QQuickItem, "customPoseProgress").isVisible()
         b.cancelCustomPose(); runtime._drain_runtime_requests(); b.poll(); QTest.qWait(20)
         assert b.customPoseSession == {} and start.isVisible()
-        assert b.customPoseCommandLabels[0].startswith("명령 없음") and len(b.customPoseCommandIds) == len(b.customPoseCommandLabels)
+        presets = b.customPosePresets
+        assert presets[0]["label"].startswith("명령 없음") and presets[-1]["keys"] == "*" and len(presets) > 60
+        from manux.actions.keys import parse_combo
+        for p in presets[1:-1]:
+            if p["action"] == "keys.press":
+                parse_combo(p["keys"])                                      # every preset is a valid, allowed combination
+        assert any(p["keys"].startswith("win") for p in presets)
         assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Cannot assign", "Binding loop"))], messages
     finally:
         qInstallMessageHandler(None)
@@ -173,5 +179,64 @@ def test_checking_a_task_keeps_the_list_where_it_was(tmp_path):
         assert (key in b.training_selected) != was
         assert abs(tasks.property("contentY") - before) < 5, (before, tasks.property("contentY"))
     finally:
+        b.close()
+        runtime.stop()
+
+
+
+def test_a_registered_gesture_gets_a_preset_or_a_typed_win_combination_on_screen(tmp_path):
+    from PySide6.QtCore import qInstallMessageHandler
+    from manux.desktop import build, CustomPoses
+    from types import SimpleNamespace
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "features"))
+    from test_custom_pose import ASPECT, ROCK, demonstrate
+    messages = []
+    qInstallMessageHandler(lambda mode, ctx, text: messages.append(text))
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    runtime.custom_poses = CustomPoses(tmp_path / "cp")
+    runtime.custom_poses.start("락", ASPECT)
+    demonstrate(runtime.custom_poses.session, ROCK)
+    runtime.custom_poses.approve()
+    service = TrainingCenterService(tmp_path/'config', tmp_path/'data', tmp_path/'recordings', specs=training_specs())
+    service.configure("synthetic")
+    b = Bridge(runtime, settings, tmp_path/'config', services={"training_center": service}, layout="studio")
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        b.poll()
+        assert QMetaObject.invokeMethod(b.window.findChild(QObject, "openLearningCenter"), "click")
+        popup = b.window.findChild(QObject, "studioDataManagement")
+        popup.setProperty("pageIndex", 5); QTest.qWait(60)
+        def find(name):
+            def walk(item):
+                for child in item.childItems():
+                    if child.objectName() == name:
+                        return child
+                    hit = walk(child)
+                    if hit is not None:
+                        return hit
+            return walk(b.window.contentItem()) or next((w for w in [b.window.findChild(QQuickItem, name)] if w), None)
+        select = find("customPoseAction-slot1")
+        assert select is not None and select.property("currentIndex") == 0
+        copy = next(i for i, p in enumerate(b.customPosePresets) if p["keys"] == "ctrl+c")
+        b.setCustomPoseAction("slot1", "keys.press", "ctrl+c")
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(30)
+        assert b.customPoses[0]["keys"] == "ctrl+c" and find("customPoseAction-slot1").property("currentIndex") == copy
+        b.setCustomPoseAction("slot1", "keys.press", "win + e")                 # typed, but it is a preset
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(30)
+        explorer = next(i for i, p in enumerate(b.customPosePresets) if p["keys"] == "win+e")
+        assert b.customPoses[0]["keys_label"] == "Win + E" and find("customPoseAction-slot1").property("currentIndex") == explorer
+        b.setCustomPoseAction("slot1", "keys.press", "Shift+Win+N")             # not in the list
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(30)
+        assert b.customPoses[0]["keys"] == "shift+win+n"
+        assert find("customPoseAction-slot1").property("currentIndex") == len(b.customPosePresets) - 1   # "직접 입력"
+        assert find("customPoseKeys-slot1").isVisible()
+        b.setCustomPoseAction("slot1", "keys.press", "alt+f4")
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(30)
+        assert b.customPoses[0]["keys"] == "shift+win+n" and "위험" in b.customPoseMessage
+        assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Cannot assign", "Binding loop"))], messages
+    finally:
+        qInstallMessageHandler(None)
         b.close()
         runtime.stop()

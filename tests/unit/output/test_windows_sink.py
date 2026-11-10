@@ -173,7 +173,8 @@ def test_catalog_actions_execute_at_their_owner_with_allowed_phases(action):
     if action == "mouse.move":
         s.apply(cmd(action, "hold", (.5, .5), 0.0))
     for i, phase in enumerate(phases):
-        r = s.apply(cmd(action, phase, (.5, .5 + .01 * i), 0.1 + i * FRAME))
+        extra = {"keys": "ctrl+c"} if action == "keys.press" else {}       # keys.press needs its combination
+        r = s.apply(cmd(action, phase, (.5, .5 + .01 * i), 0.1 + i * FRAME, **extra))
         if action == "control.toggle":
             # Engine-owned action must never be executed as a Windows shortcut or mouse event.
             assert not r.accepted and r.reason == "unsupported"
@@ -326,3 +327,32 @@ def test_a_deferred_drag_that_never_pressed_releases_nothing():
     s.apply(cmd("mouse.drag", "end", (.5, .5), 0.1))
     assert s.backend.buttons_down == set() and not s.dragging
     assert s.backend.clicks() == ["left"]
+
+
+
+# ------------------------------------------------------------------ keys.press (registered gestures -> any shortcut)
+@pytest.mark.parametrize(("text", "sent"), [
+    ("ctrl+c", ("ctrl", "c")), ("Win + Shift + S", ("shift", "win", "s")), ("win", ("win",)),
+    ("shift+ctrl+t", ("ctrl", "shift", "t")), ("ctrl++", ("ctrl", "equal")), ("f5", ("f5",)),
+    ("playpause", ("playpause",)), ("ctrl+win+right", ("ctrl", "win", "right")), ("windows+e", ("win", "e")),
+])
+def test_keys_press_sends_the_combination_and_lets_go(text, sent):
+    s = sink()
+    assert s.apply(cmd("keys.press", "tap", gesture="custom_pose.slot1", keys=text)).accepted
+    downs = [e[1] for e in s.backend.events if e[0] == "key" and e[2]]
+    ups = [e[1] for e in s.backend.events if e[0] == "key" and not e[2]]
+    assert tuple(downs) == sent and tuple(ups) == tuple(reversed(sent)) and s.backend.keys_down == set()
+
+
+@pytest.mark.parametrize("text", ["alt+f4", "ctrl+w", "ctrl+alt+delete", "win+l", "delete", "shift+del", "pause",
+                                  "ctrl+pause", "", "ctrl+banana", "ctrl+c+c", "a+b+c+d"])
+def test_keys_press_refuses_dangerous_unknown_or_empty_combinations(text):
+    s = sink()
+    r = s.apply(cmd("keys.press", "tap", gesture="custom_pose.slot1", keys=text))
+    assert not r.accepted and r.reason.startswith("error:") and s.backend.events == []
+
+
+def test_every_key_name_has_a_windows_code():
+    from manux.actions.keys import KEY_NAMES
+    from manux.output.windows import win32
+    assert set(win32.VK) == set(KEY_NAMES) and len(set(win32.VK.values())) == len(win32.VK)

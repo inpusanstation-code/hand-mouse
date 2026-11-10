@@ -147,7 +147,8 @@ def test_register_bind_and_run_through_the_real_engine(tmp_path):
         cp.bind("slot1", "mouse.drag")                            # only tap commands
     assert (tmp_path / "custom_poses" / "memory.json").is_file() and list((tmp_path / "custom_poses" / "demos").glob("*.json"))
     again = CustomPoses(tmp_path / "custom_poses")                # survives a restart
-    assert again.view()["poses"] == [{"slot": "slot1", "name": "락", "demos": 5, "action": "nav.back"}]
+    assert again.view()["poses"] == [{"slot": "slot1", "name": "락", "demos": 5, "action": "nav.back", "keys": "",
+                                      "keys_label": ""}]
     engine = build_engine(Settings(schema()), "pinch")
     try:
         again.attach(engine)
@@ -173,3 +174,44 @@ def test_a_failed_registration_is_dropped_with_a_reason(tmp_path):
     failed = [cp.step(k / 30, lm, world) for k in range(30 * 30)]
     assert failed.count(True) == 1 and cp.session is None and "짧" in cp.message
     assert not cp.step(31.0, lm, world)                          # nothing running any more
+
+
+
+def test_a_registered_gesture_can_press_any_key_combination_including_win(tmp_path):
+    from manux.app import build_engine, schema
+    from manux.core.contracts import OutputTarget
+    from manux.desktop import CustomPoses
+    from manux.output.windows import FakeBackend, WindowsOutputConfig, WindowsOutputSink
+    from manux.platform.monitors import ScreenLayout
+    from manux.settings.store import Settings
+    cp = CustomPoses(tmp_path / "cp")
+    cp.start("캡처", ASPECT)
+    demonstrate(cp.session, ROCK)
+    cp.approve()
+    cp.bind("slot1", "keys.press", "Win + Shift + S")
+    row = cp.view()["poses"][0]
+    assert row["action"] == "keys.press" and row["keys"] == "shift+win+s" and row["keys_label"] == "Shift + Win + S"
+    for bad in ("alt+f4", "win+l", "pause", "ctrl+banana", ""):
+        with pytest.raises(ValueError):
+            cp.bind("slot1", "keys.press", bad)
+    assert cp.view()["poses"][0]["keys"] == "shift+win+s"           # a refused combination keeps the old one
+    with pytest.raises(ValueError):
+        cp.bind("slot1", "window.close")                            # Alt+F4 is not offered
+    engine = build_engine(Settings(schema()), "pinch")
+    backend = FakeBackend((10, 10))
+    try:
+        engine.sinks[OutputTarget.WINDOWS] = WindowsOutputSink(backend, ScreenLayout.single(1920, 1080),
+                                                               WindowsOutputConfig(), threaded=False)
+        CustomPoses(tmp_path / "cp").attach(engine)                  # after a restart
+        from manux.core.contracts import Stage
+        from manux.engine.commands import SetControl, SetStage
+        engine.commands.put(SetStage(Stage.MAIN)); engine.commands.put(SetControl(True))
+        lm, world = pose(**ROCK)
+        results = []
+        for i in range(8):
+            frame = FrameInfo(i, 1 + i / 30, 1280, 720, True)
+            results += engine.step(frame, HandObservation(frame, lm, "Right", .99, world)).results
+        assert ("keys.press", "tap", "ok") in results
+        assert [e[1] for e in backend.events if e[0] == "key" and e[2]] == ["shift", "win", "s"]
+    finally:
+        engine.shutdown()

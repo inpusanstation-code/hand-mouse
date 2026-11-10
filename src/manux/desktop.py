@@ -181,7 +181,7 @@ class CustomPoses:
         self.folder = Path(folder)
         self.known_samples = known_samples
         self.memory = PoseMemory()
-        self.bindings: Dict[str, Optional[str]] = {}
+        self.bindings: Dict[str, Any] = {}      # gesture -> None | action id | {"action": "keys.press", "params": {...}}
         self.session = None
         self.message = ""
         self.revision = 0
@@ -191,7 +191,8 @@ class CustomPoses:
                 self.memory = PoseMemory.load(self.folder / "memory.json")
             if (self.folder / "bindings.json").is_file():
                 raw = json.loads((self.folder / "bindings.json").read_text(encoding="utf-8"))
-                self.bindings = {str(k): (str(v) if v else None) for k, v in dict(raw).items()}
+                self.bindings = {str(k): (dict(v) if isinstance(v, dict) else str(v) if v else None)
+                                 for k, v in dict(raw).items()}
         except (OSError, ValueError, KeyError, TypeError) as error:
             self.message = f"등록한 동작을 읽지 못했습니다: {error}"
 
@@ -206,8 +207,14 @@ class CustomPoses:
             if feature.id == custom_pose.ID and feature.memory is not self._live:
                 feature.set_memory(self._live)
         wanted = {g: self.bindings.get(g) for g in custom_pose.GESTURES}
+
+        def same(binding, raw) -> bool:
+            if raw is None:
+                return binding is None
+            action, params = (raw["action"], dict(raw.get("params") or {})) if isinstance(raw, dict) else (raw, {})
+            return binding is not None and binding.action == action and dict(binding.params) == params
         current = engine.router.bindings
-        if any((current[g].action if g in current else None) != a for g, a in wanted.items()):
+        if not all(same(current.get(g), raw) for g, raw in wanted.items()):
             bindings, _ = resolve_bindings(current, wanted, gesture_phases=custom_pose.GESTURE_PHASES)
             engine.router.set_bindings(bindings)
 
@@ -268,11 +275,17 @@ class CustomPoses:
             self.session.cancel()
         self.session = None
 
-    def bind(self, slot: str, action: Optional[str]) -> None:
+    def bind(self, slot: str, action: Optional[str], keys: str = "") -> None:
+        """action None/"" = do nothing; "keys.press" needs `keys` ("ctrl+c", "win+shift+s", ...)."""
+        from manux.actions.keys import combo_text, parse_combo
         from manux.features.custom_pose import COMMANDS, gesture_of
         if action and action not in COMMANDS:
             raise ValueError("이 동작에 연결할 수 없는 명령입니다")
-        self.bindings[gesture_of(slot)] = action or None
+        if action == "keys.press":
+            value: Any = {"action": "keys.press", "params": {"keys": combo_text(parse_combo(keys))}}
+        else:
+            value = action or None
+        self.bindings[gesture_of(slot)] = value
         self._save_bindings()
 
     def remove(self, slot: str) -> None:
@@ -293,9 +306,17 @@ class CustomPoses:
 
     def view(self) -> Dict[str, Any]:
         from manux.features.custom_pose import gesture_of
-        rows = [{"slot": e.extra.get("slot", ""), "name": e.label, "demos": e.demos,
-                 "action": self.bindings.get(gesture_of(e.extra.get("slot", ""))) or ""}
-                for e in self.memory.registered()]
+        from manux.actions.keys import combo_label, parse_combo
+        rows = []
+        for e in self.memory.registered():
+            raw = self.bindings.get(gesture_of(e.extra.get("slot", "")))
+            action, keys = (raw["action"], str((raw.get("params") or {}).get("keys", ""))) if isinstance(raw, dict) else (raw or "", "")
+            try:
+                keys_label = combo_label(parse_combo(keys)) if keys else ""
+            except ValueError:
+                keys_label = keys
+            rows.append({"slot": e.extra.get("slot", ""), "name": e.label, "demos": e.demos, "action": action,
+                         "keys": keys, "keys_label": keys_label})
         return {"poses": sorted(rows, key=lambda r: r["slot"]), "session": self.session.view() if self.session else None,
                 "message": self.message, "revision": self.revision}
 
@@ -1154,7 +1175,8 @@ class DesktopRuntime:
                 cp.cancel()
                 self.engine.commands.put(SetBusy("enrolling", False))
             elif op == "bind":
-                cp.bind(str(values.get("slot", "")), str(values.get("action", "")) or None)
+                cp.bind(str(values.get("slot", "")), str(values.get("action", "")) or None, str(values.get("keys", "")))
+                cp.message = ""
             elif op == "remove":
                 cp.remove(str(values.get("slot", "")))
             cp.attach(self.engine)

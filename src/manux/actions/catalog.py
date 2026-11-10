@@ -43,6 +43,7 @@ _SPECS = (
     ActionSpec("mouse.scroll", SPAN, params=("gain",), v03=("scroll_grab",)),
     ActionSpec("window.task_switcher", TAP, v03=("task_switcher", "alt_tab")),
     ActionSpec("window.show_desktop", TAP, v03=("show_desktop",)),
+    ActionSpec("keys.press", TAP, params=("keys",)),   # any key combination, e.g. {"keys": "ctrl+shift+s"} (actions/keys.py)
     ActionSpec("control.toggle", TAP),
     ActionSpec("window.close", TAP),
     ActionSpec("nav.back", TAP, v03=("back",)),

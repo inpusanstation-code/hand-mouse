@@ -81,21 +81,67 @@ Rectangle {
         }
 
         // ---- 4. registered gestures and their commands
+        // ---- registered gestures and what each one runs: a command from the list, or a key combination typed in
         Repeater {
             model: box.controller.customPoses
-            delegate: RowLayout {
+            delegate: ColumnLayout {
+                id: poseRow
                 required property var modelData
-                Layout.fillWidth: true
-                Copy { text: modelData.name; font.bold: true; Layout.preferredWidth: 120; elide: Text.ElideRight }
-                StudioSelect {
-                    objectName: "customPoseAction-" + modelData.slot
-                    Layout.fillWidth: true
-                    model: box.controller.customPoseCommandLabels
-                    currentIndex: Math.max(0, box.controller.customPoseCommandIds.indexOf(modelData.action))
-                    onActivated: box.controller.setCustomPoseAction(modelData.slot, box.controller.customPoseCommandIds[currentIndex])
+                readonly property var presets: box.controller.customPosePresets
+                readonly property int customIndex: presets.length - 1                 // "직접 입력…"
+                function presetIndex() {
+                    for (let i = 0; i < presets.length - 1; i++)
+                        if (presets[i].action === modelData.action && presets[i].keys === modelData.keys) return i
+                    return modelData.action === "keys.press" ? customIndex : 0
                 }
-                StudioButton { text: "삭제"; enabled: box.idle && !box.running; onClicked: box.controller.removeCustomPose(modelData.slot) }
+                property bool typing: false
+                Layout.fillWidth: true
+                spacing: 4
+                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.Studio.line }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Copy { text: poseRow.modelData.name; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                    Copy {
+                        visible: poseRow.modelData.keys_label !== ""
+                        text: poseRow.modelData.keys_label; color: Theme.Studio.mintDark; font.pixelSize: Theme.Studio.small
+                    }
+                    StudioButton { text: "삭제"; enabled: box.idle && !box.running; onClicked: box.controller.removeCustomPose(poseRow.modelData.slot) }
+                }
+                StudioSelect {
+                    objectName: "customPoseAction-" + poseRow.modelData.slot
+                    Layout.fillWidth: true
+                    model: poseRow.presets.map(function (p) { return p.label })
+                    currentIndex: poseRow.typing ? poseRow.customIndex : poseRow.presetIndex()
+                    onActivated: function (index) {
+                        const p = poseRow.presets[index]
+                        if (p.keys === "*") { poseRow.typing = true; keysField.text = poseRow.modelData.keys; keysField.forceActiveFocus(); return }
+                        poseRow.typing = false
+                        box.controller.setCustomPoseAction(poseRow.modelData.slot, p.action, p.keys)
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: poseRow.typing || poseRow.presetIndex() === poseRow.customIndex
+                    StudioField {
+                        id: keysField
+                        objectName: "customPoseKeys-" + poseRow.modelData.slot
+                        Layout.fillWidth: true
+                        text: poseRow.modelData.keys
+                        placeholderText: "키 조합 · 예: ctrl+shift+n, win+e, alt+tab, f5"
+                        onAccepted: applyKeys.clicked()
+                    }
+                    StudioButton {
+                        id: applyKeys
+                        text: "적용"; primary: true; enabled: keysField.text.trim() !== ""
+                        onClicked: { poseRow.typing = false; box.controller.setCustomPoseAction(poseRow.modelData.slot, "keys.press", keysField.text) }
+                    }
+                }
             }
+        }
+        Copy {
+            Layout.fillWidth: true; visible: box.controller.customPoses.length > 0
+            font.pixelSize: Theme.Studio.small; color: Theme.Studio.muted
+            text: "Win 키도 쓸 수 있습니다(예: win+e). Alt+F4·Ctrl+W·Win+L·Delete처럼 창·세션을 닫거나 지우는 키와 긴급 정지 키 Pause는 연결할 수 없습니다."
         }
     }
 }

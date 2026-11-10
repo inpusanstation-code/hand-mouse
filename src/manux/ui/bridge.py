@@ -1480,8 +1480,49 @@ class Bridge(QObject):
         self.training_job.stop()
 
     # ------------------------------------------------------------------ registered gestures (custom_pose)
-    CUSTOM_COMMANDS = ("", "nav.back", "nav.forward", "tab.prev", "tab.next", "window.task_switcher",
-                       "window.show_desktop", "window.close", "mouse.left_click", "mouse.right_click")
+    # (group, label, action, keys): what a registered gesture can run. Keys go through actions/keys.py in the runtime.
+    CUSTOM_PRESETS = (
+        ("", "명령 없음 (아무것도 안 함)", "", ""),
+        ("탐색", "뒤로", "nav.back", ""), ("탐색", "앞으로", "nav.forward", ""),
+        ("탐색", "이전 탭", "tab.prev", ""), ("탐색", "다음 탭", "tab.next", ""),
+        ("창", "창 고르기 (Ctrl+Alt+Tab)", "window.task_switcher", ""), ("창", "Alt+Tab", "keys.press", "alt+tab"),
+        ("창", "바탕화면 보기", "keys.press", "win+d"), ("창", "창 최대화", "keys.press", "win+up"),
+        ("창", "창 최소화", "keys.press", "win+down"), ("창", "창 왼쪽 반", "keys.press", "win+left"),
+        ("창", "창 오른쪽 반", "keys.press", "win+right"), ("창", "모든 창 최소화", "keys.press", "win+m"),
+        ("창", "작업 보기", "keys.press", "win+tab"), ("창", "새 가상 데스크톱", "keys.press", "ctrl+win+d"),
+        ("창", "다음 가상 데스크톱", "keys.press", "ctrl+win+right"), ("창", "이전 가상 데스크톱", "keys.press", "ctrl+win+left"),
+        ("Windows", "시작 메뉴 (Win)", "keys.press", "win"), ("Windows", "파일 탐색기", "keys.press", "win+e"),
+        ("Windows", "설정", "keys.press", "win+i"), ("Windows", "실행 창", "keys.press", "win+r"),
+        ("Windows", "검색", "keys.press", "win+s"), ("Windows", "화면 캡처 (영역)", "keys.press", "win+shift+s"),
+        ("Windows", "전체 화면 저장", "keys.press", "win+printscreen"), ("Windows", "클립보드 기록", "keys.press", "win+v"),
+        ("Windows", "이모지", "keys.press", "win+period"), ("Windows", "알림 센터", "keys.press", "win+n"),
+        ("Windows", "빠른 설정", "keys.press", "win+a"), ("Windows", "작업 관리자", "keys.press", "ctrl+shift+esc"),
+        ("Windows", "돋보기 켜기", "keys.press", "win+equal"), ("Windows", "화상 키보드", "keys.press", "ctrl+win+o"),
+        ("Windows", "음성 입력", "keys.press", "win+h"), ("Windows", "Xbox Game Bar", "keys.press", "win+g"),
+        ("편집", "복사", "keys.press", "ctrl+c"), ("편집", "붙여넣기", "keys.press", "ctrl+v"),
+        ("편집", "잘라내기", "keys.press", "ctrl+x"), ("편집", "되돌리기", "keys.press", "ctrl+z"),
+        ("편집", "다시 실행", "keys.press", "ctrl+y"), ("편집", "전체 선택", "keys.press", "ctrl+a"),
+        ("편집", "저장", "keys.press", "ctrl+s"), ("편집", "다른 이름으로 저장", "keys.press", "ctrl+shift+s"),
+        ("편집", "찾기", "keys.press", "ctrl+f"), ("편집", "인쇄", "keys.press", "ctrl+p"),
+        ("편집", "새로 만들기", "keys.press", "ctrl+n"), ("편집", "열기", "keys.press", "ctrl+o"),
+        ("편집", "한/영 전환", "keys.press", "hangul"), ("편집", "한자", "keys.press", "hanja"),
+        ("브라우저", "새 탭", "keys.press", "ctrl+t"), ("브라우저", "닫은 탭 다시 열기", "keys.press", "ctrl+shift+t"),
+        ("브라우저", "새로고침", "keys.press", "f5"), ("브라우저", "주소창으로", "keys.press", "ctrl+l"),
+        ("브라우저", "확대", "keys.press", "ctrl+equal"), ("브라우저", "축소", "keys.press", "ctrl+minus"),
+        ("브라우저", "원래 크기", "keys.press", "ctrl+0"), ("브라우저", "전체 화면", "keys.press", "f11"),
+        ("브라우저", "맨 위로", "keys.press", "home"), ("브라우저", "맨 아래로", "keys.press", "end"),
+        ("브라우저", "한 페이지 위", "keys.press", "pageup"), ("브라우저", "한 페이지 아래", "keys.press", "pagedown"),
+        ("미디어", "재생 / 일시정지", "keys.press", "playpause"), ("미디어", "다음 곡", "keys.press", "medianext"),
+        ("미디어", "이전 곡", "keys.press", "mediaprev"), ("미디어", "볼륨 올리기", "keys.press", "volumeup"),
+        ("미디어", "볼륨 내리기", "keys.press", "volumedown"), ("미디어", "음소거", "keys.press", "volumemute"),
+        ("키 하나", "Enter", "keys.press", "enter"), ("키 하나", "Space", "keys.press", "space"),
+        ("키 하나", "Esc", "keys.press", "esc"), ("키 하나", "Tab", "keys.press", "tab"),
+        ("키 하나", "Backspace", "keys.press", "backspace"), ("키 하나", "위 화살표", "keys.press", "up"),
+        ("키 하나", "아래 화살표", "keys.press", "down"), ("키 하나", "왼쪽 화살표", "keys.press", "left"),
+        ("키 하나", "오른쪽 화살표", "keys.press", "right"),
+        ("마우스", "클릭", "mouse.left_click", ""), ("마우스", "우클릭", "mouse.right_click", ""),
+        ("직접", "직접 입력… (예: ctrl+shift+n, win+e)", "keys.press", "*"),
+    )
 
     @Property("QVariantList", notify=customPoseChanged)
     def customPoses(self):
@@ -1495,14 +1536,11 @@ class Bridge(QObject):
     def customPoseMessage(self):
         return str(self._custom_view.get("message") or "")
 
-    @Property("QStringList", constant=True)
-    def customPoseCommandIds(self):
-        return list(self.CUSTOM_COMMANDS)
-
-    @Property("QStringList", constant=True)
-    def customPoseCommandLabels(self):
-        return ["명령 없음 (아무것도 안 함)"] + [{"window.close": "창 닫기"}.get(a, ACTION_TEXT.get(a, a))
-                                             for a in self.CUSTOM_COMMANDS[1:]]
+    @Property("QVariantList", constant=True)
+    def customPosePresets(self):
+        """[{label, action, keys}]; keys "*" = the person types the combination."""
+        return [{"label": (f"{g} · {label}" if g and g != "직접" else label), "action": action, "keys": keys}
+                for g, label, action, keys in self.CUSTOM_PRESETS]
 
     def _custom_request(self, op, **values):
         return self.runtime.request(RuntimeRequest("custom_pose", op, values))
@@ -1520,9 +1558,9 @@ class Bridge(QObject):
     def cancelCustomPose(self):
         self._custom_request("cancel")
 
-    @Slot(str, str)
-    def setCustomPoseAction(self, slot, action):
-        self._custom_request("bind", slot=str(slot), action=str(action))
+    @Slot(str, str, str)
+    def setCustomPoseAction(self, slot, action, keys=""):
+        self._custom_request("bind", slot=str(slot), action=str(action), keys=str(keys))
 
     @Slot(str)
     def removeCustomPose(self, slot):

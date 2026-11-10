@@ -261,6 +261,7 @@ v0.4 확인기는 모델 정보 파일의 클래스 → 동작 ID 대응표를 �
 | `mouse.scroll` | begin / hold / end | `gain` | `scroll_grab` |
 | `window.task_switcher` | tap | — | `task_switcher`, `alt_tab` |
 | `window.show_desktop` | tap | — | `show_desktop` |
+| `keys.press` | tap | `keys` | — (2026-11-10 추가: 바인딩이 정한 키 조합, 예: `{"action": "keys.press", "params": {"keys": "win+shift+s"}}`. 이름·별칭·거부 목록은 `actions/keys.py`. Alt+F4·Ctrl+W·Ctrl+Alt+Del·Win+L·Delete·Shift+Delete와 긴급 정지 키 Pause는 거부한다) |
 | `control.toggle` | tap | — | — |
 | `window.close` | tap | — | 창 닫기(Alt+F4), `spatial_pose.rock_sign` 바인딩 |
 | `nav.back`, `nav.forward` | tap | — | 모션 `back`, `forward` |

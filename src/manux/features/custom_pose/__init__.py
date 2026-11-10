@@ -23,8 +23,10 @@ GESTURES: Tuple[str, ...] = tuple(f"{ID}.{slot}" for slot in SLOTS)
 GESTURE_PHASES = {g: frozenset({"tap"}) for g in GESTURES}
 DEFAULT_BINDINGS = {g: None for g in GESTURES}
 SETTINGS = {f"{ID}.enabled": True}
-COMMANDS = ("mouse.left_click", "mouse.right_click", "window.task_switcher", "window.show_desktop", "window.close",
-            "nav.back", "nav.forward", "tab.prev", "tab.next")      # tap actions a registered pose may run
+# tap actions a registered pose may run. `keys.press` takes any key combination (actions/keys.py refuses the dangerous
+# ones); window.close (Alt+F4) is left out on purpose: a young recogniser must not close windows.
+COMMANDS = ("keys.press", "mouse.left_click", "mouse.right_click", "window.task_switcher", "window.show_desktop",
+            "nav.back", "nav.forward", "tab.prev", "tab.next")
 
 
 def gesture_of(slot: str) -> str:

@@ -431,6 +431,17 @@ class WindowsOutputSink:
         self._move(cmd, gain)
         return OK
 
+    def _do_keys_press(self, cmd: ActionCommand) -> OutputResult:
+        """The binding's key combination (actions/keys.py); refused combinations never reach Windows."""
+        from manux.actions.keys import KeyComboError, parse_combo
+        try:
+            keys = parse_combo(str(cmd.params.get("keys", "")))
+        except KeyComboError as error:
+            return _error(f"keys.press: {error}")
+        self._end_drag()
+        self.keys.chord(keys)
+        return OK
+
     def _do_mouse_place(self, cmd: ActionCommand) -> OutputResult:
         """Put the cursor at a point of the monitor (0..1 each way), as the virtual hand's box says. No gain, no
         smoothing (the feature filters); the glide still carries it between camera frames, and clicks settle it."""
