@@ -255,3 +255,42 @@ def test_new_gesture_registration_is_on_the_first_page_in_both_layouts(tmp_path,
     finally:
         b.close()
         runtime.stop()
+
+
+@pytest.mark.parametrize("layout", ["standard", "studio"])
+def test_fist_style_choice_on_the_first_page_switches_both_speeds(tmp_path, layout):
+    from PySide6.QtCore import qInstallMessageHandler
+    from manux.desktop import build
+    from types import SimpleNamespace
+    messages = []
+    qInstallMessageHandler(lambda mode, ctx, text: messages.append(text))
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    b = Bridge(runtime, settings, tmp_path/'config', layout=layout)
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        if b.stage != "main":
+            b._set_stage("main")
+        b.window.setWidth(1140); b.window.setHeight(760); QTest.qWait(60)
+        def find(name, item=None):                      # the visible one (the tutorial page has its own copy)
+            for child in (item or b.window.contentItem()).childItems():
+                if child.objectName() == name and child.isVisible():
+                    return child
+                hit = find(name, child)
+                if hit is not None:
+                    return hit
+        fast, precise = find("fistStyle_fast"), find("fistStyle_precise")
+        assert fast is not None and fast.isVisible() and precise.property("checked") and not fast.property("checked")
+        assert QMetaObject.invokeMethod(fast, "click")
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(40)
+        assert settings.get("pinch.fist_dpi_multiplier") == 30.0 and settings.get("pinch.shape_dpi_min") == 1.0
+        assert fast.property("checked") and not precise.property("checked")
+        assert runtime.settings_for("pinch")["fist_dpi_multiplier"] == 30.0
+        assert QMetaObject.invokeMethod(precise, "click")
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(40)
+        assert settings.get("pinch.fist_dpi_multiplier") == .35 and precise.property("checked")
+        assert not [m for m in messages if "QuickSpeedControls" in m], messages
+    finally:
+        qInstallMessageHandler(None)
+        b.close()
+        runtime.stop()

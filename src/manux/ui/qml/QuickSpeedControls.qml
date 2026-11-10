@@ -48,9 +48,40 @@ ColumnLayout {
             }
         }
     }
+    // fist / open hand speed: which one is the fast one (settings/sensitivity.py PRESETS "preset.fist_style")
+    property var fistRow: controller.sensitivityRows.filter(function(r) { return r.key === "preset.fist_style" })[0]
     Label {
         Layout.fillWidth: true; wrapMode: Text.Wrap
-        text: "편 손은 빠르게 · 주먹은 정밀하게"
+        text: "주먹 이동"
+        color: Theme.Studio.ink; font.pixelSize: Theme.Studio.small
+        visible: settings.fistRow !== undefined
+    }
+    RowLayout {
+        Layout.fillWidth: true; spacing: 4
+        visible: settings.fistRow !== undefined
+        Repeater {
+            model: settings.fistRow ? settings.fistRow.choices : []
+            delegate: Button {
+                required property string modelData
+                required property int index
+                objectName: "fistStyle_" + modelData
+                Layout.fillWidth: true
+                palette: LightPalette {}
+                checkable: true
+                checked: settings.fistRow.value === modelData
+                text: modelData === "fast" ? "주먹 = 빠르게" : "주먹 = 정밀하게"
+                enabled: settings.fistRow.editable && !settings.controller.sensitivityPending
+                onClicked: {
+                    checked = Qt.binding(function() { return settings.fistRow.value === modelData })
+                    if (settings.fistRow.value !== modelData) settings.controller.applySensitivity({"preset.fist_style": modelData})
+                }
+                ToolTip.visible: hovered; ToolTip.text: settings.fistRow.choiceLabels[index]
+            }
+        }
+    }
+    Label {
+        Layout.fillWidth: true; wrapMode: Text.Wrap
+        text: settings.fistRow && settings.fistRow.value === "fast" ? "주먹은 빠르게 멀리 · 편 손은 세밀하게" : "편 손은 빠르게 · 주먹은 정밀하게"
         color: Theme.Studio.muted; font.pixelSize: Theme.Studio.small
     }
     CheckBox {

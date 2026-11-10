@@ -89,3 +89,18 @@ def test_drag_choice_accepts_only_its_own_values():
         with pytest.raises(ValueError):
             prepare(settings, {"pinch.drag_on_move": bad})
     assert prepare(settings, {"cursor.drag_after_click_guard": .52}) == {"cursor.drag_after_click_guard": .52}
+
+
+def test_fist_style_preset_sets_fist_and_open_hand_speed_together():
+    settings = Settings(schema())
+    row = next(r for r in rows(settings) if r["key"] == "preset.fist_style")
+    assert row["group"] == "cursor" and row["choices"] == ["precise", "fast"] and row["value"] == "precise"
+    fast = prepare(settings, {"preset.fist_style": "fast"})
+    assert fast == {"pinch.fist_dpi_multiplier": 30.0, "pinch.shape_dpi_min": 1.0}
+    for key, value in fast.items():
+        settings.set(key, value)
+    assert next(r for r in rows(settings) if r["key"] == "preset.fist_style")["value"] == "fast"
+    both = prepare(settings, {"preset.fist_style": "precise", "pinch.fist_dpi_multiplier": .5})
+    assert both == {"pinch.fist_dpi_multiplier": .5, "pinch.shape_dpi_min": 2.0}    # the hand-set value wins
+    with pytest.raises(ValueError):
+        prepare(settings, {"preset.fist_style": "rocket"})

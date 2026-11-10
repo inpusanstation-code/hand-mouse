@@ -53,6 +53,16 @@ CHOICES = {
         labels=("길게 눌러서 시작 (기본)", "누른 채 움직이면 바로 시작"),
         hint="‘바로 시작’은 엄지·중지를 붙인 채 손을 움직이는 순간 드래그가 되고, 드래그 중에는 검지가 스쳐도 스크롤로 바뀌지 않습니다."),
 }
+# Choices that set several settings at once. Not stored themselves: the shown value is read back from the settings.
+PRESETS = {
+    "preset.fist_style": dict(
+        label="주먹 이동 방식", group="cursor", choices=("precise", "fast"),
+        labels=("주먹 = 정밀하게 (느리게) · 편 손 = 빠르게 (기본)", "주먹 = 빠르게 · 편 손 = 정밀하게 (예전 hand-mouse)"),
+        hint="손을 쥐고 펴는 것으로 커서 속도를 바꿉니다. ‘빠르게’는 예전 hand-mouse처럼 주먹으로 멀리 빨리 가고 편 손으로 세밀하게 맞춥니다. 아래 ‘주먹 정밀 이동 배율’로 더 세밀하게 조절할 수 있습니다.",
+        values={"precise": {"pinch.fist_dpi_multiplier": .35, "pinch.shape_dpi_min": 2.0},
+                "fast": {"pinch.fist_dpi_multiplier": 30.0, "pinch.shape_dpi_min": 1.0}},
+        current=lambda settings: "fast" if float(settings.get("pinch.fist_dpi_multiplier")) > 1 else "precise"),
+}
 BY_KEY = {c.key: c for c in CONTROLS}
 VERTICAL_INPUT = Setting(
     "cursor.vertical_input", "wrist_pitch", kind="choice", choices=("hand_position", "wrist_pitch"),
@@ -72,7 +82,12 @@ def rows(settings: Settings):
                   minimum=0, maximum=1, step=1, hint=VERTICAL_INPUT.doc,
                   value=settings.get(VERTICAL_INPUT.key), defaultValue=VERTICAL_INPUT.default,
                   editable=not settings.is_overridden(VERTICAL_INPUT.key))
-    return [choice] + [dict(key=c.key, label=c.label, kind="float", choices=[], choiceLabels=[],
+    presets = [dict(key=key, label=p["label"], kind="choice", group=p["group"], choices=list(p["choices"]),
+                    choiceLabels=list(p["labels"]), minimum=0, maximum=1, step=1, hint=p["hint"],
+                    value=p["current"](settings), defaultValue=p["choices"][0],
+                    editable=not any(settings.is_overridden(k) for k in p["values"][p["choices"][0]]))
+               for key, p in PRESETS.items()]
+    return [choice] + presets + [dict(key=c.key, label=c.label, kind="float", choices=[], choiceLabels=[],
                  minimum=c.low, maximum=c.high, step=c.step,
                  group=c.group, hint=c.hint, value=settings.get(c.key),
                  defaultValue=settings.schema.get(c.key).default,
@@ -86,7 +101,15 @@ def rows(settings: Settings):
 def prepare(settings: Settings, edits: Mapping[str, object]) -> dict[str, object]:
     """Validate a whole edit before any save; enforce Dan's coupled release/gain limits."""
     result = {}
+    chosen = {}
     for key, value in edits.items():
+        if key in PRESETS:
+            if value not in PRESETS[key]["choices"]:
+                raise ValueError(f"{PRESETS[key]['label']}: 목록에서 고르세요.")
+            if any(settings.is_overridden(k) for k in PRESETS[key]["values"][value]):
+                raise ValueError("프로필이 지정한 값입니다. 기본 프로필에서 변경하세요.")
+            chosen.update(PRESETS[key]["values"][value])
+            continue
         if key == VERTICAL_INPUT.key:
             checked, warning = VERTICAL_INPUT.coerce(value)
             if warning:
@@ -110,6 +133,8 @@ def prepare(settings: Settings, edits: Mapping[str, object]) -> dict[str, object
         if settings.is_overridden(key):
             raise ValueError("프로필이 지정한 감도입니다. 기본 프로필에서 변경하세요.")
         result[key] = round(control.low + round((value - control.low) / control.step) * control.step, 6)
+    for key, value in chosen.items():
+        result.setdefault(key, value)          # a value moved by hand in the same edit wins over the preset
     if "pinch.pinch_threshold" in result:
         result["pinch.release_threshold"] = round(result["pinch.pinch_threshold"] + .02, 6)
     low, high = "cursor.relative_gain_min", "cursor.relative_gain_max"
