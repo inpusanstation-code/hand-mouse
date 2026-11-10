@@ -742,8 +742,18 @@ class DesktopRuntime:
             practice_cursor=practice.cursor_position if snap.output is OutputTarget.PRACTICE else None,
             practice_precision=bool(practice.precision) if snap.output is OutputTarget.PRACTICE else False,
             practice_events=tuple(self._practice_events), practice_epoch=self._practice_epoch,
-            rule_preview=rule_preview,
+            rule_preview=rule_preview, mlp_badge=self._mlp_badge(),
             frame_age_ms=max(0.0, (time.perf_counter() - frame.t) * 1000.0)))
+
+    def _mlp_badge(self):
+        """One line about the pose-assist veto while it is on (same name as the studio button), else ""."""
+        guard, feature = self.spatial_guard, self.spatial_feature
+        if guard is None or not guard.enabled or feature is None or feature.model is None:
+            return ""
+        ev = feature.evidence
+        now = (f"{BY_KEY[ev.action].name if ev.action in BY_KEY else ev.action} {ev.confidence:.0%}"
+               if ev is not None else "손 대기")
+        return f"실험 보조 차단 켜짐 · 지금 {now} · 막은 클릭 {guard.vetoed_count}회"
 
     def _pose_step(self, image, now):
         if not self.settings.get("tracking.pose_enabled"):

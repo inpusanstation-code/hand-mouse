@@ -272,3 +272,27 @@ def test_v_respects_the_active_pose_guard_and_v_training(guard_enabled, v_total,
         assert runtime.latest()[1].snapshot.control_on is starts
     finally:
         runtime.stop()
+
+
+def test_hybrid_reading_is_display_only_and_keeps_the_rule_contact(tmp_path):
+    """testing-mlp d1713f2 fed the combined reading into saved snapshots; here it only reaches the screen."""
+    studio = make_pose_studio(tmp_path)
+    constant_model("v_sign").save(studio.models_dir / "spatial_pose_mlp.json")
+    points = _dummy_hand()
+    studio.observe_frame(points, None, "thumb_middle")          # the rules see a click contact
+    assert studio.live_ai_action == "v_sign"
+    assert studio.live_hybrid_action == "thumb_middle"        # contact wins unless the MLP is sure it is "none"
+    recorded = studio.effective_predicted_action()           # what snapshots record...
+    studio.live_hybrid_action = "rock_sign"
+    assert studio.effective_predicted_action() == recorded     # ...does not depend on the combined reading
+    constant_model("none").save(studio.models_dir / "spatial_pose_mlp.json")
+    studio = make_pose_studio(tmp_path)
+    studio.observe_frame(points, None, "thumb_middle")
+    assert studio.live_hybrid_action == "none"
+
+
+
+def test_hybrid_reading_without_a_model_is_the_rule(tmp_path):
+    studio = make_pose_studio(tmp_path)
+    studio.observe_frame(_dummy_hand(), None, "thumb_ring")
+    assert (studio.live_hybrid_action, studio.live_hybrid_confidence) == ("thumb_ring", 1.0)

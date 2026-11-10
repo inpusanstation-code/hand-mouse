@@ -288,6 +288,11 @@ class PoseSnapshotStudio:
         self.live_system_action: str = "none"
         self.live_ai_action: str = "none"
         self.live_ai_confidence: float = 0.0
+        # Rules + MLP together, for the screen only (testing-mlp d1713f2). Snapshots keep recording
+        # effective_predicted_action, so the saved data means the same as before.
+        self.live_ai_probabilities: Dict[str, float] = {}
+        self.live_hybrid_action: str = "none"
+        self.live_hybrid_confidence: float = 0.0
 
         # Multi-model management
         self.active_model: Optional[Any] = None
@@ -609,16 +614,39 @@ class PoseSnapshotStudio:
             if pred is not None:
                 self.live_ai_action = str(pred.get("action", "none"))
                 self.live_ai_confidence = float(pred.get("confidence", 0.0))
+                self.live_ai_probabilities = {str(k): float(v) for k, v in (pred.get("probabilities") or {}).items()}
             else:
                 self.live_ai_action = "none"
                 self.live_ai_confidence = 0.0
+                self.live_ai_probabilities = {}
         else:
             self.live_ai_action = "none"
             self.live_ai_confidence = 0.0
+            self.live_ai_probabilities = {}
+        self.live_hybrid_action, self.live_hybrid_confidence = self.hybrid_reading()
 
         if self.is_streaming and self.capture_mode == "stream":
             return self.process_stream_frame(now_ms=now_ms)
         return None
+
+    PINCH_CLASSES = frozenset({"thumb_middle", "thumb_ring", "thumb_index", "thumb_pinky", "thumb_middle_ring"})
+    STATIC_CLASSES = frozenset({"v_sign", "rock_sign", "thumbs_up", "palm_side"})
+
+    def hybrid_reading(self) -> Tuple[str, float]:
+        """(action, confidence) from the rules' finger contact and the MLP together. Display only."""
+        if not self.hand_tracked:
+            return "none", 0.0
+        if not self.model_summary.get("loaded") or self._predict_fn is None:
+            return self.live_system_action, 1.0 if self.live_system_action != "none" else 0.0
+        rule, ai, conf, probs = (self.live_system_action, self.live_ai_action, self.live_ai_confidence,
+                                 self.live_ai_probabilities)
+        if rule in self.PINCH_CLASSES:                 # the fingers touch: the MLP can only say "not really"
+            if probs.get("none", 0.0) >= .85:
+                return "none", probs["none"]
+            p_rule = probs.get(rule, 0.0)
+            agree = min(1.0, max(conf, .65 + .35 * p_rule)) if ai == rule else max(.70, .50 + .50 * p_rule)
+            return rule, float(agree)
+        return ai, conf                                # whole-hand poses and no contact: the MLP's reading
 
     def effective_predicted_action(self) -> str:
         """If a trained Spatial MLP is loaded, compare against AI prediction; otherwise Rule Engine."""

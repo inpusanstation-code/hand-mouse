@@ -193,6 +193,8 @@ class _NullPoseStudio:
         self.live_system_action = "none"
         self.live_ai_action = "none"
         self.live_ai_confidence = 0.0
+        self.live_hybrid_action = "none"
+        self.live_hybrid_confidence = 0.0
         self.model_summary: Dict[str, Any] = {"loaded": False}
 
     def set_capture_mode(self, mode: str) -> str:
@@ -539,6 +541,7 @@ class Bridge(QObject):
         self.state = ("입력 꺼짐", "카메라 연결 대기", "손을 카메라에 보여주세요.", "제어 시작", "")
         self.live_gesture = ""
         self.contact_text = ""
+        self.mlp_badge_text = ""
         self.metrics = ("", -1, False)
         self.reception = ("paused", "입력 꺼짐")
         self.motion_on = False
@@ -1896,7 +1899,12 @@ class Bridge(QObject):
         if not self.pose_studio.hand_tracked:
             return "손 대기 중"
         lbl = self._studio_label(self.pose_studio.live_ai_action)
-        return f"{lbl} ({self.pose_studio.live_ai_confidence * 100:.0f}%)"
+        text = f"{lbl} ({self.pose_studio.live_ai_confidence * 100:.0f}%)"
+        hybrid = getattr(self.pose_studio, "live_hybrid_action", None)
+        if hybrid is not None and hybrid != self.pose_studio.live_ai_action:
+            # the MLP alone and with the rules disagree: show both so the user sees which one decided
+            text += f" · 규칙과 함께 {self._studio_label(hybrid)} ({self.pose_studio.live_hybrid_confidence * 100:.0f}%)"
+        return text
 
     @Property(bool, notify=studioChanged)
     def studioLiveMatch(self):
@@ -2567,6 +2575,10 @@ class Bridge(QObject):
         return self.state[4]
 
     @Property(str, notify=liveChanged)
+    def mlpBadge(self):
+        return self.mlp_badge_text
+
+    @Property(str, notify=liveChanged)
     def detectedContacts(self):
         return self.contact_text
 
@@ -2907,6 +2919,10 @@ class Bridge(QObject):
             self.receptionChanged.emit()
         live = guide.active_key(self._cards(), view.actions if detected and not paused else (),
                                 motion_on=self.motion_on and not paused)
+        badge = getattr(view, "mlp_badge", "")
+        if badge != self.mlp_badge_text:
+            self.mlp_badge_text = badge
+            self.liveChanged.emit()
         if (state, live) != (self.state, self.live_gesture):
             self.state, self.live_gesture = state, live
             self.liveChanged.emit()

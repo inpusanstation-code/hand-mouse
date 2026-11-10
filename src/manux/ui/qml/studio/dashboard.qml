@@ -692,6 +692,13 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             TextLabel { text: dashboard.inputState; font.bold: true }
                             TextLabel { Layout.fillWidth: true; text: dashboard.currentAction; color: window.muted; wrapMode: Text.Wrap }
+                            TextLabel {
+                                objectName: "mlpBadge"
+                                Layout.fillWidth: true
+                                visible: dashboard.mlpBadge !== ""
+                                text: dashboard.mlpBadge
+                                color: "#08775E"; font.pixelSize: 12; wrapMode: Text.Wrap
+                            }
                         }
                         ActionButton { text: diagnostics.visible ? "상세 닫기" : "상세 정보"; onClicked: diagnostics.visible = !diagnostics.visible }
                     }
