@@ -1,0 +1,37 @@
+[project]
+name = "manux"
+version = "0.5.0"
+description = "MANUX v0.5: webcam hand control for Windows (Qt/QML + Python)"
+readme = "README.md"
+requires-python = ">=3.12"
+# Added stage by stage (docs/architecture.md section 8). numpy is needed everywhere frames or
+# features are handled. OpenCV and MediaPipe are imported lazily (only when a real camera or
+# model is opened), so the tests and CI run without them.
+dependencies = ["numpy>=2"]
+
+[project.optional-dependencies]
+link = ["aiohttp>=3.14.5,<4", "cryptography>=46,<50"]  # opt-in phone HTTPS transport
+qr = ["qrcode>=8,<9"]  # optional terminal/window QR in phone_camera_demo
+
+vision = ["opencv-python>=5.0.0.93", "mediapipe>=1.2.0"]   # S1: real camera and hand tracking
+test = ["pytest>=8"]                                        # CI: pip install -e ".[test]"
+ui = ["pyside6-essentials>=6.8,<7"]                         # S6: the desktop window (python -m manux)
+ml = ["onnxruntime>=1.31.1"]                                # S5: run a TCN model (ml/, imported lazily)
+hub = ["huggingface-hub>=1.0,<2"]                         # installed learning-center worker
+# S6: the installed app (packaging/build.ps1). PyInstaller makes MANUX.exe; velopack is bundled for updates.
+package = ["pyinstaller>=6.22", "velopack>=1.2,<2"]
+# S5: tools/train_tcn.py only. torch is never imported by src/ (architecture.md section 4).
+train = ["torch>=2.15.0", "onnx>=1.23.2", "onnxscript>=0.7.2", "onnxruntime>=1.31.1"]
+openvino = [
+    "openvino>=2026,<2027",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.12.8,<0.13.0"]
+build-backend = "uv_build"
