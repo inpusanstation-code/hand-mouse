@@ -50,6 +50,10 @@ ApplicationWindow {
     component ActionButton: Button {
         id: button
         property bool accent: false
+        property string help: ""                       // hover explanation: what it does and what you get
+        ToolTip.visible: hovered && help !== ""
+        ToolTip.delay: 500
+        ToolTip.text: help
         implicitHeight: 40
         leftPadding: 16
         rightPadding: 16
@@ -216,6 +220,8 @@ ApplicationWindow {
         id: seg
         property var options: []      // [[value, label], ...]
         property string current: ""
+        property string help: ""                       // hover explanation for the whole choice
+        property var optionHelp: ({})                  // {value: explanation} per option
         signal picked(string value)
         Layout.fillWidth: true
         spacing: 4
@@ -230,6 +236,9 @@ ApplicationWindow {
                 implicitHeight: 34
                 enabled: seg.enabled
                 onClicked: seg.picked(modelData[0])
+                ToolTip.visible: hovered && (seg.optionHelp[modelData[0]] || seg.help) !== undefined && (seg.optionHelp[modelData[0]] || seg.help) !== ""
+                ToolTip.delay: 500
+                ToolTip.text: seg.optionHelp[modelData[0]] || seg.help
                 contentItem: TextLabel {
                     text: option.modelData[1]
                     font.pixelSize: 12
@@ -338,6 +347,7 @@ ApplicationWindow {
                             Segmented {
                                 enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                 options: [["index", "검지 포인터"], ["palm", "손바닥 (Dan)"], ["virtual", "가상 손 (시험)"]]
+                                optionHelp: ({"palm": "손바닥 위치로 커서를 움직이고, 엄지와 다른 손가락을 붙여 클릭·드래그·스크롤합니다. 기본 방식.", "index": "검지 끝으로 가리키는 대로 커서가 갑니다. 클릭은 아래 \u2018클릭\u2019 방식으로 합니다(시험).", "virtual": "카메라 화면의 박스가 모니터 전체가 되고, 화면에 그린 손으로 클릭·끌기·스크롤합니다. 손이 멀어도 잘 보입니다(시험)."})
                                 current: dashboard.movementStyle
                                 onPicked: function (value) { dashboard.setMovementStyle(value) }
                             }
@@ -345,6 +355,7 @@ ApplicationWindow {
                                 objectName: "drawVirtualBox"
                                 Layout.fillWidth: true
                                 visible: dashboard.movementStyle === "virtual"
+                                help: "카메라 미리보기에서 손을 움직일 영역을 끌어서 그립니다. 이 영역의 끝이 모니터 끝이 됩니다. 좁게 그리면 손을 조금만 움직여도 화면 끝까지 갑니다."
                                 text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
                                 onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
                             }
@@ -355,19 +366,23 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                 text: dashboard.motionLabel
+                                help: "모션 모드: 손을 펴고 좌우로 쓸어 뒤로·앞으로·탭 전환을 합니다. 켜 두면 엄지를 세운 자세로 모드에 들어갈 수 있습니다."
                                 onClicked: dashboard.toggleMotion()
                             }
                             ActionButton {
                                 Layout.fillWidth: true
                                 enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                 text: dashboard.profileLabel + (dashboard.profileCount > 0 ? "  (눌러서 바꾸기)" : "  (없음)")
+                                help: "저장해 둔 설정 묶음(프로필)을 차례로 바꿉니다. 자리·카메라마다 다른 감도를 쓸 때 편합니다."
+
                                 onClicked: dashboard.cycleProfile()
                             }
-                            ActionButton { text: "동작 다시 배우기"; Layout.fillWidth: true; onClicked: dashboard.beginTutorial() }
+                            ActionButton { text: "동작 다시 배우기"; Layout.fillWidth: true; help: "커서 이동·클릭·스크롤을 연습 화면에서 다시 익힙니다. 실제 마우스는 움직이지 않습니다."; onClicked: dashboard.beginTutorial() }
                             SectionLabel { visible: !dashboard.pointerOnly && dashboard.tcnAvailable; text: "손짓 확인 (TCN: 학습된 동작)" }
                             Segmented {
                                 visible: !dashboard.pointerOnly && dashboard.tcnAvailable
                                 options: [["off", "끔"], ["on", "켬"]]
+                                help: "학습한 TCN 모델이 규칙 판정을 한 번 더 확인해, 의도하지 않은 클릭·스크롤을 막습니다. 켜면 오작동이 줄고 반응이 아주 조금 늦어질 수 있습니다."
                                 current: dashboard.tcnGate ? "on" : "off"
                                 onPicked: function (value) { dashboard.setTcnGate(value === "on") }
                             }
@@ -376,6 +391,7 @@ ApplicationWindow {
                                 visible: !dashboard.pointerOnly
                                 enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
                                 options: [["off", "끔"], ["guided", "안내 녹화"], ["free", "평소 녹화"]]
+                                optionHelp: ({"off": "녹화하지 않습니다.", "guided": "안내에 따라 동작을 반복해 학습용 녹화를 만듭니다. 이 동안 마우스는 움직이지 않습니다.", "free": "평소처럼 쓰는 동안 손 관절만 녹화합니다(영상 없음). 오작동은 F 키로 표시하세요."})
                                 current: dashboard.recMode
                                 onPicked: function (value) {
                                     if (value === "guided") {

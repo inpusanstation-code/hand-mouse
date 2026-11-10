@@ -9,6 +9,7 @@ import math
 from dataclasses import dataclass
 from typing import Mapping
 
+from manux.settings.help import help_for
 from manux.settings.schema import Setting
 from manux.settings.store import Settings
 
@@ -89,7 +90,7 @@ def rows(settings: Settings):
                for key, p in PRESETS.items()]
     return [choice] + presets + [dict(key=c.key, label=c.label, kind="float", choices=[], choiceLabels=[],
                  minimum=c.low, maximum=c.high, step=c.step,
-                 group=c.group, hint=c.hint, value=settings.get(c.key),
+                 group=c.group, hint=help_for(c.key) or c.hint, value=settings.get(c.key),
                  defaultValue=settings.schema.get(c.key).default,
                  editable=not settings.is_overridden(c.key)) for c in CONTROLS] + [
         dict(key=key, label=c["label"], kind="choice", group=c["group"], choices=list(c["choices"]),

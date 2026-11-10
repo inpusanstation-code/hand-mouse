@@ -112,3 +112,14 @@ def test_fist_multiplier_goes_up_to_35_and_no_further():
     assert prepare(settings, {"pinch.fist_dpi_multiplier": 35}) == {"pinch.fist_dpi_multiplier": 35.0}
     with pytest.raises(ValueError):
         prepare(settings, {"pinch.fist_dpi_multiplier": 35.05})
+
+
+def test_every_editable_setting_explains_itself_in_korean():
+    """2026-11-10: hover help must say what a setting does and what changing it does, for every row."""
+    from manux.settings.advanced import rows as advanced_rows
+    settings = Settings(schema())
+    for row in advanced_rows(settings) + rows(settings):
+        hint = row["hint"]
+        assert hint and any("가" <= ch <= "힣" for ch in hint), (row["key"], hint)
+        assert "한 번에 한 항목씩" not in hint, row["key"]                    # no generic filler left
+        assert any("가" <= ch <= "힣" for ch in row["label"]), (row["key"], row["label"])

@@ -36,6 +36,10 @@ ApplicationWindow {
     component ActionButton: Button {
         id: button
         property bool accent: false
+        property string help: ""                       // hover explanation: what it does and what you get
+        ToolTip.visible: hovered && help !== ""
+        ToolTip.delay: 500
+        ToolTip.text: help
         implicitHeight: 40
         leftPadding: 16
         rightPadding: 16
@@ -131,6 +135,8 @@ ApplicationWindow {
                     objectName: "closeToTray"
                     visible: dashboard.trayAvailable
                     text: "창 닫기(X)를 누르면 트레이로 숨기기 (끄면 완전히 종료)"
+                    ToolTip.visible: hovered; ToolTip.delay: 500
+                    ToolTip.text: "켜 두면 X를 눌러도 백그라운드에서 계속 손으로 조작할 수 있고, 트레이 아이콘에서 다시 열거나 끝냅니다. 끄면 X가 프로그램을 완전히 끝냅니다."
                     checked: dashboard.closeToTray
                     onClicked: dashboard.setCloseToTray(checked)
                 }
@@ -238,6 +244,7 @@ ApplicationWindow {
                     Segmented {
                         enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                         options: [["palm", "손바닥 (기본)"], ["index", "검지 포인터 (시험)"], ["virtual", "가상 손 (시험)"]]
+                        optionHelp: ({"palm": "손바닥 위치로 커서를 움직이고, 엄지와 다른 손가락을 붙여 클릭·드래그·스크롤합니다. 기본 방식.", "index": "검지 끝으로 가리키는 대로 커서가 갑니다. 클릭은 아래 \u2018클릭\u2019 방식으로 합니다(시험).", "virtual": "카메라 화면의 박스가 모니터 전체가 되고, 화면에 그린 손으로 클릭·끌기·스크롤합니다. 손이 멀어도 잘 보입니다(시험)."})
                         current: dashboard.movementStyle
                         onPicked: function (value) { dashboard.setMovementStyle(value) }
                     }
@@ -430,6 +437,8 @@ ApplicationWindow {
         id: seg
         property var options: []      // [[value, label], ...]
         property string current: ""
+        property string help: ""                       // hover explanation for the whole choice
+        property var optionHelp: ({})                  // {value: explanation} per option
         signal picked(string value)
         Layout.fillWidth: true
         spacing: 4
@@ -444,6 +453,9 @@ ApplicationWindow {
                 implicitHeight: 34
                 enabled: seg.enabled
                 onClicked: seg.picked(modelData[0])
+                ToolTip.visible: hovered && (seg.optionHelp[modelData[0]] || seg.help) !== undefined && (seg.optionHelp[modelData[0]] || seg.help) !== ""
+                ToolTip.delay: 500
+                ToolTip.text: seg.optionHelp[modelData[0]] || seg.help
                 contentItem: TextLabel {
                     text: option.modelData[1]
                     font.pixelSize: 12
@@ -747,6 +759,7 @@ ApplicationWindow {
                             objectName: "drawVirtualBox"
                             Layout.fillWidth: true
                             visible: dashboard.movementStyle === "virtual"
+                            help: "카메라 미리보기에서 손을 움직일 영역을 끌어서 그립니다. 이 영역의 끝이 모니터 끝이 됩니다. 좁게 그리면 손을 조금만 움직여도 화면 끝까지 갑니다."
                             text: dashboard.boxEditing ? "그리는 중 · 미리보기에서 끌어 그리세요 · 누르면 취소" : "손 움직일 영역 다시 그리기 (가상 손)"
                             onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
                         }
@@ -829,6 +842,7 @@ ApplicationWindow {
                     Item { Layout.fillWidth: true }
                     ActionButton {
                         visible: dashboard.tutorialAvailable
+                        help: "커서 이동·클릭·스크롤을 연습 화면에서 다시 익힙니다. 실제 마우스는 움직이지 않습니다."
                         text: "동작 다시 배우기"
                         onClicked: dashboard.beginTutorial()
                     }

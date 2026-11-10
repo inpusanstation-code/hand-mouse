@@ -73,6 +73,10 @@ Dialog {
                         Layout.fillWidth: true
                         visible: modelData.group === settings.tabGroups[tabs.currentIndex]
                         spacing: 2
+                        HoverHandler { id: rowHover }
+                        ToolTip.visible: rowHover.hovered && modelData.hint !== ""
+                        ToolTip.delay: 500
+                        ToolTip.text: modelData.label + "\n" + modelData.hint
                         Label { text: modelData.label; font.bold: true; color: "#112331" }
                         ComboBox {
                             objectName: "sensitivity-choice-" + modelData.key
@@ -177,6 +181,8 @@ Dialog {
                         objectName: "closeToTray"
                         visible: settings.controller.trayAvailable
                         text: "창 닫기(X)를 누르면 트레이로 숨기기 (끄면 완전히 종료)"
+                        ToolTip.visible: hovered; ToolTip.delay: 500
+                        ToolTip.text: "켜 두면 X를 눌러도 백그라운드에서 계속 손으로 조작할 수 있고, 트레이 아이콘에서 다시 열거나 끝냅니다. 끄면 X가 프로그램을 완전히 끝냅니다."
                         checked: settings.controller.closeToTray
                         onClicked: settings.controller.setCloseToTray(checked)
                     }

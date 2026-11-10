@@ -77,6 +77,10 @@ Dialog {
                         property var currentValue: advanced.draft[modelData.key] ?? modelData.value
                         Layout.fillWidth: true
                         spacing: T.Studio.gap / 3
+                        HoverHandler { id: rowHover }
+                        ToolTip.visible: rowHover.hovered && modelData.hint !== ""
+                        ToolTip.delay: 500
+                        ToolTip.text: modelData.label + "\n" + modelData.hint
                         visible: (group.currentIndex === 0 || group.currentText === modelData.group)
                                  && (!search.text || modelData.label.toLowerCase().indexOf(search.text.toLowerCase()) >= 0)
                         Label {

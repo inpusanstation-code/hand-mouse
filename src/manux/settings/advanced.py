@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from typing import Mapping
 
+from manux.settings.help import LABELS_EXTRA, help_for
 from manux.settings.schema import Setting
 from manux.settings.sensitivity import BY_KEY as SENSITIVITY
 from manux.settings.sensitivity import VERTICAL_INPUT, VERTICAL_LABELS
@@ -148,10 +149,10 @@ def rows(settings: Settings):
         owner, short = key.split(".", 1)
         control = SENSITIVITY.get(key)
         low, high, step = _bounds(setting)
-        hint = (control.hint if control else setting.doc) or "한 번에 한 항목씩 조절하고 연습 화면에서 확인하세요."
+        hint = help_for(key) or (control.hint if control else "") or "한 번에 한 항목씩 조절하고 연습 화면에서 확인하세요."
         if short in ("pinch_threshold", "release_threshold"):
             hint = "시작 거리보다 해제 거리를 크게 설정하세요. 고급 설정은 두 값을 독립적으로 적용합니다."
-        result.append(dict(key=key, label=LABELS.get(short, control.label if control else short.replace("_", " ")),
+        result.append(dict(key=key, label=LABELS.get(short, LABELS_EXTRA.get(short, control.label if control else short.replace("_", " "))),
                            group=GROUPS[owner], kind=setting.kind, minimum=low, maximum=high, step=step,
                            choices=list(setting.choices), value=settings.get(key), defaultValue=setting.default,
                            choiceLabels=list(VERTICAL_LABELS if key == VERTICAL_INPUT.key else setting.choices),

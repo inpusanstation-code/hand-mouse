@@ -37,6 +37,9 @@ ColumnLayout {
                 enabled: modelData.editable && !settings.controller.sensitivityPending
                 id: speedSlider
                 onMoved: saveDelay.restart()
+                ToolTip.visible: hovered && modelData.hint !== ""
+                ToolTip.delay: 500
+                ToolTip.text: modelData.hint
                 Timer {
                     id: saveDelay; interval: 350
                     onTriggered: {
@@ -75,7 +78,8 @@ ColumnLayout {
                     checked = Qt.binding(function() { return settings.fistRow.value === modelData })
                     if (settings.fistRow.value !== modelData) settings.controller.applySensitivity({"preset.fist_style": modelData})
                 }
-                ToolTip.visible: hovered; ToolTip.text: settings.fistRow.choiceLabels[index]
+                ToolTip.visible: hovered; ToolTip.delay: 500
+                ToolTip.text: settings.fistRow.choiceLabels[index] + "\n" + settings.fistRow.hint
             }
         }
     }

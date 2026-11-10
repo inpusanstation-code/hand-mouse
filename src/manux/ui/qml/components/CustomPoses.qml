@@ -33,6 +33,8 @@ Rectangle {
             StudioButton {
                 Layout.fillWidth: true
                 objectName: "customPoseStart"; text: "새 동작 등록 시작"; primary: true
+                ToolTip.visible: hovered; ToolTip.delay: 500
+                ToolTip.text: "준비 1.5초 → 자세 2초 → 쉬기 1초를 5번 반복합니다. 끝나면 얼마나 잘 알아보는지 보여 주고, 저장하면 바로 쓸 수 있습니다. 그동안 마우스는 움직이지 않습니다."
                 enabled: box.idle && poseName.text.trim().length > 0 && box.controller.customPoses.length < 8
                 onClicked: box.controller.startCustomPose(poseName.text)
             }
@@ -112,6 +114,8 @@ Rectangle {
                 StudioSelect {
                     objectName: "customPoseAction-" + poseRow.modelData.slot
                     Layout.fillWidth: true
+                    ToolTip.visible: hovered; ToolTip.delay: 500
+                    ToolTip.text: "이 손 모양을 취하면 실행할 명령이나 단축키입니다. 목록에 없으면 맨 아래 ‘직접 입력’으로 아무 키 조합이나 넣을 수 있습니다."
                     model: poseRow.presets.map(function (p) { return p.label })
                     currentIndex: poseRow.typing ? poseRow.customIndex : poseRow.presetIndex()
                     onActivated: function (index) {
@@ -130,6 +134,8 @@ Rectangle {
                         Layout.fillWidth: true
                         text: poseRow.modelData.keys
                         placeholderText: "키 조합 · 예: ctrl+shift+n, win+e, alt+tab, f5"
+                        ToolTip.visible: hovered; ToolTip.delay: 500
+                        ToolTip.text: "키 이름을 +로 이어 쓰세요. 예: ctrl+c, win+shift+s, alt+tab, f5, playpause, 한영. Enter로 적용합니다."
                         onAccepted: applyKeys.clicked()
                     }
                     StudioButton {
