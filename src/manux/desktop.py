@@ -84,7 +84,8 @@ class CameraInput:
             track = self.settings.section("tracking")
             if self.landmarker is None:
                 self.landmarker = MediaPipeLandmarker(self.model_path, **options_from(track))
-                self.tracker = HandTracker(self.landmarker, use_crop=track["hand_crop"], min_score=track["min_hand_score"])
+                self.tracker = HandTracker(self.landmarker, use_crop=track["hand_crop"], min_score=track["min_hand_score"],
+                                       follow=track["hand_follow"])
             camera = LatestFrameCamera(_camera_config(self.settings, self.source))
             if not camera.open():
                 self.error = "카메라를 찾을 수 없습니다. 연결을 확인하세요."

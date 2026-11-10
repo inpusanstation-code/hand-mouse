@@ -146,3 +146,52 @@ def test_landmarker_defaults_to_one_hand_and_preserves_explicit_two(monkeypatch,
         assert detector._crop_options["base_options"]["model_asset_buffer"] is calls[0]["base_options"]["model_asset_buffer"]
     finally:
         detector.close()
+
+
+# ---------------------------------------------------------------- HandFollower (virtual-hand-20261110)
+from manux.tracking.selection import HandFollower  # noqa: E402
+
+
+def test_follower_starts_only_from_a_strict_reading():
+    f = HandFollower()
+    assert f.select([hand_at(.5, .5, label="Right")], "Right", True, 0.0) is None     # wrong side, nothing to follow
+    assert f.select([hand_at(.5, .5, score=.5)], "Right", True, .1) is None
+    assert f.select([hand_at(.5, .5)], "Right", True, .2) is not None and not f.followed
+
+
+def test_follower_keeps_a_flipped_or_unsure_hand_nearby_and_relabels_it():
+    f = HandFollower()
+    f.select([hand_at(.5, .5)], "Right", True, 0.0)
+    kept = f.select([hand_at(.51, .5, label="Right")], "Right", True, .03)              # label flipped
+    assert kept is not None and f.followed and physical_side(kept, True) == "Right"
+    kept = f.select([hand_at(.52, .5, score=.4)], "Right", True, .06)                   # unsure score
+    assert kept is not None and physical_side(kept, True) == "Right"
+
+
+def test_follower_refuses_far_jumps_size_changes_gaps_two_hands_and_long_unconfirmed_runs():
+    def started():
+        f = HandFollower()
+        f.select([hand_at(.5, .5)], "Right", True, 0.0)
+        return f
+    assert started().select([hand_at(.8, .5, label="Right")], "Right", True, .03) is None
+    assert started().select([hand_at(.5, .5, span=.2, label="Right")], "Right", True, .03) is None
+    assert started().select([hand_at(.5, .5, label="Right")], "Right", True, .6) is None
+    assert started().select([hand_at(.5, .5, label="Right"), hand_at(.2, .5, label="Right")], "Right", True, .03) is None
+    f = started()
+    for k in range(1, 10):                                                              # 0.3 .. 2.7 s
+        assert f.select([hand_at(.5, .5, label="Right")], "Right", True, .3 * k) is not None
+    assert f.select([hand_at(.5, .5, label="Right")], "Right", True, 3.1) is None      # 3 s without a strict reading
+
+
+def test_tracker_reports_followed_hands_and_can_switch_following_off():
+    first = FakeLandmarker([hand_at(.5, .5)])
+    tracker = HandTracker(first)
+    assert tracker.step(FRAME, None, "Right").hand is not None
+    tracker.landmarker = FakeLandmarker([hand_at(.5, .5, label="Right")])
+    later = FrameInfo(seq=1, t=1.03, width=1280, height=720, mirrored=True)
+    result = tracker.step(later, None, "Right")
+    assert result.hand is not None and result.followed and result.hand.handedness == "Right"
+    strict = HandTracker(FakeLandmarker([hand_at(.5, .5)]), follow=False)
+    strict.step(FRAME, None, "Right")
+    strict.landmarker = FakeLandmarker([hand_at(.5, .5, label="Right")])
+    assert strict.step(later, None, "Right").hand is None

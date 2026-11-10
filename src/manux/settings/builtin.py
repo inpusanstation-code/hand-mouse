@@ -39,6 +39,8 @@ TRACKING = (
     Setting("tracking.detect_max_width", 640, kind="int", minimum=0, maximum=4096,
             doc="shrink frames wider than this before detection; 0 = full width"),
     Setting("tracking.hand_crop", False, kind="bool", doc="look at a full-resolution square around the last hand"),
+    Setting("tracking.hand_follow", True, kind="bool",
+            doc="keep the control hand when a far hand's left/right reading flips or its score drops (HandFollower)"),
     Setting("tracking.control_hand", "", kind="choice", choices=("", "Left", "Right"),
             doc="the physical hand that controls; empty = not chosen yet"),
     Setting("tracking.min_hand_score", 0.75, minimum=0.0, maximum=1.0,

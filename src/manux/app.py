@@ -168,7 +168,8 @@ def camera_session(settings: Settings, source: str | None, model_path: Path):
         track = settings.section("tracking")
         landmarker = MediaPipeLandmarker(model_path, **options_from(track))
         resources.callback(landmarker.close)
-        tracker = HandTracker(landmarker, use_crop=track["hand_crop"], min_score=track["min_hand_score"])
+        tracker = HandTracker(landmarker, use_crop=track["hand_crop"], min_score=track["min_hand_score"],
+                                       follow=track["hand_follow"])
         yield camera, tracker
 
 

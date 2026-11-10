@@ -12,7 +12,7 @@ from typing import Any, List, Optional, Tuple
 from manux.core.contracts import FrameInfo, HandObservation
 from manux.tracking.crop import HandCrop
 from manux.tracking.landmarker import Landmarker, RawHand
-from manux.tracking.selection import MIN_SCORE, physical_side, select
+from manux.tracking.selection import MIN_SCORE, HandFollower, physical_side
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class TrackResult:
     hands: Tuple[RawHand, ...] = ()                 # every hand found (capture screen, diagnostics)
     path: str = "full"                              # "full" | "crop" | "crop_miss>full" | "skipped"
     detect_ms: float = 0.0
+    followed: bool = False                          # the hand was kept by HandFollower (label flipped or unsure)
 
 
 def to_observation(raw: RawHand, frame: FrameInfo, side: str) -> HandObservation:
@@ -29,14 +30,18 @@ def to_observation(raw: RawHand, frame: FrameInfo, side: str) -> HandObservation
 
 
 class HandTracker:
-    def __init__(self, landmarker: Landmarker, *, use_crop: bool = False, min_score: float = MIN_SCORE) -> None:
+    def __init__(self, landmarker: Landmarker, *, use_crop: bool = False, min_score: float = MIN_SCORE,
+                 follow: bool = True) -> None:
         self.landmarker = landmarker
         self.use_crop = use_crop
         self.min_score = min_score
         self.crop = HandCrop()
+        self.follower: Optional[HandFollower] = HandFollower() if follow else None
 
     def reset(self) -> None:
         self.crop.reset()
+        if self.follower is not None:
+            self.follower.reset()
 
     def step(self, frame: FrameInfo, image: Any, control_hand: str, detect: bool = True) -> TrackResult:
         if not detect:
@@ -48,7 +53,12 @@ class HandTracker:
             self.crop.reset()
             hands = self.landmarker.detect(image, roi=None)
             path = "crop_miss>full"
-        chosen = select(hands, control_hand, frame.mirrored, self.min_score)
+        if self.follower is not None:
+            chosen = self.follower.select(hands, control_hand, frame.mirrored, frame.t, self.min_score)
+            followed = self.follower.followed
+        else:
+            from manux.tracking.selection import select
+            chosen, followed = select(hands, control_hand, frame.mirrored, self.min_score), False
         hand = None
         if chosen is not None:
             try:
@@ -59,4 +69,5 @@ class HandTracker:
             self.crop.update(hand.landmarks, frame.width, frame.height)
         else:
             self.crop.reset()
-        return TrackResult(hand, tuple(hands), path, float(getattr(self.landmarker, "last_detect_ms", 0.0)))
+        return TrackResult(hand, tuple(hands), path, float(getattr(self.landmarker, "last_detect_ms", 0.0)),
+                           followed=followed and hand is not None)
