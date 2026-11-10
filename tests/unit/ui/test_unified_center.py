@@ -283,9 +283,9 @@ def test_fist_style_choice_on_the_first_page_switches_both_speeds(tmp_path, layo
         assert fast is not None and fast.isVisible() and precise.property("checked") and not fast.property("checked")
         assert QMetaObject.invokeMethod(fast, "click")
         runtime._drain_runtime_requests(); b.poll(); QTest.qWait(40)
-        assert settings.get("pinch.fist_dpi_multiplier") == 30.0 and settings.get("pinch.shape_dpi_min") == 1.0
+        assert settings.get("pinch.fist_dpi_multiplier") == 35.0 and settings.get("pinch.shape_dpi_min") == 1.0
         assert fast.property("checked") and not precise.property("checked")
-        assert runtime.settings_for("pinch")["fist_dpi_multiplier"] == 30.0
+        assert runtime.settings_for("pinch")["fist_dpi_multiplier"] == 35.0
         assert QMetaObject.invokeMethod(precise, "click")
         runtime._drain_runtime_requests(); b.poll(); QTest.qWait(40)
         assert settings.get("pinch.fist_dpi_multiplier") == .35 and precise.property("checked")
