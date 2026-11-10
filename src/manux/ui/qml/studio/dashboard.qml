@@ -301,7 +301,6 @@ ApplicationWindow {
                         }
                     }
                 }
-                ActionButton { visible: window.width >= 1000; text: "고급 설정"; onClicked: { dashboard.command(27); advancedSettings.open() } }
                 ActionButton { objectName: "mainControlToggle"; text: dashboard.controlLabel; accent: true; onClicked: dashboard.command(32) }
             }
         }

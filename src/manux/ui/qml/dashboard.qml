@@ -491,7 +491,6 @@ ApplicationWindow {
                     smooth: true
                 }
                 Item { Layout.fillWidth: true }
-                ActionButton { text: "고급 설정"; onClicked: { dashboard.command(27); advancedSettings.open() } }
                 ActionButton { text: "학습 센터"; onClicked: trainingCenter.open() }
                 TextLabel { text: dashboard.chosenHand; color: window.muted; font.pixelSize: 13 }
                 ActionButton {
