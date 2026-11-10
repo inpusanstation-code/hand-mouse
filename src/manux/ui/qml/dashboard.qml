@@ -127,7 +127,7 @@ ApplicationWindow {
                 Divider {}
                 SectionLabel { text: "어디서든 쓰는 단축키" }
                 Repeater {
-                    model: [["toggle", "켜기 / 끄기"], ["hide", "창 숨기기 / 보이기"]]
+                    model: [["toggle", "켜기 / 끄기"], ["hide", "창 숨기기 / 보이기"], ["emergency", "긴급 정지"]]
                     delegate: RowLayout {
                         required property var modelData
                         readonly property string shortcutAction: modelData[0]   // not "action": Button has one

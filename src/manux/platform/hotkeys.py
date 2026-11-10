@@ -15,7 +15,9 @@ import sys
 import threading
 from typing import Callable, Dict, Optional, Set, Tuple
 
-DEFAULTS = {"toggle": "ctrl+alt+shift+q", "hide": "ctrl+alt+shift+h"}
+DEFAULTS = {"toggle": "ctrl+alt+shift+q", "hide": "ctrl+alt+shift+h", "emergency": "pause"}
+# Keys that work alone (no modifier): only ones no program uses for typing. Pause is the emergency stop.
+BARE_KEYS = {"pause": 0x13}
 
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 MODIFIERS = {"ctrl": MOD_CONTROL, "alt": MOD_ALT, "shift": MOD_SHIFT, "win": MOD_WIN}
@@ -35,6 +37,8 @@ def parse(combo: str) -> Optional[Tuple[int, int]]:
             mods |= MODIFIERS[part]
         else:
             keys.append(part)
+    if not mods and len(keys) == 1 and keys[0] in BARE_KEYS:
+        return 0, BARE_KEYS[keys[0]]
     if not mods or len(keys) != 1:
         return None
     key = keys[0]

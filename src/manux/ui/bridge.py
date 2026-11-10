@@ -1407,6 +1407,19 @@ class Bridge(QObject):
     def stopTraining(self):
         self.training_job.stop()
 
+    @Slot()
+    def emergency_stop(self):
+        """Pause key, anywhere: control off (the engine lets go of every button and key) and learning stopped.
+        Never turns anything on, so pressing it twice is safe."""
+        self._pause()
+        stopped = False
+        if self.training_job.running:
+            self.training_job.stop()
+            stopped = True
+        self.training_note = "긴급 정지: 제어를 껐습니다" + (" · 학습을 멈췄습니다" if stopped else "")
+        self.trainingChanged.emit()
+        self.stateChanged.emit()
+
     @Slot(str, str, str)
     def setGestureTcnMode(self, key, mode, model_id):
         if self.rec_mode != "off" or self.training_job.running or self.tc.hub_job.running:
@@ -2736,7 +2749,7 @@ class Bridge(QObject):
             return "알 수 없는 단축키입니다."
         value = self.normalize_combo(combo)
         if value is None:
-            return "Ctrl·Alt·Shift 중 하나 이상과 글자·숫자·F키 하나를 함께 누르세요."
+            return "Ctrl·Alt·Shift 중 하나 이상과 글자·숫자·F키 하나를 함께 누르세요(Pause는 혼자 쓸 수 있음)."
         if any(v == value for a, v in self.shortcuts.items() if a != action):
             return "다른 기능이 이미 쓰는 조합입니다."
         old = dict(self.shortcuts)
@@ -2786,6 +2799,8 @@ class Bridge(QObject):
                 self.command(KEY_SPACE)
             elif request == "hide":
                 self.toggle_window()
+            elif request == "emergency":
+                self.emergency_stop()
         if self.closed:
             self.application.quit()
             return
@@ -3015,7 +3030,8 @@ def run(runtime, settings, paths, *, tray: bool = True, screenshot: Optional[Pat
     preferences.sync()
     if hotkeys is not None:
         hotkeys.callbacks.update({"toggle": lambda: bridge.ui_requests.append("toggle"),
-                                  "hide": lambda: bridge.ui_requests.append("hide")})
+                                  "hide": lambda: bridge.ui_requests.append("hide"),
+                                  "emergency": lambda: bridge.ui_requests.append("emergency")})
     tray_icon = make_tray(bridge) if (tray and make_tray is not None) else None
     runtime.start()
     if screenshot is not None:

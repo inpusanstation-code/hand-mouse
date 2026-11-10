@@ -452,3 +452,28 @@ def test_relearn_motions_with_hand_position_skips_the_cursor_fit(tmp_path, layou
         assert b.tutorial.step_key == "sensitivity"
     finally:
         b.close()
+
+
+# ------------------------------------------------------------------ Pause = emergency stop (virtual-hand-20261110)
+def test_pause_alone_is_a_valid_shortcut_and_the_default_emergency_stop():
+    from manux.platform import hotkeys
+    assert hotkeys.DEFAULTS["emergency"] == "pause"
+    assert hotkeys.parse("pause") == (0, 0x13) and hotkeys.normalize("Pause") == "pause"
+    assert hotkeys.parse("q") is None and hotkeys.parse("f5") is None     # other keys still need a modifier
+
+
+def test_emergency_stop_turns_control_off_stops_learning_and_never_turns_on(bridge):
+    from manux.engine.commands import SetControl
+    b, runtime = bridge
+    drained(runtime)
+    stopped = []
+    b.training_job.running = True
+    b.training_job.stop = lambda: stopped.append(True)
+    b.ui_requests.append("emergency")
+    b.poll()
+    assert b.paused and stopped == [True]
+    assert [c for c in drained(runtime) if isinstance(c, SetControl)] == [SetControl(False)]
+    b.training_job.running = False
+    b.emergency_stop()
+    assert b.paused and stopped == [True]
+    assert all(c == SetControl(False) for c in drained(runtime) if isinstance(c, SetControl))
