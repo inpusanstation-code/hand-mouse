@@ -92,6 +92,10 @@
 - 고친 것: 등록 실패(시연이 짧거나 손이 안 보임) 때 입력이 꺼진 채 남지 않게 `CustomPoses.step`이 세션을 닫고 이유를 남긴다.
 - 시험: `tests/unit/features/test_custom_pose.py` 9개(등록·승인·바인딩·재시작 후 유지·실제 엔진에서 `nav.back` 실행·실패 처리), `tests/unit/ui/test_unified_center.py` 1개(화면에서 등록 시작·취소, QML 오류 없음). 합성 손이며 실제 카메라로 등록해 보지 않았다.
 
+## 모델 되돌리기 (3단계 2번): 중복이라 옮기지 않음
+- MANUX에는 이미 모델 보관함 › 버전 목록 › **"검증 후 복원"**이 있다(`tools/studio_worker.py` `restore`). 예전 버전을 지금의 별도 평가 녹화로 다시 검사한 뒤 새 버전으로 설치한다. 원본의 "직전 모델로 한 단계 되돌리기"(`versions.ModelManager.rollback`)보다 엄격하다.
+- 원본의 자동 되돌리기(학습 시작 때 실사용 모델이 직전보다 뒤처지면 복귀)는, MANUX가 평가에서 기존보다 나빠진 모델을 아예 설치하지 않으므로(`ml/store.validate_report`) 같은 상황이 생기지 않는다.
+
 ## 아직 안 한 것 (3단계 남은 일)
 2. `ml/store.py` 되돌리기.
 3. 평소 사용 후보 수집(`segmenter`, `collector`) → MANUX 녹화 형식.
