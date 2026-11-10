@@ -96,9 +96,14 @@
 - MANUX에는 이미 모델 보관함 › 버전 목록 › **"검증 후 복원"**이 있다(`tools/studio_worker.py` `restore`). 예전 버전을 지금의 별도 평가 녹화로 다시 검사한 뒤 새 버전으로 설치한다. 원본의 "직전 모델로 한 단계 되돌리기"(`versions.ModelManager.rollback`)보다 엄격하다.
 - 원본의 자동 되돌리기(학습 시작 때 실사용 모델이 직전보다 뒤처지면 복귀)는, MANUX가 평가에서 기존보다 나빠진 모델을 아예 설치하지 않으므로(`ml/store.validate_report`) 같은 상황이 생기지 않는다.
 
+## 평소 사용 중 학습 (3단계 3·4번): 수집만 옮기고 학습은 MANUX로 (사용자 결정)
+- 원본 `online/segmenter.py` → `perception/segmenter.py`(동작 그대로, 손 좌표계만 `local3d.hand_frame`), `online/collector.py`의 역할 → `desktop.EverydayCollector`(프레임 스레드는 구간 자르기만, 저장은 별도 스레드, 큐가 차면 버림), 저장·라벨 → `data/everyday.py`.
+- **형식을 새로 만들지 않았다**: 후보는 보통 MANUX 녹화(§9, `mode: free`)로 `<recordings>/everyday/`에 저장한다. 라벨 달기 전에는 모든 프레임이 `target: idle`(학습에서 항상 제외), `meta.split: candidate`라 학습 센터가 읽지 않는다. 사용자가 고르면 `split: train`, `label_source: user_corrected`로 다시 쓰여 기존 "통합 재학습 → 별도 평가 → 설치" 흐름이 그대로 쓴다.
+- 기본 꺼짐(`data.collect_everyday`). 켜도 제어 중·Windows 출력·녹화/등록/연습이 아닐 때만 모은다. 손 관절만, 영상 없음.
+- 화면: 학습 센터 › 녹화 › "평소 사용 구간 고치기"(저장 켜기, 검토할 구간 목록, 구간마다 "실제로 하려던 동작" 고르기·버리기).
+- **옮기지 않은 것**: 원본의 torch 사용 중 학습기(`models`, `trainer`, `replay`, `memory`, `live`, `baseline`, `dataset`, `update_job`, `app_job`, `versions`, `safety`). MANUX 재학습·평가·설치·복원과 겹치고, 원본에서도 실데이터로 교체가 성공한 적이 없다.
+- 시험: `tests/unit/data/test_everyday.py` 7개(가만히 있는 손은 후보 없음, 핀치는 후보 하나, 미라벨 후보는 학습 제외, 라벨 후 학습 포함, 아무것도 아님 = none, 켜야만·실사용에서만 수집, 큐가 차면 버림), 화면 시험 1개.
+
 ## 아직 안 한 것 (3단계 남은 일)
-2. `ml/store.py` 되돌리기.
-3. 평소 사용 후보 수집(`segmenter`, `collector`) → MANUX 녹화 형식.
-4. 사용 중 재학습(torch 부분) → worker 작업 종류.
-5. 가상 손의 화면 손 그림과 손가락 사이 클릭(계약 변경 제안 필요).
-6. 녹화 파일(`recordings/`)은 저장소 밖 + `tools/hub.py`로 공유(AGENTS 규칙), virtual-hand의 `config/gestures.json` 값은 PC별 조정값이라 옮기지 않음.
+1. 가상 손의 화면 손 그림과 손가락 사이 클릭(계약 변경 제안 필요).
+2. 녹화 파일(`recordings/`)은 저장소 밖 + `tools/hub.py`로 공유(AGENTS 규칙), virtual-hand의 `config/gestures.json` 값은 PC별 조정값이라 옮기지 않음.

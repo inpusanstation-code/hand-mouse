@@ -300,6 +300,108 @@ class CustomPoses:
                 "message": self.message, "revision": self.revision}
 
 
+def everyday_service(folder: Path, preset: Callable[[], str]) -> Dict[str, Callable]:
+    """What the screen may do with candidates: list, label with choice index (0 = nothing meant), discard."""
+    from manux.data import everyday as data
+
+    def choices():
+        mode = {"trigger": "pointer"}.get(preset(), preset())
+        rows, seen = [], set()
+        for task in tasks_for(mode=mode):
+            if task.free or task.label in seen:
+                continue
+            seen.add(task.label)
+            rows.append({"target": task.label, "task": task.key, "gesture": task.gesture or "", "name": task.name})
+        return rows
+
+    def label(path: str, choice: int) -> str:
+        if choice == 0:
+            data.label(folder, Path(path), data.NONE_CHOICE)
+            return "아무 동작도 아님"
+        row = choices()[choice - 1]
+        data.label(folder, Path(path), row["target"], row["task"], row["gesture"])
+        return row["name"]
+
+    return {"list": lambda: data.candidates(folder), "choices": choices, "label": label,
+            "discard": lambda path: data.discard(folder, Path(path))}
+
+
+class EverydayCollector:
+    """Cuts normal use into candidates (perception/segmenter.py) and writes each as a recording (data/everyday.py).
+
+    Off unless `data.collect_everyday` is on. The frame thread only runs the segmenter; a worker thread writes behind a
+    short queue, and a full queue drops the candidate (counted), so the camera never waits. Joints only, no pictures.
+    """
+
+    QUEUE = 8
+
+    def __init__(self, folder: Path, meta: Callable[[], Mapping[str, Any]] = dict) -> None:
+        from manux.perception.segmenter import MotionSegmenter
+        self.folder = Path(folder)
+        self.meta = meta
+        self.segmenter = MotionSegmenter()
+        self.queue: "queue.Queue" = queue.Queue(maxsize=self.QUEUE)
+        self.saved = self.dropped = 0
+        self.errors: List[str] = []
+        self._thread: Optional[threading.Thread] = None
+
+    def feed(self, t: float, hand: Optional[HandObservation], action: Optional[str]) -> None:
+        segment = self.segmenter.feed(t, hand.landmarks if hand else None, hand.world if hand else None, action, hand=hand)
+        if segment is not None:
+            self._submit(segment)
+
+    def flush(self) -> None:
+        segment = self.segmenter.flush()
+        self.segmenter.reset()
+        if segment is not None:
+            self._submit(segment)
+
+    def _submit(self, segment) -> None:
+        try:
+            self.queue.put_nowait((segment, dict(self.meta())))
+        except queue.Full:
+            self.dropped += 1
+            return
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._drain, name="everyday-writer", daemon=True)
+            self._thread.start()
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                segment, meta = self.queue.get(timeout=1.0)
+            except queue.Empty:
+                return
+            try:
+                self.write(segment, meta)
+                self.saved += 1
+            except (OSError, ValueError) as error:
+                self.errors.append(str(error))
+
+    def write(self, segment, meta: Mapping[str, Any]) -> Path:
+        from manux.data.everyday import CANDIDATE_SPLIT, UNLABELED
+        from manux.data.recorder import SessionRecorder
+        t0 = float(segment.frames[0]["t"])
+        recorder = SessionRecorder(self.folder, "free", {**meta, "split": CANDIDATE_SPLIT, "source_kind": "everyday"},
+                                   now=t0, stamp=time.strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6])
+        try:
+            for f in segment.frames:
+                recorder.frame(float(f["t"]), f.get("hand"), label=UNLABELED,
+                               rule={"action": f["action"]} if f.get("action") else None)
+            recorder.event(t0, "candidate", {"start": round(segment.start - t0, 3), "end": round(segment.end - t0, 3),
+                                             "reason": segment.reason, "triggers": segment.triggers,
+                                             "top_action": segment.top_action})
+            return recorder.close()
+        except BaseException:
+            recorder.abort()
+            raise
+
+    def wait(self, timeout: float = 5.0) -> None:
+        """Tests and shutdown: let the writer finish what is queued."""
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+
 class DesktopRuntime:
     """Runs the input -> engine loop on its own thread and keeps the newest ViewFrame."""
 
@@ -333,6 +435,7 @@ class DesktopRuntime:
         self.spatial_feature: Optional[SpatialPoseFeature] = None
         self.spatial_guard: Optional[SpatialPoseGuard] = None
         self.custom_poses: Optional[CustomPoses] = None   # registered gestures (set by main)
+        self.everyday: Optional[EverydayCollector] = None  # everyday-use candidates (set by main; on with data.collect_everyday)
         engine.settings_for = self.settings_for
         # tracking test (S6): owned by this thread; the UI asks with start/close and reads ViewFrame.tracking
         self.log_dir: Optional[Path] = None
@@ -830,6 +933,7 @@ class DesktopRuntime:
             from manux.engine.commands import SetBusy
             self.engine.commands.put(SetBusy("enrolling", False))     # failed: give the input back
         snap = self.engine.step(frame, hand)
+        self._everyday_step(frame.t, hand, snap)
         pointer_setup = self._pointer_setup_frame(frame, hand, pitch, snap.stage, sink)
         rule_preview = None
         if {"enrolling", "recording"}.intersection(snap.busy):
@@ -1006,6 +1110,21 @@ class DesktopRuntime:
                 self._model_token = None
                 if not self.reload_model(force=True):
                     self.model_store, self._model_token, self._attempted_model_token = previous
+
+    def _everyday_step(self, t, hand, snap) -> None:
+        """Only real use: control on, Windows output, nothing busy (no recording, registration or tutorial)."""
+        collector = self.everyday
+        if collector is None:
+            return
+        using = (self.settings.get("data.collect_everyday") and snap.output is OutputTarget.WINDOWS
+                 and getattr(snap, "control_on", False) and not snap.busy)
+        if not using:
+            if collector.segmenter.open:
+                collector.flush()
+            return
+        action = next((a for a, phase, status in snap.results
+                       if a not in ("mouse.move", "mouse.place") and phase in ("tap", "begin")), None)
+        collector.feed(t, hand, action)
 
     def _custom_pose_request(self, command):
         """start / approve / cancel / bind / remove a registered gesture. No OS input while demonstrating."""
@@ -1357,6 +1476,11 @@ def main(argv=None) -> int:
                             "simulation_model": str(args.tcn_model) if args.tcn_model else None}
     studio = make_pose_studio(paths.data_dir, runtime.set_spatial_model)
     runtime.custom_poses = CustomPoses(paths.data_dir / "custom_poses", known_samples=studio.load_all_samples)
+    from manux.data import everyday as everyday_data
+    from manux.data.everyday import folder_of
+    runtime.everyday = EverydayCollector(folder_of(paths.recordings_dir), meta=lambda: {
+        "person": runtime._rec_identity.profile, "profile": runtime._rec_identity.profile,
+        "preset": runtime._rec_identity.preset, "camera": {"mirror": bool(settings.get("camera.mirror"))}})
     from manux.perception.palm_axes import PalmAxesCalibration, valid_axes, palm_point
     return run(runtime, settings, paths, tray=not args.no_tray, screenshot=args.screenshot, layout=args.ui,
                services={
@@ -1371,6 +1495,7 @@ def main(argv=None) -> int:
                    "studio_actions": lambda: list(STUDIO_ACTIONS),
                    "studio_categories": lambda: list(STUDIO_CATEGORIES),
                    "studio_system_action": normalize_system_action,
+                   "everyday": everyday_service(folder_of(paths.recordings_dir), lambda: runtime._rec_identity.preset),
                },
                hotkeys=hotkeys.GlobalHotkeys({}), hotkey_defaults=hotkeys.DEFAULTS,
                normalize_combo=hotkeys.normalize, combo_label=hotkeys.label, make_tray=QtTray)

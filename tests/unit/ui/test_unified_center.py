@@ -97,3 +97,33 @@ def test_register_a_gesture_from_the_pose_page_without_qml_errors(tmp_path):
         qInstallMessageHandler(None)
         b.close()
         runtime.stop()
+
+
+def test_everyday_section_on_the_recording_page_switches_and_lists(tmp_path):
+    from PySide6.QtCore import qInstallMessageHandler
+    from manux.desktop import build, everyday_service
+    from types import SimpleNamespace
+    messages = []
+    qInstallMessageHandler(lambda mode, ctx, text: messages.append(text))
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    service = TrainingCenterService(tmp_path/'config', tmp_path/'data', tmp_path/'recordings', specs=training_specs())
+    service.configure("synthetic")
+    every = everyday_service(tmp_path / "recordings" / "everyday", lambda: "pinch")
+    b = Bridge(runtime, settings, tmp_path/'config', services={"training_center": service, "everyday": every}, layout="studio")
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        assert QMetaObject.invokeMethod(b.window.findChild(QObject, "openLearningCenter"), "click")
+        popup = b.window.findChild(QObject, "studioDataManagement")
+        popup.setProperty("pageIndex", 1); QTest.qWait(40)
+        check = b.window.findChild(QQuickItem, "everydayCollect")
+        assert check is not None and check.isVisible() and not check.property("checked")
+        b.setEverydayCollect(True); QTest.qWait(20)
+        assert settings.get("data.collect_everyday") is True and check.property("checked")
+        b.refreshEveryday()
+        assert b.everydayCandidates == [] and b.everydayChoiceLabels[0] == "아무 동작도 아니었음"
+        assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Cannot assign", "Binding loop"))], messages
+    finally:
+        qInstallMessageHandler(None)
+        b.close()
+        runtime.stop()

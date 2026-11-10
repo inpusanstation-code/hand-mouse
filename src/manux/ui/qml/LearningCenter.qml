@@ -189,6 +189,7 @@ Popup {
                                 HandSkeleton { anchors.fill: parent; bridge: studio.controller; imageWidth: parent.paintedWidth; imageHeight: parent.paintedHeight }
                             }
                         }
+                        EverydayCandidates { Layout.fillWidth: true; controller: studio.controller; idle: studio.idle; visible: studio.controller.everydayAvailable }
                         Copy { text: "녹화 라이브러리 · " + studio.library.recordings.length; font.bold: true }
                         ListView {
                             id: recordings; objectName: "studioRecordings"

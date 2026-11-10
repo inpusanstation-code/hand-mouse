@@ -487,6 +487,7 @@ class Bridge(QObject):
     settingsRequested = Signal()
     studioChanged = Signal()
     customPoseChanged = Signal()
+    everydayChanged = Signal()
 
     def __init__(self, runtime, settings: store.Settings, config_dir: Path, *,
                  services: Optional[Dict[str, Callable]] = None, hotkeys=None, hotkey_defaults=None,
@@ -1494,6 +1495,72 @@ class Bridge(QObject):
     @Slot(str)
     def removeCustomPose(self, slot):
         self._custom_request("remove", slot=str(slot))
+
+    # ------------------------------------------------------------------ everyday candidates (data/everyday.py)
+    def _everyday(self):
+        return self.services.get("everyday")
+
+    @Property(bool, notify=everydayChanged)
+    def everydayAvailable(self):
+        return self._everyday() is not None
+
+    @Property(bool, notify=everydayChanged)
+    def everydayCollect(self):
+        return bool(self.settings.get("data.collect_everyday"))
+
+    @Slot(bool)
+    def setEverydayCollect(self, on):
+        self._set("data.collect_everyday", bool(on))
+        self.everydayChanged.emit()
+
+    @Property("QVariantList", notify=everydayChanged)
+    def everydayCandidates(self):
+        return list(getattr(self, "_everyday_rows", []))
+
+    @Property("QStringList", notify=everydayChanged)
+    def everydayChoiceLabels(self):
+        service = self._everyday()
+        return ["아무 동작도 아니었음"] + [c["name"] for c in service["choices"]()] if service else []
+
+    @Property(str, notify=everydayChanged)
+    def everydayNote(self):
+        return getattr(self, "_everyday_note", "")
+
+    @Slot()
+    def refreshEveryday(self):
+        service = self._everyday()
+        if service is None:
+            return
+        try:
+            self._everyday_rows = [{**r, "action_text": ACTION_TEXT.get(r["action"], r["action"] or "없음")}
+                                   for r in service["list"]()]
+        except OSError as error:
+            self._everyday_rows, self._everyday_note = [], f"후보를 읽지 못했습니다: {error}"
+        self.everydayChanged.emit()
+
+    @Slot(str, int)
+    def labelEveryday(self, path, choice):
+        service = self._everyday()
+        if service is None:
+            return
+        try:
+            name = service["label"](path, int(choice))
+            self._everyday_note = f"‘{name}’(으)로 저장 · 다음 학습부터 학습 데이터로 씁니다."
+        except (OSError, ValueError, IndexError) as error:
+            self._everyday_note = str(error)
+        self.refreshEveryday()
+
+    @Slot(str)
+    def discardEveryday(self, path):
+        service = self._everyday()
+        if service is None:
+            return
+        try:
+            service["discard"](path)
+            self._everyday_note = "후보를 지웠습니다."
+        except (OSError, ValueError) as error:
+            self._everyday_note = str(error)
+        self.refreshEveryday()
 
     def _poll_custom_poses(self) -> None:
         cp = getattr(self.runtime, "custom_poses", None)
