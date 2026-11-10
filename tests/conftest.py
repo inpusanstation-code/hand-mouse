@@ -32,3 +32,24 @@ def _own_fold_cache(tmp_path, monkeypatch):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "record_off: run with Record & Fling at its shipped default (off)")
+
+
+@pytest.fixture(autouse=True)
+def _own_binding_files(tmp_path, monkeypatch):
+    """Never the user's gesture bindings, motions, drawings, sequences or AI history (2026-11-10: a motion the user
+    registered changed the task list two dataset tests count; tests could also have written to config/)."""
+    import src.action_bindings as ab
+    import src.draw_mode as dm
+    import src.gesture_catalog as gc
+    import src.llm_binding as lb
+    import src.path_gesture as pg
+    import src.sequence as sq
+    monkeypatch.setattr(ab, "DEFAULT_BINDINGS_PATH", tmp_path / "gesture_bindings.json")
+    monkeypatch.setattr(ab, "_GLOBAL_REGISTRY", None)
+    monkeypatch.setattr(dm, "DEFAULT_PATH", tmp_path / "draw_shapes.json")
+    monkeypatch.setattr(sq, "DEFAULT_PATH", tmp_path / "sequences.json")
+    monkeypatch.setattr(pg, "DEFAULT_PATH", tmp_path / "path_gestures.json")
+    monkeypatch.setattr(lb, "HISTORY_PATH", tmp_path / "ai_connections.json")
+    gc.sync_custom_motions({})
+    yield
+    gc.sync_custom_motions({})

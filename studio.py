@@ -1,7 +1,7 @@
 """
 MANUX 손짓 학습 스튜디오 - 시작 메뉴 (2026-11-05).
 
-studio.bat 이 이 메뉴를 띄운다. 긴 명령(uv run --locked --extra qt --extra train python main.py --ui qt ...)을
+studio.bat 이 이 메뉴를 띄운다. 긴 명령(uv run --locked --extra qt --extra train --extra llm python main.py --ui qt ...)을
 외우지 않아도 번호만 고르면 되고, 고를 때마다 실제로 실행되는 명령과 각 옵션의 뜻을 보여 준다.
 메뉴에서 고른 것은 지금 이 창의 Python(.venv, qt·train 묶음 설치됨)으로 실행한다.
 """
@@ -65,7 +65,7 @@ def _prompt_hub_setup_if_needed(require_token: bool = False) -> None:
 
 def run(args, explain: str, python: str | None = None) -> None:
     shown = " ".join(["python"] + [a if " " not in a else f'"{a}"' for a in args])
-    print(f"\n  ▶ 실행: uv run --locked --extra qt --extra train {shown}")
+    print(f"\n  ▶ 실행: uv run --locked --extra qt --extra train --extra llm {shown}")
     print(f"    ({explain})\n")
     subprocess.run([python or PY] + args, cwd=ROOT)
     input("\n  [엔터]를 누르면 메뉴로 돌아갑니다 ")

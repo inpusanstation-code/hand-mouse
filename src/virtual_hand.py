@@ -31,14 +31,44 @@ def palm_centre(landmarks: Sequence[Any]) -> Tuple[float, float]:
     return (sum(landmarks[i].x for i in PALM) / len(PALM), sum(landmarks[i].y for i in PALM) / len(PALM))
 
 
+ACROSS = .7          # knuckle row (index -> little knuckle) / palm length of a hand facing the camera (manux recordings: .71)
+
+
+def hand_px(landmarks: Sequence[Any], width: int, height: int) -> float:
+    """The hand's size in the image, steady when the hand turns (from manux-merged-20261110 `HandDrawer`).
+
+    The plain wrist -> middle knuckle length collapses when the fingers turn toward the camera, which drew a huge, broken
+    hand (2026-11-10 report). Bending the hand shortens the palm length, turning it edge-on narrows the knuckle row; the
+    larger of the two (the row divided by its usual share) stays near the facing-camera size."""
+    pts = [(p.x * width, p.y * height) for p in landmarks]
+    return max(math.dist(pts[0], pts[9]), math.dist(pts[5], pts[17]) / ACROSS)
+
+
+class HandSize:
+    """A slow One Euro filter on `hand_px`, so the drawn size does not twitch (manux `HandDrawer`: OneEuro(.3, .002))."""
+
+    def __init__(self) -> None:
+        self._f = OneEuro(.3, .002)
+
+    def reset(self) -> None:
+        self._f.reset()
+
+    def __call__(self, landmarks: Sequence[Any], width: int, height: int, now: Optional[float] = None) -> Optional[float]:
+        if len(landmarks) != 21:
+            return None
+        return self._f((hand_px(landmarks, width, height),), now)[0]
+
+
 def view(landmarks: Sequence[Any], width: int, height: int, guides: Sequence[Tuple[str, str]] = (), action: str = "none",
-         size_px: float = SIZE_PX) -> Optional[Dict[str, Any]]:
+         size_px: float = SIZE_PX, size: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """21 points relative to the palm centre, in screen pixels: [x0, y0, x1, y1, ...], plus "click": where the pinch meets
-    (None = no pinch). None when the hand box is degenerate."""
+    (None = no pinch). `size` = the hand's size in the image (`HandSize`); `hand_px` when not given. None when the hand box
+    is degenerate."""
     if len(landmarks) != 21:
         return None
     pts = [(p.x * width, p.y * height) for p in landmarks]
-    size = math.dist(pts[0], pts[9])
+    if size is None:
+        size = hand_px(landmarks, width, height)
     if size < 1.0:
         return None
     k = size_px / size
@@ -140,12 +170,20 @@ class BoxMapper:
     click finger touches the thumb the point stays still, at where the palm was just before the touch (the aim, not the pinch)."""
 
     MIN_CUTOFF, BETA, SPEED_SCALE = .4, .012, 1000.0  # speed in thousandths of the monitor per second
+    # from manux-merged-20261110 BoxMapper: a hand found again after a gap eases in instead of landing across the screen
+    # in one frame (2.2/min in a 40 min replay); the aim-back only goes back a tilt-sized way (it went any distance: 8.9/min)
+    EASE = .2              # s from the last position to the live one
+    GAP = .1               # s without a hand after which the next position eases in
+    AIM_BACK_MAX = .02     # monitor fractions
 
     def __init__(self) -> None:
         self.pos: Optional[Tuple[float, float]] = None
         self._history: deque = deque(maxlen=30)
         self._held = False
         self._filter = OneEuro(self.MIN_CUTOFF, self.BETA, speed_scale=self.SPEED_SCALE)
+        self._ease_from: Optional[Tuple[float, float]] = None
+        self._ease_t = 0.0
+        self._last_t: Optional[float] = None
 
     @property
     def held(self) -> bool:
@@ -156,26 +194,44 @@ class BoxMapper:
         self._history.clear()
         self._held = False
         self._filter.reset()
+        self._ease_from = None
+        self._last_t = None
 
     def target(self, landmarks: Sequence[Any], box, hold: bool = False, now: float = 0.0, aim: bool = True) -> Tuple[float, float]:
         x0, y0, x1, y1 = box
         cx, cy = palm_centre(landmarks)
         nx = min(1.0, max(0.0, (cx - x0) / (x1 - x0)))
         ny = min(1.0, max(0.0, (cy - y0) / (y1 - y0)))
+        gap = self._last_t is not None and now - self._last_t > self.GAP
+        self._last_t = now
         if hold and self.pos is not None:
             if not self._held:
                 self._held = True
+                self._ease_from = None
                 earlier = [p for t, p in self._history if t <= now - AIM_BACK] if aim else []
-                if earlier:
+                if earlier and math.dist(earlier[-1], self.pos) <= self.AIM_BACK_MAX:
                     self.pos = earlier[-1]
-                self._filter.reset(self.pos)
-                self._filter.t = now
             return self.pos
+        if self.pos is not None and gap:
+            self._ease_from, self._ease_t = self.pos, now   # found again after a gap: ease in from where it was
+            self._filter.reset((nx, ny))
+            self._filter.t = now
+        elif self._held:
+            self._filter.reset(self.pos)                    # released: follow the hand from the held point at its own speed
+            self._filter.t = now
+            self._ease_from = None
         self._held = False
         fx, fy = self._filter((nx, ny), now)
         # the filter only nears a clamped edge: snap so the box edge really is the monitor edge
         fx = nx if abs(fx - nx) < 1e-3 else fx
         fy = ny if abs(fy - ny) < 1e-3 else fy
+        if self._ease_from is not None:
+            k = (now - self._ease_t) / self.EASE
+            if k >= 1.0:
+                self._ease_from = None
+            else:
+                k = k * k * (3 - 2 * k)                     # smoothstep: no kick at either end
+                fx, fy = self._ease_from[0] + (fx - self._ease_from[0]) * k, self._ease_from[1] + (fy - self._ease_from[1]) * k
         self.pos = (fx, fy)
         self._history.append((now, self.pos))
         return self.pos

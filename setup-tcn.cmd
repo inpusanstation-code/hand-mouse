@@ -8,7 +8,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-uv sync --locked --extra qt --extra train --cache-dir .local/uv-cache --python 3.12
+uv sync --locked --extra qt --extra train --extra llm --cache-dir .local/uv-cache --python 3.12
 if errorlevel 1 (
   pause
   exit /b 1

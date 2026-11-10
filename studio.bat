@@ -12,8 +12,8 @@ where uv >nul 2>nul
 if errorlevel 1 call :install_uv
 if errorlevel 1 exit /b 1
 
-echo [%APP%] Preparing Python and packages (qt + train). The first run takes a few minutes...
-uv sync --locked --extra qt --extra train
+echo [%APP%] Preparing Python and packages (qt + train + llm). The first run takes a few minutes...
+uv sync --locked --extra qt --extra train --extra llm
 if errorlevel 1 goto fail
 
 ".venv\Scripts\python.exe" studio.py

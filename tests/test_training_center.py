@@ -68,8 +68,10 @@ def test_training_progress_lines_move_the_bar():
 
 
 def test_focused_recording_has_only_that_gesture():
-    assert tasks_for("thumb_ring") == tuple(t for t in TASKS if t.key == "thumb_ring")
-    assert tasks_for("") == TASKS and tasks_for("unknown") == TASKS
+    # the live list: registering motions (any binding registry load) rebuilds gesture_catalog.TASKS after import
+    import src.gesture_catalog as gc
+    assert tasks_for("thumb_ring") == tuple(t for t in gc.TASKS if t.key == "thumb_ring")
+    assert tasks_for("") == gc.TASKS and tasks_for("unknown") == gc.TASKS
     g = GuidedSession(tasks=tasks_for("thumb_ring"))
     assert {t.key for _, t in g.sets} == {"thumb_ring"} and len(g.sets) == 3   # one set per posture
 

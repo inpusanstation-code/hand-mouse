@@ -43,10 +43,19 @@ from src.hand_crop import HandCrop
 from src.crop_recorder import CropRecorder, crops_path
 from src.roi_tracker import RoiTracker, hand_box
 from src.hand_selection import HandFollower, selected_detection
-from src.virtual_hand import (ACTION_NAMES as HAND_ACTION_NAMES, BoxMapper, DEFAULT_BOX, Grip, PINCH_HOLD, Ratchet, ShapePinch, ShapeSwitch, ShapeTriple, ViewSmoother, triple_point,
+from src.virtual_hand import hand_px
+from src.virtual_hand import (ACTION_NAMES as HAND_ACTION_NAMES, BoxMapper, DEFAULT_BOX, Grip, HandSize, PINCH_HOLD, Ratchet, ShapePinch, ShapeSwitch, ShapeTriple, ViewSmoother, triple_point,
                               click_offset, holds_still, pinch_point, VIRTUAL_OFF_ACTIONS, virtual_guides,
                               palm_centre, valid_box, view as virtual_hand_view)
 from src.online.collector import OnlineCollector
+from src.finger_overlay import overlay_frame, preview_hand
+from src.pose_probe import PoseProbe, hand_posture
+from src.macro import cancel_all as cancel_macros
+from src.sequence import SequenceDetector, SequenceStore
+from src.path_gesture import PathDetector, PathStore
+from src.draw_mode import DrawMode, ShapeStore, ensure_bindings as ensure_draw_bindings
+
+VH_ANCHOR_FOLLOW = .15   # share of the way the drawn hand's anchor follows its thumb-index point each frame (manux)
 from src.perf_log import foreground_window_title
 from src.online.commands import CommandGate, binding_key, command_of, command_text, forget_command
 from src.online.pose_memory import POSE_FILE, PoseMemory, PoseRecognizer, pose_features
@@ -143,6 +152,10 @@ class Snapshot:
     registration: Optional[Dict[str, Any]] = None  # adding a new gesture: state, demo, seconds, report (src/online/registration.py)
     online_gesture: str = ""              # a registered gesture recognised right now (shown on the preview, sends nothing)
     virtual_hand: Optional[Dict[str, Any]] = None  # the hand drawn at the cursor (src/virtual_hand.py), None = no hand
+    preview_hand: Optional[Dict[str, Any]] = None  # skeleton drawn over the preview by src/HandSkeleton.qml (src/finger_overlay.py)
+    finger: Optional[Dict[str, Any]] = None        # fingertips drawn next to the cursor by src/FingerTracker.qml
+    pose_probe: Optional[Dict[str, Any]] = None    # [손 모양 보여주기] countdown / holding / result (src/pose_probe.py)
+    draw: Optional[Dict[str, Any]] = None          # drawing mode: pen, stroke, last recognised shape (src/draw_mode.py)
     hand_lost: bool = False               # no hand for `hand_lost_alert` seconds: the screen shows it big
     arm_lost: bool = False                # Pose has not seen the arm for `arm_lost_alert` seconds (only when Pose runs)
     admin_blocked: bool = False           # an admin window (Task Manager) is in front and this app is not admin: input is dropped
@@ -191,8 +204,12 @@ class QtRuntime:
         self._virtual_hand: Optional[Dict[str, Any]] = None
         self.box_mapper = BoxMapper()
         self.view_smoother = ViewSmoother()
+        self.hand_size = HandSize()      # the drawn hand's scale, steady when the hand turns
         self._vh_click: Optional[List[float]] = None   # pinch point on the drawn hand, frozen while the fingers touch
         self._vh_engaged = False
+        # thumb-index point of the drawn hand (logical px from the palm): the drawing is shifted so it sits on the cursor.
+        # Follows slowly, frozen while clicking or gripping (manux-merged-20261110 VirtualHandFeature._anchor).
+        self._vh_anchor: Optional[List[float]] = None
         self.shape_pinch = ShapePinch("index")         # thumb + index = left click / drag, from the hand shape only
         self.shape_right = ShapeTriple()               # thumb + index + middle together = right click, from the hand shape only
         self._pinch_triple = False                     # this thumb + index press became the three-finger right click
@@ -216,6 +233,21 @@ class QtRuntime:
         self.max_frames = int(max_frames)
         self._draw_cursor_anchor = draw_cursor_anchor
         self._draw_recording = draw_recording
+        # True: the hand skeleton and cursor anchor are drawn by QML over the preview instead of into the camera frame
+        self.qml_skeleton = True
+        self.pose_probe = PoseProbe()      # "this hand shape" for the AI binding helper (src/llm_binding.py)
+        self.draw_store = ShapeStore()
+        self.seq_store = SequenceStore()       # gesture sequences: shapes in order run a command (src/sequence.py)
+        self.path_store = PathStore()          # shape-drawing gestures: e.g. a fist drawing a circle (src/path_gesture.py)
+        self.paths = PathDetector()
+        self.sequences = SequenceDetector()
+        self.draw = DrawMode(self.draw_store)   # drawing mode: shapes drawn on the monitor run commands
+        try:
+            ensure_draw_bindings(get_action_registry(), self.draw_store)
+        except Exception:
+            pass
+        self._preview_hand: Optional[Dict[str, Any]] = None
+        self._finger: Optional[Dict[str, Any]] = None
         self.log_dir = log_dir or Path(__file__).resolve().parents[1] / "logs"
 
         self.pointer = PointerEngine(GestureEngine(config_path=config_path))
@@ -360,6 +392,7 @@ class QtRuntime:
 
     def _pause(self) -> None:
         self.paused = True
+        cancel_macros()          # a running macro stops between steps (Pause = emergency stop)
         self.mouse.close_switcher(confirm=False)
         self.mouse.release_all()
         self.engine.reset()
@@ -419,6 +452,23 @@ class QtRuntime:
                 self._register_approve()
             elif kind == "register_cancel":
                 self._register_cancel()
+            elif kind == "draw_mode":
+                self._set_draw(not self.draw.active if cmd[1] is None else bool(cmd[1]))
+            elif kind == "seq_reload":
+                self.seq_store.load()
+                self.sequences.reset()
+                self.path_store.load()
+                self.paths.reset()
+            elif kind == "draw_reload":
+                self.draw_store.load()
+                try:
+                    ensure_draw_bindings(get_action_registry(), self.draw_store)
+                except Exception:
+                    pass
+            elif kind == "pose_probe":
+                self.pose_probe.start(now)
+            elif kind == "pose_probe_cancel":
+                self.pose_probe.cancel()
             elif kind == "gesture_delete":
                 self._gesture_delete(cmd[1])
             elif kind == "online_reload":
@@ -554,6 +604,45 @@ class QtRuntime:
             if detections:
                 self._hand_seen_t = t0
         self.mouse.hand_size = self._hand_width_fraction(detections[0].landmarks, frame.shape[1], frame.shape[0]) if detections else None
+        live = ui.stage == "main" and not self.paused and not self.draw.active and not ui.calibrating
+        sequences = self.seq_store.active() if live else {}
+        path_gestures = self.path_store.active() if live else {}
+        posture = None
+        if detections and (self.pose_probe.active or sequences or path_gestures):
+            # the hand shape from the landmarks alone, in every mode (index pointer, motion mode, a held sign, paused)
+            posture = hand_posture(detections[0].landmarks, frame.shape[0] / max(1, frame.shape[1]))
+        if self.pose_probe.active and detections:
+            # [손 모양 보여주기]: it used to be fed only inside the palm controls, which a thumbs-up or motion mode skip
+            lm0 = detections[0].landmarks
+            k = frame.shape[0] / max(1, frame.shape[1])           # x and y in the same units
+            palm = palm_centre(lm0)
+            size = hand_px(lm0, 1.0, k)                          # steady when the hand turns (src/virtual_hand.hand_px)
+            angles = (math.degrees(math.atan2(-(lm0[9].y - lm0[0].y) * k, lm0[9].x - lm0[0].x)),
+                      math.degrees(math.atan2(-(lm0[4].y - lm0[0].y) * k, lm0[4].x - lm0[0].x)))
+            self.pose_probe.log_dir = self.log_dir / "pose_probe"
+            self.pose_probe.step(t0, posture, (palm[0], palm[1] * k), size, angles,
+                                 [[round(p.x, 4), round(p.y, 4), round(getattr(p, "z", 0.0), 4)] for p in lm0])
+        if sequences:
+            if detections:
+                fired = self.sequences.step(t0, posture, sequences)
+                if fired is not None:
+                    self._run_sequence(fired)
+            else:
+                self.sequences.lost(t0)
+        if path_gestures:
+            # shape-drawing gestures: a hand shape held while the palm draws a shape (src/path_gesture.py)
+            if detections:
+                lm0 = detections[0].landmarks
+                k = frame.shape[0] / max(1, frame.shape[1])
+                pc = palm_centre(lm0)
+                size = hand_px(lm0, 1.0, k)
+                tip = 4 if posture == "thumbs_up" else 9          # a thumbs-up turns with its thumb
+                angle = math.degrees(math.atan2(-(lm0[tip].y - lm0[0].y) * k, lm0[tip].x - lm0[0].x))
+                fired = self.paths.step(t0, posture, (pc[0], pc[1] * k), size, path_gestures, self.draw_store, angle)
+            else:
+                fired = self.paths.step(t0, None, None, 0.0, path_gestures, self.draw_store)
+            if fired is not None:
+                self._run_gesture_key(fired, self.path_store.items.get(fired, {}).get("name", fired), "손 모양 그리기")
         if ui.hand_crop and detections:
             self.hand_crop.update(detections[0].landmarks, frame.shape[1], frame.shape[0], now=t0)
             if self.roi_tracker.enabled and not self.hand_crop.collapsed:
@@ -570,6 +659,7 @@ class QtRuntime:
         palm_calibrating = self._palm_axes(t0, ui, detections)
         guided_recording = self._recording_mode(t0, ui, detections)
         self._virtual_hand = None
+        self._preview_hand = self._finger = None
         if not detections:
             # A fast hand blurs and is lost for a few frames: keep the drawn hand where it was (faded) and its filters, so it glides
             # on from there instead of vanishing and popping up elsewhere. Only a longer loss lets go of everything.
@@ -583,7 +673,9 @@ class QtRuntime:
                 self._vh_last = None
                 self.box_mapper.reset()
                 self.view_smoother.reset()
+                self.hand_size.reset()
                 self.ratchet.reset()
+                self._vh_anchor = None
             self._vh_click, self._vh_engaged = None, False
             self.grip.reset()
             self.shape_pinch.reset()
@@ -629,6 +721,10 @@ class QtRuntime:
             self._metrics = (f"{mode[0]}×{mode[1]} · {mode[2]:g}fps" if mode else "", level, level < dark_below)
 
         index_mode = ui.use_index_pointer
+        draw_active = (self.draw.active and not index_mode and not motion_active and not toggle_hold
+                       and not palm_calibrating and ui.stage == "main" and not guided_recording)
+        if draw_active:
+            self._draw_step(t0, ui, detections, fw, fh)
         tracking_only = self.test is not None
         contacts: Tuple[int, ...] = ()
         tip_xy = None
@@ -683,7 +779,8 @@ class QtRuntime:
                 color = (189, 229, 70) if number == 1 or number in contacts else (245, 245, 245)
                 cv2.circle(frame, (px, py), 10, (49, 35, 17), -1, cv2.LINE_AA)
                 cv2.putText(frame, str(number), (px - 5, py + 5), cv2.FONT_HERSHEY_SIMPLEX, .46, color, 1, cv2.LINE_AA)
-        elif detections and not index_mode and not motion_active and not close_hold and not toggle_hold and not palm_calibrating:
+        elif detections and not index_mode and not motion_active and not draw_active and not close_hold and not toggle_hold \
+                and not palm_calibrating:
             glab = None
             gtask = None
             if self._guided is not None:
@@ -838,9 +935,11 @@ class QtRuntime:
                                  * float(engine.config.get("virtual_fist_scroll_speed", .5))}
                 else:
                     self.ratchet.reset()
-                vh = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], early, result.action)
+                vh = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], early, result.action,
+                                      size=self.hand_size(hand.landmarks, frame.shape[1], frame.shape[0], t0))
                 if vh is not None:
                     vh["pts"] = self.view_smoother(vh["pts"], t0)
+                    vh["grip"] = grip is not None          # a fist holds the page: the drawn hand turns amber (manux)
                     if grip is not None:
                         vh["click"] = None
                     elif self.shape_pinch.closed or tap or drop:
@@ -849,20 +948,19 @@ class QtRuntime:
                         vh["click"] = triple_point(vh["pts"])
                     else:
                         vh["click"] = click_offset(vh["pts"], early, result.action)
-                engaged = (self.box_mapper.held or dragging or drop
-                           or result.action in ("left_click", "right_click", "drag_hold")) \
-                    and vh is not None and vh["click"] is not None
-                if engaged:
-                    if self._vh_click is None or dragging or drop:
-                        # a click stays where the fingers met; a dragged thing rides between thumb and index all the way
-                        self._vh_click = list(vh["click"])
-                    r = float(getattr(ui, "screen_ratio", 1.0) or 1.0)
-                    cursor_point = (min(m.left + m.width - 1, max(m.left, screen_point[0] + int(round(self._vh_click[0] * r)))),
-                                    min(m.top + m.height - 1, max(m.top, screen_point[1] + int(round(self._vh_click[1] * r)))))
-                else:
-                    self._vh_click = None
-                    cursor_point = screen_point
-                jump = engaged and not self._vh_engaged
+                engaged = (self.box_mapper.held or dragging or drop or self.shape_pinch.closed or self.shape_right.closed
+                           or tap or result.action in ("left_click", "right_click", "drag_hold"))
+                # The cursor IS the clicking point: no jump to the pinch point when the fingers meet (manux measured 18.5
+                # jumps >= 60 px a minute from that offset). The drawing is shifted instead, so that its thumb-index point
+                # (`anchor`, followed slowly, frozen while clicking or gripping) sits on the cursor.
+                if vh is not None:
+                    aim_px = pinch_point(vh["pts"], "index")
+                    if self._vh_anchor is None:
+                        self._vh_anchor = list(aim_px)
+                    elif not engaged and grip is None:
+                        self._vh_anchor = [a + VH_ANCHOR_FOLLOW * (b - a) for a, b in zip(self._vh_anchor, aim_px)]
+                self._vh_click = None
+                cursor_point, jump = screen_point, False
                 if second is not None:
                     cursor_point, jump = second, True      # exactly the first click's pixel: Windows pairs them as a double click
                 if tap and result.action == "left_click":
@@ -886,7 +984,7 @@ class QtRuntime:
                     reg = get_action_registry()
                     fg = mouse.foreground_info() if not mouse.dry_run else {}
                     resolved = reg.resolve_effective_action(comp_hit["key"], fg)
-                    ok, badge = reg.execute_resolved_action(resolved, dry_run=mouse.dry_run, mouse_controller=mouse)
+                    ok, badge = self._run_resolved(reg, resolved)
                     if ok:
                         self._say(f"복합 동작 [{comp_hit['name']}] → {badge}", 1.5)
                         self._recent_action, self._recent_until = comp_hit["key"], time.perf_counter() + 0.8
@@ -909,7 +1007,7 @@ class QtRuntime:
                         or resolved.get("action_value") != default_b.get("action_value")
                         or not reg.get_binding(gkey).get("enabled", True)
                     ):
-                        ok, badge = reg.execute_resolved_action(resolved, dry_run=mouse.dry_run, mouse_controller=mouse)
+                        ok, badge = self._run_resolved(reg, resolved)
                         if ok:
                             self._say(f"매핑 실행: {badge}", 1.2)
                         self._recent_action, self._recent_until = result.action, time.perf_counter() + 0.8
@@ -919,10 +1017,17 @@ class QtRuntime:
                     self._recent_action, self._recent_until = result.action, time.perf_counter() + .8
             guides = pinch_guides(result.distances, engine.config, draw_pinched,
                                   action=result.action, gesture=result.active_gesture)
-            HandTracker.draw_hand(frame, hand.landmarks, guides)
+            anchor = engine.palm_anchor_point(hand.landmarks)
+            if self.qml_skeleton:
+                # the skeleton is drawn by QML over the preview (src/HandSkeleton.qml, from manux-merged-20261110)
+                self._preview_hand = preview_hand(hand.landmarks, guides, anchor, result.is_moving)
+            else:
+                HandTracker.draw_hand(frame, hand.landmarks, guides)
+            self._finger = overlay_frame(hand.landmarks, camera.config.mirror, result.action, result.is_moving)
             label = self._recent_action if time.perf_counter() < self._recent_until else result.action
             if vh is None:
-                vh = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], guides, label)
+                vh = virtual_hand_view(hand.landmarks, frame.shape[1], frame.shape[0], guides, label,
+                                      size=self.hand_size(hand.landmarks, frame.shape[1], frame.shape[0], t0))
                 if vh is not None:
                     vh["pts"] = self.view_smoother(vh["pts"], t0)
             if vh is not None:
@@ -930,11 +1035,12 @@ class QtRuntime:
                     guides = virtual_guides(guides)         # only the pinches that work here are drawn on the screen hand
                 vh["guides"] = [[f, s] for f, s in guides]
                 vh["action"] = HAND_ACTION_NAMES.get(label, "")
-                if self._vh_click:
+                if screen_point is not None and self._vh_anchor is not None:
+                    vh["anchor"] = [round(v, 1) for v in self._vh_anchor]   # drawn on the cursor (the window centre)
+                    vh["click"] = list(vh["anchor"])
+                    vh["aim"] = not self._vh_engaged
+                elif self._vh_click:
                     vh["click"] = list(self._vh_click)
-                elif screen_point is not None:
-                    vh["click"] = pinch_point(vh["pts"], "index")     # the aim: put the file between thumb and index
-                    vh["aim"] = True
                 else:
                     vh["click"] = click_offset(vh["pts"], guides, label)
                 if screen_point is not None:
@@ -942,9 +1048,8 @@ class QtRuntime:
                     vh["switcher"] = bool(mouse.switcher_open)   # the window goes back above the task switcher
             self._virtual_hand = vh
             self._vh_last = vh
-            if self._draw_cursor_anchor:
-                self._draw_cursor_anchor(frame, hand.landmarks, engine.palm_anchor_point(hand.landmarks),
-                                         result.is_moving)
+            if self._draw_cursor_anchor and not self.qml_skeleton:
+                self._draw_cursor_anchor(frame, hand.landmarks, anchor, result.is_moving)
             self._draw_arm(frame, t0)
             if engine.config.get("elbow_pivot", False):
                 self._draw_elbow(frame, engine.palm_anchor_point(hand.landmarks), mouse.frame_aspect)
@@ -1004,6 +1109,10 @@ class QtRuntime:
             registration=self._registration_view,
             online_gesture=self._online_gesture if t0 < self._online_gesture_until else "",
             virtual_hand=self._virtual_hand,
+            preview_hand=self._preview_hand,
+            pose_probe=self._pose_probe_view(t0),
+            draw=self.draw.view(t0) if self.draw.active or self.draw.last is not None else None,
+            finger=self._finger,
             admin_blocked=self._admin_window_in_front(t0),
             hand_lost=(t0 - self._hand_seen_t) > float(self.engine.config.get("hand_lost_alert", 0.35)),
             arm_lost=bool(self.pose is not None and not ui.use_index_pointer
@@ -1218,7 +1327,18 @@ class QtRuntime:
             blocked=blocked,
             model_confirmed=v_model_ok,
         )
-        if event is not None:
+        custom = self._sign_override("v_sign") if event is not None and not self.paused else None
+        if custom is not None:
+            # 2026-11-10: the V sign's binding was changed (e.g. by the AI helper) but this detector always toggled the
+            # control, so the new command never ran. Now it runs the binding; while the control is OFF the V sign
+            # still turns it on (else no hand gesture could switch the control back on).
+            self.mouse.release_all()
+            self.engine.reset()
+            self.pointer.reset()
+            if custom != "off":
+                ok, badge = self._run_resolved(get_action_registry(), custom)
+                self._close_notice, self._close_notice_until = f"V 손 모양 → {badge}", time.perf_counter() + 2.0
+        elif event is not None:
             self.mouse.release_all()
             self.engine.reset()
             self.pointer.reset()
@@ -1750,6 +1870,93 @@ class QtRuntime:
             return True, prompt, progress, note, saved
         return False, self._palm_note if t0 < self._palm_note_until else "", 0.0, "", saved
 
+    # ------------------------------------------------------------------ drawing mode (src/draw_mode.py)
+    def _set_draw(self, on: bool) -> None:
+        if on == self.draw.active:
+            return
+        self.draw.set_active(on)
+        self.mouse.release_all()
+        self.engine.reset()
+        self._say("그리기 모드 켜짐 · 검지를 펴서 그리고, 손을 펴거나 쥐면 끝" if on else "그리기 모드 꺼짐", 2.0)
+
+    def _run_sequence(self, key: str) -> None:
+        self._run_gesture_key(key, self.seq_store.items.get(key, {}).get("name", key), "이어 하기")
+
+    def _run_gesture_key(self, key: str, name: str, kind: str) -> None:
+        reg = get_action_registry()
+        fg = self.mouse.foreground_info() if not self.mouse.dry_run else {}
+        resolved = reg.resolve_effective_action(key, fg)
+        ok, badge = self._run_resolved(reg, resolved)
+        self._recent_action, self._recent_until = "none", time.perf_counter() + .8
+        self._say(f"{kind} [{name}] → {badge}", 1.5)
+
+    def _run_resolved(self, reg, resolved):
+        """Run a binding; the mode switches the registry cannot reach are done here."""
+        if resolved.get("action_type") == "mouse_action" and resolved.get("action_value") == "toggle_draw":
+            self._set_draw(not self.draw.active)
+            return True, "그리기 모드 " + ("켜짐" if self.draw.active else "꺼짐")
+        return reg.execute_resolved_action(resolved, dry_run=self.mouse.dry_run, mouse_controller=self.mouse)
+
+    def _draw_step(self, t0: float, ui, detections, fw: int, fh: int) -> None:
+        box = ui.virtual_box if valid_box(ui.virtual_box) else DEFAULT_BOX
+        m = self.mouse.absolute_monitor
+        if not detections:
+            judged = self.draw.lost(t0)
+        else:
+            judged = self.draw.step(t0, detections[0].landmarks, box, fw, fh, aspect=m.width / max(1, m.height))
+        if judged is None:
+            return
+        if not judged["ok"]:
+            self._say(f"그림을 알아보지 못했어요 ({judged['why']})", 1.2)
+            return
+        if self.paused:
+            self._say(f"그림 [{judged['name']}] · 일시정지 중이라 실행 안 함", 1.2)
+            return
+        reg = get_action_registry()
+        fg = self.mouse.foreground_info() if not self.mouse.dry_run else {}
+        resolved = reg.resolve_effective_action(judged["key"], fg)
+        ok, badge = self._run_resolved(reg, resolved)
+        if self.draw.last is not None:
+            self.draw.last["action"] = badge
+        self._say(f"그림 [{judged['name']}] → {badge}", 1.5)
+
+    def _pose_probe_view(self, t0: float):
+        self.pose_probe.finish_if_due(t0)       # also when the hand is gone (too few frames -> "failed")
+        return self.pose_probe.view(t0)
+
+    def _sign_override(self, key: str):
+        """A sign with its own detector (V = control on/off, thumbs-up = motion mode): its binding if the user changed
+        it ("off" when switched off), else None (the sign does its built-in job)."""
+        try:
+            reg = get_action_registry()
+            b = reg.get_binding(key)
+            if not b.get("enabled", True):
+                return "off"
+            fg = self.mouse.foreground_info() if not self.mouse.dry_run else {}
+            resolved = reg.resolve_effective_action(key, fg)
+        except Exception:
+            return None
+        default = DEFAULT_GESTURE_BINDINGS.get(key, {})
+        if not resolved.get("matched_app") and (resolved.get("action_type"), resolved.get("action_value")) == \
+                (default.get("action_type"), default.get("action_value")):
+            return None
+        return resolved
+
+    def _binding_on(self, key: str, t0: float) -> bool:
+        """Whether the action screen's binding for `key` is switched on (read again at most twice a second)."""
+        cache = getattr(self, "_binding_cache", None)
+        if cache is None:
+            cache = self._binding_cache = {}
+        hit = cache.get(key)
+        if hit is None or t0 - hit[0] > .5:
+            try:
+                from src.action_bindings import get_action_registry
+                on = bool(get_action_registry().get_binding(key).get("enabled", True))
+            except Exception:
+                on = True
+            hit = cache[key] = (t0, on)
+        return hit[1]
+
     def _motion(self, t0: float, ui, detections) -> bool:
         """Run motion mode for this frame. True while it is on (the pinch controls are then suspended)."""
         ready = ui.stage == "main" and not self.paused and not ui.calibrating
@@ -1762,11 +1969,22 @@ class QtRuntime:
                 self.motion.update(t0, None, request="off")
             return False
         lm = detections[0].landmarks if detections else None
-        blocked = self._motion_blocked(t0) or (not self.motion.active and not request and not self._intent("thumbs_up", t0))
+        # the thumbs-up binding switched off on the action screen: the sign no longer turns motion mode on
+        sign_off = not self.motion.active and not request and not self._binding_on("thumbs_up", t0)
+        blocked = self._motion_blocked(t0) or sign_off or (not self.motion.active and not request and not self._intent("thumbs_up", t0))
         event = self.motion.update(t0, lm, request=request, blocked=blocked)
         if self._motion_last.startswith("창 닫기?") and self.motion.close_pending(t0) <= 0:
             self._motion_last = ""            # the question ran out
         if event is not None:
+            custom = self._sign_override("thumbs_up") if event.kind == "enter" and not request else None
+            if custom is not None:
+                # the thumbs-up's binding was changed: run it instead of motion mode (the button still opens motion mode)
+                self.motion.update(t0, None, request="off")
+                self.mouse.release_all()
+                if custom != "off":
+                    ok, badge = self._run_resolved(get_action_registry(), custom)
+                    self._say(f"엄지 위로 → {badge}", 1.5)
+                return False
             if event.kind == "enter":
                 self.mouse.release_all()
                 self.engine.reset()

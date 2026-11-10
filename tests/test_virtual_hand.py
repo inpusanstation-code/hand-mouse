@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.virtual_hand import PALM, SIZE_PX, ViewSmoother, click_offset, palm_centre, view
+from src.virtual_hand import ACROSS, PALM, SIZE_PX, ViewSmoother, click_offset, palm_centre, view
 from tests.test_online_data import hand_world
 
 
@@ -19,9 +19,18 @@ def test_the_palm_centre_is_the_origin_and_the_size_is_fixed_whatever_the_distan
     for v in (near, far):
         assert sum(v["pts"][2 * i] for i in PALM) == pytest.approx(0, abs=.5)
         assert sum(v["pts"][2 * i + 1] for i in PALM) == pytest.approx(0, abs=.5)
-        wrist, knuckle = v["pts"][0:2], v["pts"][18:20]
-        assert math.dist(wrist, knuckle) == pytest.approx(SIZE_PX, abs=.5)
+        p = v["pts"]
+        size = max(math.dist(p[0:2], p[18:20]), math.dist(p[10:12], p[34:36]) / ACROSS)
+        assert size == pytest.approx(SIZE_PX, abs=.5)
     assert near["pts"] == pytest.approx(far["pts"], abs=1.0)
+
+
+def test_a_hand_turned_toward_the_camera_is_not_drawn_huge():
+    """2026-11-10 report: turning the hand made the drawn hand huge and broken (the 2D palm length collapsed)."""
+    flat = landmarks()
+    turned = [SimpleNamespace(x=p.x, y=.5 + (p.y - .5) * .1, z=p.z) for p in flat]   # fingers toward the camera
+    span = lambda v: max(v["pts"][0::2]) - min(v["pts"][0::2])
+    assert span(view(turned, 1280, 720)) <= span(view(flat, 1280, 720)) * 1.5
 
 
 def test_pinch_lines_and_the_click_name_come_along():
@@ -134,12 +143,36 @@ def test_a_click_lands_where_the_thumb_was_just_before_the_fingers_touched():
     t = 0.0
     for i in range(10):                        # resting at .3
         m.target(at(.3, .3), box, now=t); t += 1 / 30
-    for i in range(6):                         # the pinch drags the thumb a little
+    for i in range(6):                         # the pinch tilts the hand a little (tilt-sized: under AIM_BACK_MAX)
+        m.target(at(.3 + .003 * i, .3), box, now=t); t += 1 / 30
+    held = m.target(at(.318, .3), box, hold=True, now=t)
+    assert held[0] < .305                      # back at the aim, not where the pinch pulled the thumb
+    assert m.target(at(.9, .9), box, hold=True, now=t + .05) == held
+    t += .05
+    for i in range(6):                         # released: follows again
+        t += 1 / 30
+        last = m.target(at(.9, .9), box, now=t)
+    assert last[0] > .5
+
+
+def test_a_real_move_before_the_pinch_is_not_undone_and_a_found_hand_eases_in():
+    """manux BoxMapper: the aim-back only goes back a tilt-sized way; after a gap the hand eases in over EASE s."""
+    m = BoxMapper()
+    box, t = (0, 0, 1, 1), 0.0
+    for i in range(10):
+        m.target(at(.3, .3), box, now=t); t += 1 / 30
+    for i in range(6):                         # a real move of .05
         m.target(at(.3 + .01 * i, .3), box, now=t); t += 1 / 30
-    held = m.target(at(.36, .3), box, hold=True, now=t)
-    assert held[0] < .315                      # back at the aim, not where the pinch pulled the thumb
-    assert m.target(at(.9, .9), box, hold=True, now=t + .1) == held
-    assert m.target(at(.9, .9), box, now=t + .2)[0] > .5    # released: follows again
+    before = m.pos
+    assert m.target(at(.36, .3), box, hold=True, now=t) == before
+    m.target(at(.36, .3), box, now=t + .05)
+    t += .5
+    first = m.target(at(.9, .3), box, now=t)                     # found again far away after a gap
+    assert first[0] < .45                                        # no jump across the screen in one frame
+    for i in range(12):                                          # 0.4 s of frames: the ease (0.2 s) is over
+        t += 1 / 30
+        last = m.target(at(.9, .3), box, now=t)
+    assert last[0] > .85
 
 
 def test_only_a_click_finger_touching_or_a_fist_holds_the_point():
@@ -311,7 +344,9 @@ def test_a_short_thumb_index_pinch_clicks_between_the_fingers(tmp_path):
     rt.tracker.hand[:] = opened
     rt._step()
     assert rt.mouse.event_log.count("left_click") == 1 and "mouseDown" not in rt.mouse.event_log
-    assert list(rt.mouse.last_screen_pos) != rt._snap.virtual_hand["screen"]    # clicked at the fingers, not the palm
+    # the cursor is the clicking point (no jump when the fingers meet); the drawn hand's anchor sits on it
+    assert list(rt.mouse.last_screen_pos) == rt._snap.virtual_hand["screen"]
+    assert rt._snap.virtual_hand["click"] == rt._snap.virtual_hand["anchor"]
 
 
 def test_a_held_thumb_index_pinch_drags_and_opening_drops(tmp_path):
@@ -365,7 +400,8 @@ def test_a_dragged_thing_is_dropped_between_thumb_and_index(tmp_path):
     rt.tracker.hand[:] = opened
     rt._step()
     hand = rt._snap.virtual_hand
-    assert ups and ups[0] != tuple(hand["screen"])                               # not at the palm
+    assert ups and ups[0] == tuple(hand["screen"])          # dropped at the cursor, where the drawn anchor sits
+    assert hand["click"] == hand["anchor"]
 
 
 def test_two_quick_taps_click_twice_on_the_same_pixel(tmp_path):
@@ -416,7 +452,7 @@ def test_thumb_index_and_middle_together_right_click_and_no_left_click(tmp_path)
     hand[12] = type(tip)(tip.x + .004, tip.y, tip.z)       # middle tip next to the index tip: all three together
     rt._step(); rt._step()
     assert "right_click" in rt.mouse.event_log
-    assert list(rt.mouse.last_screen_pos) != rt._snap.virtual_hand["screen"]
+    assert list(rt.mouse.last_screen_pos) == rt._snap.virtual_hand["screen"]    # at the cursor (no jump)
     time.sleep(.5)
     rt._step()
     assert not rt.mouse.is_dragging                        # held: still not a drag

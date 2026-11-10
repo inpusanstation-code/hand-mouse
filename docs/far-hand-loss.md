@@ -316,3 +316,11 @@
 - 고침: 그리기 전 사본(`clean`)을 추적기와 손 그림에 넘긴다(필요할 때만 복사). `HandTracker.draw_hand`는 표시 크기를 손 크기에 맞춘다(상자 160픽셀 이상이면 예전 크기). 시험: `tests/test_clean_frame.py`.
 - 못 한 것: 고친 뒤 실제 손으로 다시 녹화하지 않았다. 미리보기의 팔 표시·확대 영역 네모는 크기를 줄이지 않았다.
 - 참고: 원래 PC의 3m 놓침 2%(`171723`)와 이 PC의 16~70%는 2m 손 크기가 비슷한데도 차이가 크다. 카메라 화질·조명 차이일 수 있으나 카메라 종류를 아직 모른다.
+
+## 25. CNN 그림자 모드 코드와 home-pc 기록을 hand-mouse-1109에서 가져옴 (2026-11-10)
+- `src/crop_shadow.py`: 1109의 마지막 파일(11-09 18:11, home-pc)이다. 손 그림 CNN이 판정을 **기록만** 하고 커서·클릭·확인기에는 영향을 주지 않는 "그림자 모드" 읽개다. 1109에서도 **어디에도 연결되지 않았고** 시험도 없었다. 이 저장소에서도 연결하지 않았다.
+  - 고친 것: `src.crop_cnn`(torch를 불러옴) 대신 `centre_crop`을 복사해 앱 프로세스가 torch 없이 불러올 수 있게 했다. 입력 쌓기를 정리했다(같은 결과). 시험 `tests/test_crop_shadow.py`(가짜 ONNX 세션).
+  - 연결할 때: `update`에는 24절의 `clean` 프레임을 넘길 것. 설정 `crop_shadow`, `crop_shadow_models`는 아직 `config/gestures.json`에 없다. 이 형식(onnx + json의 `classes`, `frames`, `step`, `center`)으로 내보내는 스크립트도 없다(1109 설명에 있던 `scripts/export_crop_cnn.py`는 존재한 적 없음).
+- `field-logs/2026-11-09-home-pc/failures/`: 1109 앱의 `logs/failures`(home-pc, JSON 200개 11-09 17:06~18:00 + `index.csv` + `negative_candidates.jsonl`, 약 38 MB). 3절·22절 분석에 쓰인 것과 같은 PC의 기록이다. 영상 없음, `pc_alias`는 모두 `home-pc`, 창 제목 항목 없음 확인. 이 PC(`pc-rtx3060`)의 `logs/`와 섞지 말 것.
+- 가져오지 않은 것: `recordings/crops/`(24절의 표시 오염 그림), `recordings/cleaned/`·`.cache/`·`*.quality.json`·`*.summary.json`(원본 녹화에서 다시 만들어지는 파생 파일), `config/tcn-ui.ini`(home-pc 화면 설정: 확대 영역 켜짐, 검지 포인터 꺼짐), `models/gestures/training.lock`(남은 잠금 파일).
+- `config/recording-plans.json`(1109에서 저장한 녹화 계획 7개: 쓸기, 닿기 직전 3개, 약지·새끼·검지)은 이 저장소에 없던 파일이라 그대로 복사했다. 기본 계획으로 돌아가려면 이 파일을 지우면 된다(git 제외 파일).

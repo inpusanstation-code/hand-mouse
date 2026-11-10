@@ -1,12 +1,10 @@
 {
-  "excluded": [
-    "20261109-002442-8aa2d639-home-pc-free.jsonl.gz"
-  ],
+  "excluded": [],
   "augmentation": {
     "enabled": true,
     "strength": "normal",
     "factor": 2
   },
-  "training_mode": "thorough",
+  "training_mode": "fast",
   "training_device": "auto"
 }

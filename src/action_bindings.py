@@ -111,6 +111,7 @@ MOUSE_ACTION_LABELS: Dict[str, Dict[str, str]] = {
     "close_window": {"label": "활성 창 닫기 (Alt+F4)", "badge": "Alt + F4 (창닫기)"},
     "toggle_control": {"label": "마우스 제어 켜기/끄기 (Space)", "badge": "제어 ON/OFF"},
     "toggle_motion": {"label": "모션 모드 켜기/끄기", "badge": "모션모드 ON/OFF"},
+    "toggle_draw": {"label": "그리기 모드 켜기/끄기", "badge": "그리기 모드 ON/OFF"},
     "back": {"label": "뒤로 가기 (Alt + ←)", "badge": "Alt + ← (뒤로)"},
     "forward": {"label": "앞으로 가기 (Alt + →)", "badge": "Alt + → (앞으로)"},
     "tab_prev": {"label": "이전 탭 이동 (Ctrl+Shift+Tab)", "badge": "Ctrl+Shift+Tab (이전탭)"},
@@ -262,9 +263,12 @@ POSTURE_NAMES_KO: Dict[str, str] = {
     "thumb_ring": "엄지+약지 핀치",
     "thumb_pinky": "엄지+새끼 핀치",
     "v_sign": "V 손 모양 (검지·중지 펴기)",
+    "v_sign_down": "거꾸로 V (검지·중지를 아래로)",
     "rock_sign": "검지·새끼 펴기 (락 사인)",
     "thumbs_up": "엄지 위로 세우기",
     "fist": "주먹 쥐기",
+    "fingers_bent": "손가락 앞으로 굽히기 (ㄱ자)",
+    "knife_hand": "손날 (손바닥을 옆으로 세우기)",
     "any": "자유 손 모양 (제한 없음)",
 }
 
@@ -323,6 +327,26 @@ def format_hotkey_badge(hotkey_str: str) -> str:
     return " + ".join(key_map.get(p, p.upper() if len(p) <= 3 else p.capitalize()) for p in parts)
 
 
+_PROGRAM_SUFFIXES = (".exe", ".bat", ".cmd", ".lnk", ".msc", ".ps1", ".py")
+
+
+def _shell_open(program: str, params: str = "") -> bool:
+    """ShellExecute: finds programs registered under App Paths (chrome.exe, msedge.exe, winword.exe) like the Run box."""
+    import ctypes
+    return int(ctypes.windll.shell32.ShellExecuteW(None, "open", program, params or None, None, 1)) > 32
+
+
+def web_address(value: str) -> str:
+    """A bare web address ("youtube.com", "www.naver.com/news") becomes https://...; programs and paths stay as they are.
+    (2026-11-10: "youtube.com" was started as a program and failed.)"""
+    import re
+    v = str(value or "").strip()
+    if (re.fullmatch(r"(?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:/\S*)?", v)
+            and not v.lower().endswith(_PROGRAM_SUFFIXES) and "\\" not in v):
+        return "https://" + v
+    return v
+
+
 def parse_hotkey_keys(hotkey_str: str) -> List[str]:
     """Parse 'ctrl+shift+tab' into PyAutoGUI key names ['ctrl', 'shift', 'tab']."""
     raw = str(hotkey_str or "").strip().lower()
@@ -371,6 +395,12 @@ def format_action_badge(action_type: str, action_value: str, app_overrides: Opti
     elif atype == "launch_app":
         exe_name = Path(aval.split()[0].strip('"')).name if aval else "미지정"
         base = f"프로그램 실행: {exe_name}"
+    elif atype == "macro":
+        try:
+            from src.macro import describe, parse
+            base = describe(parse(aval))
+        except Exception:
+            base = "매크로 (형식 오류)"
     else:
         base = f"{atype}: {aval}"
 
@@ -405,6 +435,12 @@ def format_action_detail(action_type: str, action_value: str, app_overrides: Opt
         base = yt["label"] if yt else f"YouTube/미디어 키 ({aval})"
     elif atype == "launch_app":
         base = f"프로그램 실행 ({aval})"
+    elif atype == "macro":
+        try:
+            from src.macro import describe, parse
+            base = describe(parse(aval))
+        except Exception:
+            base = "매크로 (형식 오류)"
     else:
         base = f"{atype}: {aval}"
 
@@ -898,9 +934,17 @@ class ActionBindingRegistry:
                     pyautogui.hotkey(*keys, _pause=False)
             return True, badge
 
+        if atype == "macro":
+            from src.macro import start
+            if mouse_controller is not None and hasattr(mouse_controller, "event_log"):
+                mouse_controller.event_log.append("macro")
+            ok, message, _ = start(aval, dry_run=dry_run, mouse_controller=mouse_controller)
+            return ok, message
+
         if atype == "launch_app":
             if not aval:
                 return False, "실행할 프로그램 미지정"
+            aval = web_address(aval)
             if mouse_controller is not None and hasattr(mouse_controller, "event_log"):
                 mouse_controller.event_log.append(f"launch:{aval}")
             if not dry_run:
@@ -915,7 +959,12 @@ class ActionBindingRegistry:
                         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                         parts = shlex.split(aval, posix=(os.name != "nt"))
                         cmd = [p.strip('"') for p in parts] if parts else [aval]
-                        subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+                        try:
+                            subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+                        except FileNotFoundError:
+                            # chrome.exe, msedge.exe, ... are not on PATH: Windows finds them through "App Paths"
+                            if os.name != "nt" or not _shell_open(cmd[0], subprocess.list2cmdline(cmd[1:])):
+                                raise
                 except Exception as exc:
                     return False, f"실행 실패: {exc}"
             return True, badge
@@ -953,8 +1002,11 @@ class ActionBindingRegistry:
 class CompositeGestureDetector:
     """Detects registered composite gestures (Base Pinch/Posture + Swipe / Hold / Double-Pinch)."""
 
+    BLANK_GRACE = .15    # s of "no shape" frames that do not end the shape being held
+
     def __init__(self, registry: ActionBindingRegistry) -> None:
         self.registry = registry
+        self._blank_since: Optional[float] = None
         self._active_posture: str = ""
         self._posture_since: float = 0.0
         self._anchor_xy: Optional[Tuple[float, float]] = None
@@ -973,6 +1025,11 @@ class CompositeGestureDetector:
     @staticmethod
     def _detect_base_posture(landmarks: Sequence[Any], active_gesture: str, pinched_fingers: set) -> str:
         """Identify the current base hand posture for composite matching."""
+        # V first: the thumb holds the ring finger in a V, which the rule engine can report as a thumb + ring pinch
+        if landmarks and len(landmarks) >= 21:
+            from src.pose_probe import _finger_ratios, fingers_down, is_v
+            if is_v(_finger_ratios(landmarks)):
+                return "v_sign_down" if fingers_down(landmarks) else "v_sign"
         if "index" in pinched_fingers and "middle" in pinched_fingers:
             return "thumb_index_middle"
         if "index" in pinched_fingers or active_gesture == "thumb_index_pinch":
@@ -994,7 +1051,8 @@ class CompositeGestureDetector:
             except Exception:
                 pass
         if active_gesture == "fist":
-            return "fist"
+            from src.pose_probe import fist_or_bent
+            return fist_or_bent(landmarks, aspect=.5625) or "fist"
         if not landmarks or len(landmarks) < 21:
             return ""
         # Check V-sign or open hand from finger extensions
@@ -1007,12 +1065,14 @@ class CompositeGestureDetector:
                 dm = math.hypot(m.x - w.x, m.y - w.y)
                 dt = math.hypot(t.x - w.x, t.y - w.y)
                 ratios.append(dt / max(1e-5, dm))
-            if ratios[0] >= 1.55 and ratios[1] >= 1.55 and ratios[2] <= 1.25 and ratios[3] <= 1.25:
-                return "v_sign"
+            from src.pose_probe import fingers_down, is_v
+            if is_v(ratios):
+                return "v_sign_down" if fingers_down(landmarks) else "v_sign"
             if ratios[0] >= 1.55 and ratios[3] >= 1.45 and ratios[1] <= 1.25 and ratios[2] <= 1.25:
                 return "rock_sign"
             if min(ratios) >= 1.55:
-                return "open_hand"
+                from src.pose_probe import KNIFE, palm_sideways
+                return "knife_hand" if palm_sideways(landmarks, .5625) >= KNIFE else "open_hand"
         except Exception:
             pass
         return ""
@@ -1032,6 +1092,17 @@ class CompositeGestureDetector:
             return None
 
         posture = self._detect_base_posture(landmarks, active_gesture, pinched_fingers)
+        # a frame or two that reads as no shape (turning the hand, blur) must not restart a hold (2026-11-10: the hold
+        # felt slow); a real change to another shape still counts at once
+        held = self._active_posture
+        if not posture and held and any(c.get("base_posture") == held and c.get("trigger_type") == "hold" for c in composites)                 and not any(c.get("base_posture") == held and c.get("trigger_type") == "double_pinch" for c in composites):
+            # (only for a shape held for a "hold" gesture: letting go of a double pinch must count at once)
+            if self._blank_since is None:
+                self._blank_since = now
+            if now - self._blank_since <= self.BLANK_GRACE:
+                return None
+        else:
+            self._blank_since = None
         palm_x = (float(landmarks[0].x) + float(landmarks[9].x)) * 0.5
         palm_y = (float(landmarks[0].y) + float(landmarks[9].y)) * 0.5 * max(0.25, float(aspect))
 

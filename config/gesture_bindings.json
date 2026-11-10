@@ -121,6 +121,54 @@
       "enabled": true,
       "app_overrides": []
     },
+    "draw_circle": {
+      "gesture_key": "draw_circle",
+      "track": "drawing",
+      "action_type": "hotkey",
+      "action_value": "f5",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "draw_check": {
+      "gesture_key": "draw_check",
+      "track": "drawing",
+      "action_type": "hotkey",
+      "action_value": "enter",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "draw_triangle": {
+      "gesture_key": "draw_triangle",
+      "track": "drawing",
+      "action_type": "youtube_key",
+      "action_value": "media_play_pause",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "draw_zigzag": {
+      "gesture_key": "draw_zigzag",
+      "track": "drawing",
+      "action_type": "hotkey",
+      "action_value": "ctrl+z",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "draw_square": {
+      "gesture_key": "draw_square",
+      "track": "drawing",
+      "action_type": "hotkey",
+      "action_value": "win+shift+s",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "draw_x_mark": {
+      "gesture_key": "draw_x_mark",
+      "track": "drawing",
+      "action_type": "mouse_action",
+      "action_value": "toggle_draw",
+      "enabled": true,
+      "app_overrides": []
+    },
     "motion_f5": {
       "gesture_key": "motion_f5",
       "track": "motion",
@@ -132,13 +180,66 @@
     "user:잘라내기": {
       "gesture_key": "user:잘라내기",
       "track": "static",
+      "enabled": true,
       "action_type": "hotkey",
       "action_value": "ctrl+x",
+      "app_overrides": []
+    },
+    "comp_v_sign_down_hold": {
+      "gesture_key": "comp_v_sign_down_hold",
+      "track": "composite",
+      "enabled": true,
+      "action_type": "macro",
+      "action_value": "[{\"do\": \"open\", \"value\": \"chrome.exe --incognito --start-maximized https://accounts.google.com\"}]",
+      "app_overrides": []
+    },
+    "comp_open_hand_hold": {
+      "gesture_key": "comp_open_hand_hold",
+      "track": "composite",
+      "enabled": true,
+      "action_type": "mouse_action",
+      "action_value": "show_desktop",
+      "app_overrides": []
+    },
+    "motion_knife_hand_diag_down_left": {
+      "gesture_key": "motion_knife_hand_diag_down_left",
+      "track": "motion",
+      "action_type": "hotkey",
+      "action_value": "alt+f4",
       "enabled": true,
       "app_overrides": []
     }
   },
-  "composite_gestures": {},
+  "composite_gestures": {
+    "comp_v_sign_down_hold": {
+      "key": "comp_v_sign_down_hold",
+      "name": "거꾸로 V 유지",
+      "base_posture": "v_sign_down",
+      "trigger_type": "hold",
+      "min_distance": 0.08,
+      "min_speed": 0.22,
+      "hold_seconds": 0.4,
+      "cooldown": 0.65,
+      "action_type": "macro",
+      "action_value": "[{\"do\": \"open\", \"value\": \"chrome.exe --incognito --start-maximized https://accounts.google.com\"}]",
+      "enabled": true,
+      "app_overrides": []
+    },
+    "comp_open_hand_hold": {
+      "key": "comp_open_hand_hold",
+      "name": "손 펴기 (엄지 포함) 유지",
+      "base_posture": "open_hand",
+      "trigger_type": "hold",
+      "min_distance": 0.08,
+      "min_speed": 0.22,
+      "hold_seconds": 1.0,
+      "cooldown": 0.65,
+      "action_type": "mouse_action",
+      "action_value": "show_desktop",
+      "enabled": true,
+      "app_overrides": []
+    }
+  },
   "custom_motions": {
     "motion_f5": {
       "key": "motion_f5",
@@ -152,6 +253,22 @@
       "require_motion_mode": true,
       "action_type": "hotkey",
       "action_value": "f5",
+      "enabled": true,
+      "app_overrides": [],
+      "track": "motion"
+    },
+    "motion_knife_hand_diag_down_left": {
+      "key": "motion_knife_hand_diag_down_left",
+      "name": "손날 좌하단 쓸기",
+      "posture": "knife_hand",
+      "direction": "diag_down_left",
+      "instruction": "[시계열 모션] 손날 (손바닥을 옆으로 세우기) 상태로 좌하단 대각선 (↙) 한 번 쓸어 멈추세요. 쉬기 때 제자리로 돌아오세요",
+      "min_distance": 0.14,
+      "min_speed": 0.25,
+      "window_seconds": 0.65,
+      "require_motion_mode": true,
+      "action_type": "hotkey",
+      "action_value": "alt+f4",
       "enabled": true,
       "app_overrides": [],
       "track": "motion"

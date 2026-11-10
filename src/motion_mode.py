@@ -144,7 +144,8 @@ def hand_features(landmarks: Sequence[Any]) -> Dict[str, Any]:
     depth_3d = max((abs(p[2] - wrist[2]) for p in pts), default=0.0)
     # thumb tip -> index / middle / ring / pinky tip, in palm lengths (a pinch is ~0.1-0.25)
     pinch = tuple(d2(pts[THUMB_TIP], pts[tip]) / palm_len for tip in (8, 12, 16, 20))
-    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy), "depth_3d": depth_3d, "pinch": pinch}
+    return {"curl": tuple(curl), "thumb_tuck": tuck, "thumb_len": thumb_len, "thumb_straight": thumb_straight, "thumb_up": thumb_up, "palm_ratio": palm_ratio, "palm": (cx, cy), "depth_3d": depth_3d, "pinch": pinch,
+            "lm": landmarks}           # for the shapes judged from the joints (src/pose_probe.hand_posture)
 
 
 def _thumbs_up(f: Dict[str, Any]) -> bool:
@@ -181,6 +182,16 @@ def custom_posture_ok(posture: str, f: Dict[str, Any]) -> bool:
         return max(curls) <= 1.18 and not _thumbs_up(f)
     if posture == "thumbs_up":
         return _thumbs_up(f)
+    if posture in ("knife_hand", "fingers_bent", "v_sign_down"):
+        # shapes added 2026-11-10 (손날, ㄱ자, 거꾸로 V): the same judge as the shape probe and the sequences
+        lm = f.get("lm")
+        if lm is None or len(lm) < 21:
+            return False
+        if not hasattr(lm[0], "x"):                      # recordings keep the joints as [x, y, z] lists
+            from types import SimpleNamespace
+            lm = [SimpleNamespace(x=p[0], y=p[1], z=p[2] if len(p) > 2 else 0.0) for p in lm]
+        from src.pose_probe import hand_posture
+        return hand_posture(lm, 720 / 1280) == posture
     if posture in _PINCH_FINGER:
         pinch = f.get("pinch")
         if not pinch:
@@ -227,6 +238,7 @@ class MotionMode:
         self._paused_ok = True           # rested long enough since the last swipe: the opposite direction is allowed
         self.last_miss: Optional[Dict[str, Any]] = None   # the biggest stroke that was NOT sent, and why
         self._hist: Deque[Tuple[float, float, float, bool, Optional[str], float, float]] = deque()
+        self._recent_f: Deque[Tuple[float, Dict[str, Any]]] = deque()   # hand features of the last 0.8 s
         self._last_swipe_t = -1e9
         self._last_swipe_dir = 0
         self._last_swipe_speed = 0.0
@@ -461,6 +473,9 @@ class MotionMode:
         low_raw = min(f["curl"])
         self._lows = (self._lows + [low_raw])[-3:]
         low = sorted(self._lows)[len(self._lows) // 2]
+        self._recent_f.append((now, f))
+        while self._recent_f and now - self._recent_f[0][0] > .8:
+            self._recent_f.popleft()
         self._hist.append((now, f["palm"][0], f["palm"][1], low >= self.cfg("motion_open_ratio"), self._thumb_state,
                            tuck, low))
         while self._hist and now - self._hist[0][0] > win:
@@ -482,13 +497,15 @@ class MotionMode:
         if not self._settled or now - self._last_swipe_t < self.cfg("motion_swipe_cooldown"):
             return None
         h = list(self._hist)
+        # the user's own motions first (2026-11-10: a registered "손날 좌하단" slash was taken by the built-in
+        # "down stroke = ask to close the window" and never ran)
+        custom_ev = self._custom_motion_stroke(now, h, f)
+        if custom_ev is not None:
+            return custom_ev
         if self.cfg("motion_close_enabled") >= 1.0:
             down = self._down_stroke(now, h)
             if down is not None:
                 return down
-        custom_ev = self._custom_motion_stroke(now, h, f)
-        if custom_ev is not None:
-            return custom_ev
         best_miss: Optional[Dict[str, Any]] = None
         for start in range(len(h) - 3):
             ev, miss = self._stroke(now, h[start:], h)
@@ -522,7 +539,11 @@ class MotionMode:
                 continue
             req_posture = str(m_def.get("posture", "open_hand"))
             if not custom_posture_ok(req_posture, f):
-                continue
+                # a fast stroke blurs the hand: the shape held for about half of the stroke is enough
+                stroke_start = h[0][0]
+                seen = [ff for tt, ff in self._recent_f if tt >= stroke_start]
+                if not seen or sum(custom_posture_ok(req_posture, ff) for ff in seen) < max(2, len(seen) // 2):
+                    continue
 
             min_dist = float(m_def.get("min_distance", 0.14))
             min_spd = float(m_def.get("min_speed", 0.25))

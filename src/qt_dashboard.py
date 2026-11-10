@@ -98,6 +98,10 @@ class QtDashboard(QObject):
     correctionChanged = Signal()      # online learning: the "what was that really?" question
     learnChanged = Signal()           # online learning: background learning rounds
     virtualHandChanged = Signal()     # the hand drawn at the cursor
+    fingerFrameChanged = Signal()     # the fingertips drawn next to the cursor (src/FingerTracker.qml)
+    llmChanged = Signal()             # gestures connected in words (src/llm_binding.py)
+    drawChanged = Signal()            # drawing mode overlay (src/draw_mode.py)
+    drawShapesChanged = Signal()      # drawing mode shapes and their commands (settings)
     registrationChanged = Signal()    # online learning: adding a new gesture
     receptionChanged = Signal()       # tray / overlay state (ok, weak, none, paused)
     overlayChanged = Signal()         # overlay shown / hidden / moved
@@ -234,6 +238,23 @@ class QtDashboard(QObject):
         self.live_gesture = ""
         self.virtual_hand = None
         self.virtual_hand_on = self.preferences.value("virtualHand", _virtual_hand_default(), type=bool)
+        self.finger_overlay = self.preferences.value("fingerOverlay", False, type=bool)
+        self.finger_frame = {}
+        self.preview_hand = {}            # shown with the preview image it belongs to (src/HandSkeleton.qml)
+        self._pending_preview_hand = {}
+        self.llm_provider = str(self.preferences.value("llmProvider", "claude") or "claude")
+        self.llm_busy = False
+        self.llm_message = ""
+        self.llm_result = {}
+        self.llm_models = []
+        self._llm_session_keys = {}       # keys typed this run where they cannot be saved encrypted
+        self.pose_probe_view = None       # [손 모양 보여주기]: countdown / holding / done / failed
+        self.captured_key = ""            # [키 기억하기]: the combination pressed
+        self.key_capturing = False
+        self.draw_view = {}               # drawing mode: pen, stroke, last shape (from the runtime)
+        self.draw_message = ""
+        self.draw_test = {}               # what a stroke drawn in the settings is recognised as
+        self._draw_store = None
         self.virtual_box = _saved_box(self.preferences.value("virtualBox", "", type=str))
         self.box_editing = False
         self.my_gestures = []
@@ -262,6 +283,9 @@ class QtDashboard(QObject):
         self.remaining = 5
 
         QQuickStyle.setStyle("Basic")
+        # the Studio theme's font (src/theme/Studio.qml), bundled so Korean shows whatever fonts the PC has
+        from PySide6.QtGui import QFontDatabase
+        QFontDatabase.addApplicationFont(str(Path(__file__).with_name("assets") / "fonts" / "NotoSansKR.ttf"))
         self.engine = QQmlApplicationEngine()
         self.provider = CameraImage()
         self.engine.addImageProvider("vision", self.provider)
@@ -562,6 +586,41 @@ class QtDashboard(QObject):
                                               SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ skeleton over the preview, fingertips at the cursor
+    @Property("QVariant", notify=previewChanged)
+    def previewHand(self):
+        """{"lm": 21 [x, y] 0..1 of the frame, "guides": [[tip, state]], "anchor": [x, y] or [], "moving"}; {} = no hand."""
+        return self.preview_hand
+
+    def set_finger_frame(self, frame):
+        if not self.finger_overlay and not self.finger_frame:
+            return
+        if frame is None or not self.finger_overlay:
+            if self.finger_frame:
+                self.finger_frame = {}
+                self.fingerFrameChanged.emit()
+            return
+        from PySide6.QtGui import QCursor
+        pos = QCursor.pos()             # logical pixels, the space windows are placed in
+        self.finger_frame = {**frame, "cursor": [pos.x(), pos.y()]}
+        self.fingerFrameChanged.emit()
+
+    @Property("QVariant", notify=fingerFrameChanged)
+    def fingerFrame(self):
+        return self.finger_frame
+
+    @Property(bool, notify=stateChanged)
+    def fingerOverlay(self):
+        return self.finger_overlay
+
+    @Slot(bool)
+    def setFingerOverlay(self, on):
+        self.finger_overlay = bool(on)
+        self.preferences.setValue("fingerOverlay", self.finger_overlay)
+        if not on:
+            self.set_finger_frame(None)
+        self.stateChanged.emit()
 
     @Property("QVariant", notify=virtualHandChanged)
     def virtualHand(self):
@@ -2681,6 +2740,436 @@ class QtDashboard(QObject):
             self.trainingChanged.emit()
             return False
 
+    # ------------------------------------------------------------------ gestures connected in words (LLM)
+    def _llm_config(self):
+        from src.llm_providers import LlmConfig, PROVIDERS
+        from src import secret_store
+        pid = self.llm_provider if self.llm_provider in PROVIDERS else "claude"
+        saved = str(self.preferences.value(f"llmKey/{pid}", "") or "")
+        key = secret_store.unprotect(saved) if saved else self._llm_session_keys.get(pid, "")
+        return LlmConfig(provider=pid, model=str(self.preferences.value(f"llmModel/{pid}", "") or ""),
+                         base_url=str(self.preferences.value(f"llmBase/{pid}", "") or ""), api_key=key)
+
+    def _llm_set(self, busy=None, message=None):
+        if busy is not None:
+            self.llm_busy = busy
+        if message is not None:
+            self.llm_message = message
+        self.llmChanged.emit()
+
+    @Property("QVariantList", constant=True)
+    def llmProviders(self):
+        from src.llm_providers import PROVIDERS
+        return [{"id": p.id, "label": p.label, "note": p.note, "needsKey": bool(p.key_env), "keyEnv": p.key_env,
+                 "defaultModel": p.default_model, "defaultBase": p.base_url} for p in PROVIDERS.values()]
+
+    @Property("QVariantMap", notify=llmChanged)
+    def llmSettings(self):
+        import os
+        cfg = self._llm_config()
+        spec = cfg.spec
+        saved = bool(self.preferences.value(f"llmKey/{cfg.provider}", "")) or cfg.provider in self._llm_session_keys
+        env = bool(spec.key_env and os.environ.get(spec.key_env))
+        source = ("필요 없음" if not spec.key_env else "저장된 키 사용" if saved
+                  else f"환경 변수 {spec.key_env} 사용" if env else "키 없음")
+        from src.llm_binding import describe_request
+        return {"provider": cfg.provider, "model": cfg.model, "modelShown": cfg.model_name(), "baseUrl": cfg.base_url,
+                "defaultBase": spec.base_url, "needsKey": bool(spec.key_env), "hasKey": bool(cfg.key()) or not spec.key_env,
+                "keySource": source, "keySaved": saved, "privacy": describe_request(cfg, "")}
+
+    @Property(bool, notify=llmChanged)
+    def llmBusy(self):
+        return self.llm_busy
+
+    @Property(str, notify=llmChanged)
+    def llmMessage(self):
+        return self.llm_message
+
+    @Property("QVariantMap", notify=llmChanged)
+    def llmResult(self):
+        return self.llm_result
+
+    @Property("QVariantList", notify=llmChanged)
+    def llmModels(self):
+        return self.llm_models
+
+    @Slot(str)
+    def setLlmProvider(self, pid):
+        from src.llm_providers import PROVIDERS
+        if pid in PROVIDERS and pid != self.llm_provider:
+            self.llm_provider = pid
+            self.preferences.setValue("llmProvider", pid)
+            self.llm_models = []
+            self._llm_set(message="")
+
+    @Slot(str)
+    def setLlmModel(self, model):
+        self.preferences.setValue(f"llmModel/{self.llm_provider}", str(model or "").strip())
+        self.llmChanged.emit()
+
+    @Slot(str)
+    def setLlmBaseUrl(self, url):
+        url = str(url or "").strip()
+        if url and not url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+            self._llm_set(message="주소는 https:// 또는 이 PC(http://localhost)만 쓸 수 있어요.")
+            return
+        self.preferences.setValue(f"llmBase/{self.llm_provider}", url)
+        self.llmChanged.emit()
+
+    @Slot(str)
+    def saveLlmKey(self, key):
+        from src import secret_store
+        key = str(key or "").strip()
+        if not key:
+            return
+        token = secret_store.protect(key)
+        if token:
+            self.preferences.setValue(f"llmKey/{self.llm_provider}", token)
+            self._llm_set(message="키를 이 Windows 사용자 전용으로 암호화해 저장했어요.")
+        else:
+            self._llm_session_keys[self.llm_provider] = key
+            self._llm_set(message="이 시스템에서는 키를 저장할 수 없어 이번 실행 동안만 써요.")
+
+    @Slot()
+    def clearLlmKey(self):
+        self.preferences.remove(f"llmKey/{self.llm_provider}")
+        self._llm_session_keys.pop(self.llm_provider, None)
+        self._llm_set(message="저장한 키를 지웠어요.")
+
+    def _llm_job(self, work, busy_text):
+        if self.llm_busy:
+            return
+        self._llm_set(busy=True, message=busy_text)
+
+        def run():
+            from src.llm_providers import LlmError
+            try:
+                message = work()
+            except LlmError as exc:
+                message = str(exc)
+            except Exception as exc:                      # never let a worker error reach the screen as a crash
+                message = f"실패했어요: {type(exc).__name__}"
+            self._llm_set(busy=False, message=message)
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    @Slot()
+    def loadLlmModels(self):
+        cfg = self._llm_config()
+
+        def work():
+            from src.llm_providers import list_models
+            self.llm_models = list_models(cfg)
+            return f"모델 {len(self.llm_models)}개를 불러왔어요." if self.llm_models else "쓸 수 있는 모델이 없어요."
+        self._llm_job(work, "모델 목록을 불러오는 중…")
+
+    @Slot(str)
+    def askLlm(self, text):
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import ask, gesture_list
+        cfg = self._llm_config()
+        gestures = gesture_list(get_action_registry())
+        shown = dict(self.pose_probe_view) if (self.pose_probe_view or {}).get("state") == "done" else None
+        key = self.captured_key
+
+        def work():
+            result = ask(cfg, text, gestures, shown=shown, key=key)
+            self.llm_result = {**result, "request": str(text).strip()}
+            n = sum(1 for r in result["proposals"] if r["ok"])
+            if not result["proposals"]:
+                return "바꿀 연결을 찾지 못했어요." + (" 아래 질문을 확인해 주세요." if result["questions"] else "")
+            return f"제안 {len(result['proposals'])}개 ({n}개 적용 가능). 확인하고 [선택한 연결 적용]을 눌러 주세요."
+        self._llm_job(work, f"{cfg.spec.label}에 묻는 중…")
+
+    # ------------------------------------------------------------------ drawing mode (src/draw_mode.py)
+    def _shapes(self):
+        if self._draw_store is None:
+            from src.draw_mode import ShapeStore
+            self._draw_store = ShapeStore()
+        return self._draw_store
+
+    def _draw_edited(self, message=""):
+        self.online_commands.append(("draw_reload",))       # the runtime has its own copy of the shapes
+        if message:
+            self.draw_message = message
+        self.drawShapesChanged.emit()
+
+    @Property("QVariantMap", notify=drawChanged)
+    def drawView(self):
+        return self.draw_view
+
+    @Property(bool, notify=drawChanged)
+    def drawOn(self):
+        return bool(self.draw_view.get("on"))
+
+    @Property("QVariantList", notify=drawChanged)
+    def drawArea(self):
+        """The primary monitor [x, y, w, h] (logical px): where the drawing overlay lies (the box maps onto it)."""
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return [0, 0, 1920, 1080]
+        g = screen.geometry()
+        return [g.x(), g.y(), g.width(), g.height()]
+
+    @Slot()
+    def toggleDrawMode(self):
+        self.online_commands.append(("draw_mode", None))
+
+    @Property("QVariantList", notify=drawShapesChanged)
+    def drawShapes(self):
+        from src.action_bindings import get_action_registry
+        reg = get_action_registry()
+        out = []
+        for shape in self._shapes().shapes():
+            b = reg.get_binding(shape["key"])
+            out.append({**shape, "action_type": str(b.get("action_type", "mouse_action")),
+                        "action_value": str(b.get("action_value", "none")), "badge": str(b.get("badge", ""))})
+        return out
+
+    # ------------------------------------------------------------------ gesture sequences (src/sequence.py)
+    @Property("QVariantList", notify=drawShapesChanged)
+    def sequenceRows(self):
+        from src.action_bindings import get_action_registry
+        from src.sequence import SequenceStore
+        from src.path_gesture import PathStore
+        reg = get_action_registry()
+        rows = [{**row, "kind": "sequence"} for row in SequenceStore().rows()]
+        rows += [{**row, "kind": "path"} for row in PathStore().rows()]     # hand shape + drawing (src/path_gesture.py)
+        return [{**row, "badge": str(reg.get_binding(row["key"]).get("badge", ""))} for row in rows]
+
+    @Slot(str)
+    def removeSequence(self, key):
+        from src.path_gesture import PathStore
+        from src.sequence import SequenceStore
+        if SequenceStore().remove(key) or PathStore().remove(key):
+            self.online_commands.append(("seq_reload",))
+            self.draw_message = "이어 하기를 지웠어요."
+        self.drawShapesChanged.emit()
+        self.llmChanged.emit()
+
+    @Slot(str, bool)
+    def setSequenceEnabled(self, key, on):
+        from src.path_gesture import PathStore
+        from src.sequence import SequenceStore
+        SequenceStore().set_enabled(key, on)
+        PathStore().set_enabled(key, on)
+        self.online_commands.append(("seq_reload",))
+        self.drawShapesChanged.emit()
+
+    @Property(float, notify=drawShapesChanged)
+    def drawThreshold(self):
+        return float(self._shapes().threshold)
+
+    @Property(str, notify=drawShapesChanged)
+    def drawMessage(self):
+        return self.draw_message
+
+    @Property("QVariantMap", notify=drawShapesChanged)
+    def drawTest(self):
+        return self.draw_test
+
+    @Slot(str, "QVariantList", result=bool)
+    def addDrawShape(self, name, strokes):
+        try:
+            key = self._shapes().add(name, [list(st) for st in strokes])
+        except ValueError as exc:
+            self.draw_message = str(exc)
+            self.drawShapesChanged.emit()
+            return False
+        self._draw_edited(f"'{name}' 그림을 등록했어요. 아래에서 명령을 연결해 주세요.")
+        return bool(key)
+
+    @Slot(str, "QVariantList")
+    def addDrawExample(self, key, stroke):
+        try:
+            self._shapes().add_example(key, list(stroke))
+        except ValueError as exc:
+            self.draw_message = str(exc)
+            self.drawShapesChanged.emit()
+            return
+        self._draw_edited("예시를 더했어요.")
+
+    @Slot(str)
+    def removeDrawShape(self, key):
+        if self._shapes().remove(key):
+            self._draw_edited("그림을 지웠어요.")
+
+    @Slot(str, bool)
+    def setDrawShapeEnabled(self, key, on):
+        self._shapes().set_enabled(key, on)
+        self._draw_edited()
+
+    @Slot(float)
+    def setDrawThreshold(self, value):
+        self._shapes().set_threshold(value)
+        self._draw_edited()
+
+    @Slot(str, str, str, result=bool)
+    def setDrawBinding(self, key, action_type, action_value):
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import _check_value
+        problem = _check_value(str(action_type), str(action_value).strip())
+        if problem:
+            self.draw_message = problem
+            self.drawShapesChanged.emit()
+            return False
+        reg = get_action_registry()
+        current = reg.get_binding(key)
+        reg.set_binding(key, action_type, str(action_value).strip(), enabled=bool(current.get("enabled", True)),
+                        track="drawing")
+        self.draw_message = f"{self._shapes().name(key)} → {reg.get_binding(key).get('badge')}"
+        self.drawShapesChanged.emit()
+        return True
+
+    @Slot("QVariantList")
+    def testDrawStroke(self, stroke):
+        self.draw_test = self._shapes().test(list(stroke))
+        self.drawShapesChanged.emit()
+
+    @Property("QVariantMap", notify=llmChanged)
+    def llmContext(self):
+        """What 이/저 point to: the shown hand shape and the remembered key."""
+        return {"pose": self.pose_probe_view or {}, "key": self.captured_key, "capturing": self.key_capturing}
+
+    @Slot()
+    def startPoseProbe(self):
+        self.online_commands.append(("pose_probe",))
+        self.pose_probe_view = {"state": "countdown", "seconds": 3}
+        self._llm_set(message="손을 카메라에 보여 주세요. 3초 뒤 2초 동안 손 모양을 봅니다.")
+
+    @Slot()
+    def clearPoseProbe(self):
+        self.online_commands.append(("pose_probe_cancel",))
+        self.pose_probe_view = None
+        self.llmChanged.emit()
+
+    @Slot()
+    def captureKey(self):
+        if self.key_capturing:
+            return
+        import sys
+        if sys.platform != "win32":
+            self._llm_set(message="키 기억하기는 Windows에서만 돼요. 요청에 키를 직접 적어 주세요 (예: ctrl+shift+t).")
+            return
+        self.key_capturing = True
+        self._llm_set(message="8초 안에 기억할 키 조합을 누르세요 (예: Ctrl+Shift+T). 이 조합 하나만 기억해요.")
+
+        def work():
+            from src.key_capture import capture
+            combo = None
+            try:
+                combo = capture(timeout=8.0)
+            finally:
+                self.key_capturing = False
+            if combo:
+                self.captured_key = combo
+                self._llm_set(message=f"기억한 키: {combo}")
+            else:
+                self._llm_set(message="키 조합이 눌리지 않았어요.")
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot()
+    def clearCapturedKey(self):
+        self.captured_key = ""
+        self.llmChanged.emit()
+
+    @Slot(int, bool)
+    def setLlmProposalChecked(self, index, on):
+        rows = list(self.llm_result.get("proposals") or [])
+        if 0 <= index < len(rows) and rows[index].get("ok"):
+            rows[index] = {**rows[index], "checked": bool(on)}
+            self.llm_result = {**self.llm_result, "proposals": rows}
+            self.llmChanged.emit()
+
+    @Slot()
+    def applyLlmProposals(self):
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History, apply
+        rows = list(self.llm_result.get("proposals") or [])
+        try:
+            done = apply(rows, get_action_registry(), history=History(), request=str(self.llm_result.get("request", "")))
+        except Exception as exc:
+            self._llm_set(message=f"저장하지 못했어요: {exc}")
+            return
+        if not done:
+            self._llm_set(message="선택한 연결이 없어요.")
+            return
+        self.llm_result = {}
+        self.online_commands.append(("seq_reload",))    # a new sequence: the runtime reads the file again
+        self.drawShapesChanged.emit()
+        self.training_note = "말·글로 연결: " + " / ".join(done)
+        self.refreshTraining()
+        self.stateChanged.emit()
+        self._llm_set(message="적용했어요: " + " / ".join(done))
+
+    @Property("QVariantList", notify=llmChanged)
+    def llmHistory(self):
+        """What the AI connected, newest first, with whether it is still in force (src/llm_binding.History)."""
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History
+        try:
+            return History().rows(get_action_registry())
+        except Exception:
+            return []
+
+    @Slot(int)
+    def deleteLlmConnection(self, index):
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History
+        try:
+            message = History().delete(int(index), get_action_registry())
+        except ValueError as exc:
+            message = str(exc)
+        self.online_commands.append(("seq_reload",))
+        self.drawShapesChanged.emit()
+        self.refreshTraining()
+        self.stateChanged.emit()
+        self._llm_set(message=message)
+
+    @Slot(int)
+    def forgetLlmConnection(self, index):
+        from src.llm_binding import History
+        History().forget(int(index))
+        self._llm_set(message="목록에서 지웠어요.")
+
+    @Slot(int)
+    def undoLlmConnection(self, index):
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History
+        try:
+            message = History().undo(int(index), get_action_registry())
+        except ValueError as exc:
+            message = str(exc)
+        self.online_commands.append(("seq_reload",))
+        self.drawShapesChanged.emit()
+        self.refreshTraining()
+        self.stateChanged.emit()
+        self._llm_set(message=message)
+
+    @Slot()
+    def clearLlmResult(self):
+        self.llm_result = {}
+        self._llm_set(message="")
+
+    @Slot()
+    def startVoiceTyping(self):
+        """Windows voice typing (Win+H) into the focused text box: speech and typing go through the same request box."""
+        import sys
+        if sys.platform != "win32" or self.dry_run:
+            self._llm_set(message="음성 입력은 Windows의 음성 입력(Win+H)을 씁니다. 글상자를 누르고 Win+H를 눌러 주세요.")
+            return
+
+        def press():
+            try:
+                import pyautogui
+                pyautogui.hotkey("win", "h", _pause=False)
+            except Exception:
+                self._llm_set(message="음성 입력을 열지 못했어요. 글상자를 누르고 Win+H를 직접 눌러 주세요.")
+        QTimer.singleShot(200, press)      # after the text box has the focus
+        self._llm_set(message="말씀하세요. 끝나면 [제안 받기]를 누르세요. (Windows 음성 입력, 인터넷 필요)")
+
     @Slot(str, result=bool)
     def resetGestureBinding(self, gesture_key):
         from src.action_bindings import get_action_registry
@@ -3360,6 +3849,16 @@ class QtDashboard(QObject):
         self.set_registration(getattr(snap, "registration", None))
         self.set_live_gesture(getattr(snap, "online_gesture", ""))
         self.set_virtual_hand(getattr(snap, "virtual_hand", None), snap.paused)
+        self._pending_preview_hand = getattr(snap, "preview_hand", None) or {}
+        draw = getattr(snap, "draw", None) or {}
+        if draw != self.draw_view:
+            self.draw_view = draw
+            self.drawChanged.emit()
+        probe = getattr(snap, "pose_probe", None)
+        if probe != self.pose_probe_view:
+            self.pose_probe_view = probe
+            self.llmChanged.emit()
+        self.set_finger_frame(getattr(snap, "finger", None))
         lost = (bool(getattr(snap, "hand_lost", False)), bool(getattr(snap, "arm_lost", False)),
                 bool(getattr(snap, "admin_blocked", False)))
         if lost != (getattr(self, "hand_lost", False), getattr(self, "arm_lost", False), getattr(self, "admin_blocked", False)):
@@ -3687,6 +4186,7 @@ class QtDashboard(QObject):
             height, width = frame.shape[:2]
         self.provider.image = QImage(frame.data, width, height, frame.strides[0], QImage.Format_BGR888).copy()
         self.sequence += 1
+        self.preview_hand = self._pending_preview_hand
         self.previewChanged.emit()
 
     def close(self):

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "theme" as Theme
 
 ApplicationWindow {
     id: window
@@ -10,7 +11,7 @@ ApplicationWindow {
     minimumHeight: 660
     visible: true
     title: dashboard.appTitle
-    color: "#F4F6F8"
+    color: Theme.Studio.surface
     onClosing: function (close) {
         if (dashboard.hidesToTray) {
             close.accepted = false   // tray mode: keep running, quit from the tray menu
@@ -19,15 +20,24 @@ ApplicationWindow {
             dashboard.requestClose()
         }
     }
-    readonly property color navy: "#112331"
-    readonly property color ink: "#112331"
-    readonly property color muted: "#526575"
-    readonly property color mint: "#46E5BD"
-    readonly property color primaryBlue: "#1D4ED8"
-    readonly property color primaryBlueDark: "#1E3A8A"
-    readonly property color dangerRed: "#DC2626"
-    readonly property color line: "#DEE5EA"
-    font.family: "Malgun Gothic"
+    // design tokens from manux-merged-20261110 (src/theme/Studio.qml); the old names stay so every screen follows them
+    readonly property color navy: Theme.Studio.ink
+    readonly property color ink: Theme.Studio.ink
+    readonly property color muted: Theme.Studio.muted
+    readonly property color mint: Theme.Studio.mint
+    readonly property color primaryBlue: Theme.Studio.mintDark
+    readonly property color primaryBlueDark: "#0F5E4E"
+    readonly property color dangerRed: Theme.Studio.danger
+    readonly property color line: Theme.Studio.line
+    font.family: Theme.Studio.font
+    // one macro step (src/macro.py) in words, for the AI proposal cards and the AI connection list
+    function stepText(st) {
+        var names = {"key": "단축키", "type": "글자 입력", "wait": "기다리기", "open": "열기", "mouse": "마우스", "youtube": "유튜브 키"}
+        if (st.do === "wait") return st.value + "초 기다리기"
+        if (st.do === "type") return "'" + st.value + "' 입력"
+        if (st.do === "open") return st.value + " 열기"
+        return (names[st.do] || st.do) + " " + st.value
+    }
 
     component TextLabel: Label {
         color: window.navy
@@ -41,27 +51,28 @@ ApplicationWindow {
         property bool primary: false
         property bool danger: false
         implicitHeight: 40
-        leftPadding: 16
-        rightPadding: 16
+        leftPadding: 14
+        rightPadding: 14
+        opacity: enabled ? 1 : 0.42
         contentItem: TextLabel {
             text: button.text
+            font.pixelSize: Theme.Studio.body
             font.bold: true
-            color: !button.enabled ? "#9AA8B4" : ((button.primary || button.danger) ? "#FFFFFF" : window.navy)
+            color: button.danger ? "#FFFFFF" : Theme.Studio.ink
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
         }
+        // Studio button (manux StudioButton): primary = mint, accent = selected (mint wash, dark mint edge)
         background: Rectangle {
-            radius: 10
-            color: !button.enabled ? "#E9EEF2"
-                : (button.danger ? (button.down ? "#991B1B" : window.dangerRed)
-                : (button.primary ? (button.down ? window.primaryBlueDark : window.primaryBlue)
-                : (button.accent ? (button.down ? "#35CFA8" : window.mint)
-                : (button.down ? "#BCEFE1" : "#F0F3F6"))))
-            border.color: button.activeFocus ? "#16846E"
-                : (button.danger ? "#B91C1C"
-                : (button.primary ? "#1E40AF"
-                : (button.accent ? "#16846E" : "#D5DFE6")))
+            radius: Theme.Studio.radius - 2
+            color: button.danger ? (button.down ? "#7F2733" : Theme.Studio.danger)
+                : button.down ? "#BCEFE1"
+                : button.primary ? Theme.Studio.mint
+                : button.accent ? Theme.Studio.mintWash
+                : button.hovered ? Theme.Studio.mintWash : Theme.Studio.surface
+            border.color: button.activeFocus || button.accent ? Theme.Studio.mintDark
+                : (button.primary || button.danger) ? "transparent" : Theme.Studio.line
             border.width: (button.accent || button.activeFocus) ? 2 : 1
         }
     }
@@ -74,26 +85,896 @@ ApplicationWindow {
         implicitHeight: 30
         leftPadding: 10
         rightPadding: 10
+        opacity: enabled ? 1 : 0.42
         contentItem: TextLabel {
             text: cbutton.text
             font.pixelSize: 12
             font.bold: true
-            color: !cbutton.enabled ? "#9AA8B4" : ((cbutton.primary || cbutton.danger) ? "#FFFFFF" : window.navy)
+            color: cbutton.danger ? "#FFFFFF" : Theme.Studio.ink
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
         }
         background: Rectangle {
             radius: 7
-            color: !cbutton.enabled ? "#E9EEF2"
-                : (cbutton.danger ? (cbutton.down ? "#991B1B" : window.dangerRed)
-                : (cbutton.primary ? (cbutton.down ? window.primaryBlueDark : window.primaryBlue)
-                : (cbutton.accent ? (cbutton.down ? "#35CFA8" : window.mint)
-                : (cbutton.down ? "#BCEFE1" : "#EBF0F4"))))
-            border.color: cbutton.activeFocus ? "#16846E"
-                : (cbutton.danger ? "#B91C1C"
-                : (cbutton.primary ? "#1E40AF"
-                : (cbutton.accent ? "#16846E" : "#CBD5E1")))
+            color: cbutton.danger ? (cbutton.down ? "#7F2733" : Theme.Studio.danger)
+                : cbutton.down ? "#BCEFE1"
+                : cbutton.primary ? Theme.Studio.mint
+                : cbutton.accent ? Theme.Studio.mintWash
+                : cbutton.hovered ? Theme.Studio.mintWash : Theme.Studio.surface
+            border.color: cbutton.activeFocus || cbutton.accent ? Theme.Studio.mintDark
+                : (cbutton.primary || cbutton.danger) ? "transparent" : Theme.Studio.line
             border.width: cbutton.accent ? 2 : 1
+        }
+    }
+
+    // Connect gestures in words (AI): its own window, opened from the top bar (was the 5-4 sub-tab of the bindings)
+    Dialog {
+        id: llmDialog
+        objectName: "llmDialog"
+        anchors.centerIn: parent
+        width: Math.min(980, window.width - 48)
+        height: window.height - 48
+        modal: true
+        title: "말·글로 연결 (AI)"
+        standardButtons: Dialog.Close
+        contentItem: Item {
+                    // =========================================================================
+                    // SUB-TAB 4: CONNECT GESTURES IN WORDS (LLM: Claude / OpenAI / Gemini / OpenRouter / Ollama)
+                    // src/llm_binding.py proposes, the user ticks, only then it is saved. Speech = Windows voice typing.
+                    // =========================================================================
+                    Rectangle {
+                        id: llmPanel
+                        objectName: "llmPanel"
+                        anchors.fill: parent
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: 10
+                        color: "#F7FAFB"
+                        border.color: window.line
+                        readonly property var cfg: dashboard.llmSettings
+                        readonly property var result: dashboard.llmResult
+                        readonly property var proposals: result.proposals || []
+                        ScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            clip: true
+                            contentWidth: availableWidth
+                            ColumnLayout {
+                                width: parent.width
+                                spacing: 8
+
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    text: "하고 싶은 연결을 말하거나 적으면, AI가 동작 연결을 제안합니다. 확인하고 고른 것만 저장돼요."
+                                    font.bold: true
+                                    wrapMode: Text.Wrap
+                                }
+                                // 1. where the request goes
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    FormLabel { text: "AI 연결" }
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        Repeater {
+                                            model: dashboard.llmProviders
+                                            delegate: CompactButton {
+                                                required property var modelData
+                                                text: modelData.label
+                                                accent: llmPanel.cfg.provider === modelData.id
+                                                enabled: !dashboard.llmBusy
+                                                onClicked: dashboard.setLlmProvider(modelData.id)
+                                            }
+                                        }
+                                    }
+                                }
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 90
+                                    text: {
+                                        var ps = dashboard.llmProviders
+                                        for (var i = 0; i < ps.length; i++) if (ps[i].id === llmPanel.cfg.provider) return ps[i].note
+                                        return ""
+                                    }
+                                    color: window.muted
+                                    font.pixelSize: 12
+                                    wrapMode: Text.Wrap
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    FormLabel { text: "모델" }
+                                    TextField {
+                                        id: llmModelField
+                                        Layout.fillWidth: true
+                                        text: llmPanel.cfg.model || ""
+                                        placeholderText: llmPanel.cfg.modelShown ? ("기본: " + llmPanel.cfg.modelShown) : "모델 이름 (목록에서 고르거나 직접 입력)"
+                                        font.pixelSize: 13
+                                        onEditingFinished: dashboard.setLlmModel(text)
+                                    }
+                                    StyledComboBox {
+                                        visible: dashboard.llmModels.length > 0
+                                        Layout.preferredWidth: 240
+                                        model: dashboard.llmModels
+                                        onActivated: function (i) { dashboard.setLlmModel(dashboard.llmModels[i]); llmModelField.text = dashboard.llmModels[i] }
+                                    }
+                                    CompactButton {
+                                        text: "모델 목록 불러오기"
+                                        enabled: !dashboard.llmBusy
+                                        onClicked: dashboard.loadLlmModels()
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    visible: llmPanel.cfg.needsKey
+                                    FormLabel { text: "API 키" }
+                                    TextField {
+                                        id: llmKeyField
+                                        Layout.fillWidth: true
+                                        echoMode: TextInput.Password
+                                        placeholderText: llmPanel.cfg.keySource + " · 새 키를 붙여 넣고 [키 저장]"
+                                        font.pixelSize: 13
+                                    }
+                                    CompactButton {
+                                        text: "키 저장"
+                                        enabled: llmKeyField.text.length > 0
+                                        onClicked: { dashboard.saveLlmKey(llmKeyField.text); llmKeyField.text = "" }
+                                    }
+                                    CompactButton {
+                                        text: "키 지우기"
+                                        visible: llmPanel.cfg.keySaved
+                                        onClicked: dashboard.clearLlmKey()
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    FormLabel { text: "주소 (고급)" }
+                                    TextField {
+                                        Layout.fillWidth: true
+                                        text: llmPanel.cfg.baseUrl || ""
+                                        placeholderText: llmPanel.cfg.defaultBase ? ("기본: " + llmPanel.cfg.defaultBase) : "기본 주소 사용"
+                                        font.pixelSize: 12
+                                        onEditingFinished: dashboard.setLlmBaseUrl(text)
+                                    }
+                                }
+                                Divider {}
+
+                                // 2. the request, typed or spoken (Windows voice typing writes into this box)
+                                // what 이/저 point to: a hand shape shown to the camera, a key combination pressed
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    text: "\"이 손모양이면 저렇게 해줘\"처럼 말하려면 먼저 가리켜 두세요 (선택)"
+                                    font.bold: true
+                                    wrapMode: Text.Wrap
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    readonly property var pose: dashboard.llmContext.pose || {}
+                                    id: poseRow
+                                    ActionButton {
+                                        objectName: "poseProbeButton"
+                                        text: "✋ 손 모양·움직임 보여주기"
+                                        enabled: poseRow.pose.state !== "countdown" && poseRow.pose.state !== "holding"
+                                        onClicked: dashboard.startPoseProbe()
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.Wrap
+                                        font.pixelSize: 13
+                                        // an approximate answer (the nearest known shape / movement) says so
+                                        readonly property string approxText: poseRow.pose.approx ? " · 가장 가까운 것으로 봤어요" : ""
+                                        color: poseRow.pose.state === "failed" ? Theme.Studio.danger
+                                             : poseRow.pose.state === "done" ? Theme.Studio.mintDark : window.muted
+                                        font.bold: poseRow.pose.state === "countdown" || poseRow.pose.state === "done"
+                                        text: poseRow.pose.state === "countdown" ? ("손을 준비하세요… " + poseRow.pose.seconds)
+                                            : poseRow.pose.state === "holding" ? ("그대로 유지! " + Math.round(poseRow.pose.progress * 100) + "%")
+                                            : poseRow.pose.state === "done" && poseRow.pose.kind === "rotate"
+                                                ? ("이 움직임 = " + poseRow.pose.name + " 모양으로 " + poseRow.pose.rotate_name + approxText)
+                                            : poseRow.pose.state === "done" && poseRow.pose.kind === "drawn"
+                                                ? ("이 움직임 = " + poseRow.pose.shape_name + " 그리기 (" + Math.round(poseRow.pose.score * 100)
+                                                   + "%) · 그리기 모드에서 검지로 그리면 실행돼요")
+                                            : poseRow.pose.state === "done" && poseRow.pose.kind === "motion"
+                                                ? ("이 움직임 = " + poseRow.pose.name + " 모양으로 " + poseRow.pose.direction_name + approxText)
+                                            : poseRow.pose.state === "done" ? ("이 손모양 = " + poseRow.pose.name + approxText
+                                                                               + (poseRow.pose.gesture_key ? "" : " · 새 동작으로 등록됨"))
+                                            : poseRow.pose.state === "failed" ? poseRow.pose.message
+                                            : "3초 뒤 2초 동안 카메라로 봅니다 · 가만히 = 손 모양, 한 모양으로 한 방향 움직이기 = 움직임"
+                                    }
+                                    CompactButton {
+                                        visible: poseRow.pose.state === "done" || poseRow.pose.state === "failed"
+                                        text: "지우기"
+                                        onClicked: dashboard.clearPoseProbe()
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    ActionButton {
+                                        objectName: "keyCaptureButton"
+                                        text: dashboard.llmContext.capturing ? "키를 누르세요…" : "⌨ 키 기억하기"
+                                        enabled: !dashboard.llmContext.capturing
+                                        onClicked: dashboard.captureKey()
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.Wrap
+                                        font.pixelSize: 13
+                                        font.bold: dashboard.llmContext.key !== ""
+                                        color: dashboard.llmContext.key !== "" ? Theme.Studio.mintDark : window.muted
+                                        text: dashboard.llmContext.key !== "" ? ("저렇게 = " + dashboard.llmContext.key)
+                                            : "누른 뒤 8초 안에 원하는 키 조합을 직접 누르면 그 조합 하나만 기억해요"
+                                    }
+                                    CompactButton {
+                                        visible: dashboard.llmContext.key !== ""
+                                        text: "지우기"
+                                        onClicked: dashboard.clearCapturedKey()
+                                    }
+                                }
+                                TextLabel { text: "무엇을 연결할까요?"; font.bold: true }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: 96
+                                    radius: 8
+                                    color: Theme.Studio.paper
+                                    border.color: llmRequest.activeFocus ? Theme.Studio.mintDark : window.line
+                                    border.width: llmRequest.activeFocus ? 2 : 1
+                                    ScrollView {
+                                        anchors.fill: parent
+                                        anchors.margins: 4
+                                        TextArea {
+                                            id: llmRequest
+                                            objectName: "llmRequest"
+                                            wrapMode: TextEdit.Wrap
+                                            font.pixelSize: 14
+                                            placeholderText: "예) 유튜브에서는 엄지+약지로 자막 켜고 끄기\n예) 크롬에서 엄지+중지는 새 탭, 다른 곳에서는 그대로\n예) V 사인으로 화면 캡처 (Win+Shift+S)"
+                                            background: null
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    ActionButton {
+                                        text: "🎤 말로 입력"
+                                        enabled: !dashboard.llmBusy
+                                        onClicked: { llmRequest.forceActiveFocus(); llmRequest.cursorPosition = llmRequest.length; dashboard.startVoiceTyping() }
+                                    }
+                                    ActionButton {
+                                        objectName: "llmAskButton"
+                                        text: dashboard.llmBusy ? "묻는 중…" : "제안 받기"
+                                        primary: true
+                                        enabled: !dashboard.llmBusy && llmRequest.text.trim().length > 0 && llmPanel.cfg.hasKey
+                                        onClicked: dashboard.askLlm(llmRequest.text)
+                                    }
+                                    BusySpinner { active: dashboard.llmBusy }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: llmPanel.cfg.privacy
+                                        color: window.muted
+                                        font.pixelSize: 11
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    visible: text !== ""
+                                    text: dashboard.llmMessage
+                                    color: "#0369A1"
+                                    font.bold: true
+                                    wrapMode: Text.Wrap
+                                }
+
+                                // 3. the proposals: checked against the real catalogue, ticked by the user, then saved
+                                TextLabel {
+                                    Layout.fillWidth: true
+                                    visible: (llmPanel.result.summary || "") !== ""
+                                    text: "AI 요약: " + (llmPanel.result.summary || "")
+                                    wrapMode: Text.Wrap
+                                }
+                                Repeater {
+                                    model: llmPanel.result.questions || []
+                                    delegate: Chip { required property var modelData; warn: true; text: "질문: " + modelData; Layout.fillWidth: true; Layout.preferredWidth: -1 }
+                                }
+                                Repeater {
+                                    model: llmPanel.proposals
+                                    delegate: Rectangle {
+                                        id: proposalCard
+                                        required property var modelData
+                                        required property int index
+                                        Layout.fillWidth: true
+                                        implicitHeight: proposalCol.implicitHeight + 16
+                                        radius: 8
+                                        color: !modelData.ok ? "#FDECEE" : (modelData.risky ? Theme.Studio.amberWash : Theme.Studio.paper)
+                                        border.color: modelData.checked ? Theme.Studio.mintDark : window.line
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 8
+                                            spacing: 8
+                                            CheckBox {
+                                                enabled: proposalCard.modelData.ok
+                                                checked: proposalCard.modelData.checked
+                                                onToggled: dashboard.setLlmProposalChecked(proposalCard.index, checked)
+                                            }
+                                            ColumnLayout {
+                                                id: proposalCol
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    text: proposalCard.modelData.gesture_name
+                                                          + (proposalCard.modelData.app_match ? "  ·  " + proposalCard.modelData.app_match + "에서만" : "  ·  모든 프로그램")
+                                                    font.bold: true
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    visible: proposalCard.modelData.ok
+                                                    text: proposalCard.modelData.before + "  →  "
+                                                          + ((proposalCard.modelData.steps || []).length ? "여러 단계" : proposalCard.modelData.after)
+                                                    font.pixelSize: 13
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                Repeater {
+                                                    model: proposalCard.modelData.steps || []
+                                                    delegate: TextLabel {
+                                                        required property var modelData
+                                                        required property int index
+                                                        Layout.fillWidth: true
+                                                        Layout.leftMargin: 12
+                                                        text: (index + 1) + ". " + window.stepText(modelData)
+                                                        font.pixelSize: 13
+                                                        wrapMode: Text.Wrap
+                                                    }
+                                                }
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    visible: proposalCard.modelData.risky && proposalCard.modelData.ok
+                                                    text: "⚠ " + (proposalCard.modelData.warning || "")
+                                                    color: Theme.Studio.amber
+                                                    font.pixelSize: 12
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    visible: !proposalCard.modelData.ok
+                                                    text: "적용 불가: " + proposalCard.modelData.problem + " (" + proposalCard.modelData.action_type + " " + proposalCard.modelData.action_value + ")"
+                                                    color: Theme.Studio.danger
+                                                    font.pixelSize: 12
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    visible: proposalCard.modelData.reason !== ""
+                                                    text: proposalCard.modelData.reason
+                                                    color: window.muted
+                                                    font.pixelSize: 12
+                                                    wrapMode: Text.Wrap
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    visible: llmPanel.proposals.length > 0
+                                    spacing: 6
+                                    ActionButton {
+                                        objectName: "llmApplyButton"
+                                        text: "선택한 연결 적용"
+                                        primary: true
+                                        onClicked: dashboard.applyLlmProposals()
+                                    }
+                                    ActionButton { text: "버리기"; onClicked: dashboard.clearLlmResult() }
+                                }
+
+                                // 4. what the AI connected so far (src/llm_binding.History): readable, newest first, with undo
+                                Divider { Layout.topMargin: 6 }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    SectionLabel { text: "AI로 연결한 명령 (" + dashboard.llmHistory.length + ")" }
+                                    Item { Layout.fillWidth: true }
+                                    CheckBox { id: historyAll; text: "바뀐 것도 보기"; checked: false }
+                                }
+                                TextLabel {
+                                    visible: dashboard.llmHistory.length === 0
+                                    text: "아직 없어요. 위에서 제안을 받아 적용하면 여기에 쌓여요."
+                                    color: window.muted
+                                    font.pixelSize: 12
+                                }
+                                Repeater {
+                                    model: dashboard.llmHistory
+                                    delegate: Rectangle {
+                                        id: historyCard
+                                        required property var modelData
+                                        visible: modelData.current || historyAll.checked
+                                        Layout.fillWidth: true
+                                        implicitHeight: visible ? historyCol.implicitHeight + 16 : 0
+                                        radius: 8
+                                        color: modelData.current ? Theme.Studio.paper : Theme.Studio.surface
+                                        border.color: window.line
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 8
+                                            spacing: 8
+                                            ColumnLayout {
+                                                id: historyCol
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 6
+                                                    TextLabel {
+                                                        text: historyCard.modelData.gesture_name
+                                                              + (historyCard.modelData.app_match ? "  ·  " + historyCard.modelData.app_match + "에서만" : "")
+                                                        font.bold: true
+                                                    }
+                                                    Chip {
+                                                        text: historyCard.modelData.current ? "적용 중" : "이후 바뀜"
+                                                        warn: !historyCard.modelData.current
+                                                    }
+                                                    Item { Layout.fillWidth: true }
+                                                }
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    text: (historyCard.modelData.before_text || "") + "  →  "
+                                                          + ((historyCard.modelData.steps || []).length ? "여러 단계" : historyCard.modelData.after)
+                                                    font.pixelSize: 13
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                Repeater {
+                                                    model: historyCard.modelData.steps || []
+                                                    delegate: TextLabel {
+                                                        required property var modelData
+                                                        required property int index
+                                                        Layout.fillWidth: true
+                                                        Layout.leftMargin: 12
+                                                        text: (index + 1) + ". " + window.stepText(modelData)
+                                                        font.pixelSize: 13
+                                                        wrapMode: Text.Wrap
+                                                    }
+                                                }
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    visible: (historyCard.modelData.request || "") !== ""
+                                                    text: "요청: " + historyCard.modelData.request + "  ·  " + historyCard.modelData.time
+                                                    color: window.muted
+                                                    font.pixelSize: 11
+                                                    wrapMode: Text.Wrap
+                                                }
+                                            }
+                                            ColumnLayout {
+                                                spacing: 4
+                                                CompactButton {
+                                                    // back one step: what was there just before this AI change
+                                                    visible: historyCard.modelData.current && !historyCard.modelData.created
+                                                    Layout.fillWidth: true
+                                                    text: "되돌리기"
+                                                    onClicked: confirmDialog.ask("AI 연결 되돌리기",
+                                                        "'" + historyCard.modelData.gesture_name + "'을(를) " + (historyCard.modelData.before_text || "이전 연결") + "(으)로 되돌립니다.",
+                                                        "되돌리기", function () { dashboard.undoLlmConnection(historyCard.modelData.index) })
+                                                }
+                                                CompactButton {
+                                                    // the connection itself goes: a created gesture is deleted, an existing one gets its built-in command
+                                                    visible: historyCard.modelData.current
+                                                    Layout.fillWidth: true
+                                                    text: "삭제"
+                                                    danger: true
+                                                    onClicked: confirmDialog.ask("AI 연결 삭제",
+                                                        historyCard.modelData.created
+                                                            ? "'" + historyCard.modelData.gesture_name + "' 동작을 지웁니다."
+                                                            : historyCard.modelData.app_match
+                                                                ? "'" + historyCard.modelData.gesture_name + "'의 " + historyCard.modelData.app_match + " 전용 명령을 지웁니다."
+                                                                : "'" + historyCard.modelData.gesture_name + "'에 AI가 연결한 명령을 지우고 기본 명령으로 돌립니다.",
+                                                        "삭제", function () { dashboard.deleteLlmConnection(historyCard.modelData.index) })
+                                                }
+                                                CompactButton {
+                                                    visible: !historyCard.modelData.current
+                                                    text: "목록에서 지우기"
+                                                    onClicked: dashboard.forgetLlmConnection(historyCard.modelData.index)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+        }
+    }
+
+    // Palm (Dan) mode settings: what used to sit on the main screen's side panel, plus the engine sliders (Tk window)
+    Dialog {
+        id: palmSettings
+        objectName: "palmSettings"
+        anchors.centerIn: parent
+        width: Math.min(680, window.width - 48)
+        height: Math.min(window.height - 48, implicitHeight)
+        modal: true
+        title: "설정"
+        standardButtons: Dialog.Close
+        contentItem: ScrollView {
+            id: palmSettingsScroll
+            clip: true
+            contentWidth: availableWidth
+            implicitHeight: palmSettingsCol.implicitHeight
+            ColumnLayout {
+                id: palmSettingsCol
+                width: palmSettingsScroll.availableWidth
+                spacing: 10
+                SectionLabel { text: "모션 모드" }
+                ActionButton {
+                    objectName: "settingsMotionButton"
+                    Layout.fillWidth: true
+                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                    text: dashboard.motionLabel
+                    accent: dashboard.motionLabel.indexOf("켜짐") >= 0
+                    onClicked: dashboard.toggleMotion()
+                }
+                Divider {}
+                SectionLabel { text: "커서 방향 보정" }
+                TextLabel {
+                    Layout.fillWidth: true
+                    text: dashboard.palmCalibrated ? "보정이 저장되어 있어요." : "아직 보정하지 않았어요."
+                    color: window.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    ActionButton {
+                        objectName: "settingsPalmCalibrate"
+                        Layout.fillWidth: true
+                        enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
+                        text: dashboard.palmCalibrated ? "커서 방향 보정 다시" : "커서 방향 보정"
+                        onClicked: { palmSettings.close(); dashboard.beginPalmCalibration() }
+                    }
+                    ActionButton {
+                        visible: dashboard.palmCalibrated && !dashboard.palmCalibrating
+                        text: "초기화"
+                        onClicked: confirmDialog.ask("커서 방향 보정 초기화", "저장한 커서 방향 보정을 지웁니다.", "초기화",
+                                                     function () { dashboard.resetPalmCalibration() })
+                    }
+                }
+                Divider {}
+                // ---------------------------------------------------------------- drawing mode (src/draw_mode.py)
+                SectionLabel { text: "그리기 모드" }
+                ActionButton {
+                    objectName: "drawModeButton"
+                    Layout.fillWidth: true
+                    text: dashboard.drawOn ? "그리기 모드 · 켜짐 (눌러서 끄기)" : "그리기 모드 · 꺼짐 (눌러서 켜기)"
+                    accent: dashboard.drawOn
+                    onClicked: dashboard.toggleDrawMode()
+                }
+                TextLabel {
+                    Layout.fillWidth: true
+                    text: "켜면 모니터에 펜이 나타나요. 검지만 펴서 가리키면 펜이 내려가고(검지 끝이 펜), 손을 펴거나 쥐면 그린 모양을 알아보고 연결한 명령을 실행해요. "
+                          + "여러 모양을 이어서 그려도 됩니다. 손을 움직이는 영역 = 카메라 화면의 가상 손 박스. 켜져 있는 동안 다른 손 조작은 쉬어요."
+                    color: window.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    TextLabel { text: "인식 기준"; font.pixelSize: 12; font.bold: true }
+                    Slider {
+                        id: drawThresholdSlider
+                        Layout.fillWidth: true
+                        from: .6; to: .95; stepSize: .01
+                        value: dashboard.drawThreshold
+                        onPressedChanged: if (!pressed) dashboard.setDrawThreshold(value)
+                    }
+                    TextLabel { text: Math.round(drawThresholdSlider.value * 100) + "% (높을수록 엄격)"; font.pixelSize: 12; color: window.muted }
+                }
+
+                // the shapes and their commands
+                Item {
+                    id: drawEdit
+                    property string key: ""          // the shape whose command is being edited
+                    property string type: "hotkey"
+                    property string value: ""
+                    property string padMode: "test"  // test | new | example
+                    property string exampleKey: ""
+                    property var strokes: []          // new shape: the examples drawn so far
+                    function edit(row) { key = row.key; type = row.action_type; value = row.action_value === "none" ? "" : row.action_value }
+                    Connections {
+                        target: dashboard
+                        function onLlmChanged() {
+                            if (drawEdit.key !== "" && drawEdit.type === "hotkey" && dashboard.llmContext.key !== "" && !dashboard.llmContext.capturing)
+                                drawEdit.value = dashboard.llmContext.key
+                        }
+                    }
+                }
+                Repeater {
+                    model: dashboard.drawShapes
+                    delegate: Rectangle {
+                        id: shapeCard
+                        required property var modelData
+                        Layout.fillWidth: true
+                        implicitHeight: shapeCol.implicitHeight + 16
+                        radius: 8
+                        color: Theme.Studio.paper
+                        border.color: drawEdit.key === modelData.key ? Theme.Studio.mintDark : window.line
+                        opacity: modelData.enabled ? 1 : 0.6
+                        ColumnLayout {
+                            id: shapeCol
+                            anchors { left: parent.left; right: parent.right; top: parent.top; margins: 8 }
+                            spacing: 6
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Canvas {
+                                    implicitWidth: 40; implicitHeight: 40
+                                    property var pts: shapeCard.modelData.preview
+                                    onPtsChanged: requestPaint()
+                                    onPaint: {
+                                        var c = getContext("2d"); c.reset()
+                                        c.strokeStyle = "#147D68"; c.lineWidth = 2.5; c.lineCap = "round"; c.lineJoin = "round"
+                                        c.beginPath()
+                                        for (var i = 0; i < pts.length; i++) {
+                                            var x = 4 + pts[i][0] * 32, y = 4 + pts[i][1] * 32
+                                            if (i === 0) c.moveTo(x, y); else c.lineTo(x, y)
+                                        }
+                                        c.stroke()
+                                        if (pts.length) { c.fillStyle = "#E5484D"; c.beginPath(); c.arc(4 + pts[0][0] * 32, 4 + pts[0][1] * 32, 3, 0, 2 * Math.PI); c.fill() }
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    TextLabel {
+                                        text: shapeCard.modelData.name + (shapeCard.modelData.builtin ? "  (기본)" : "  · 예시 " + shapeCard.modelData.examples + "개")
+                                        font.bold: true
+                                    }
+                                    TextLabel { text: "→ " + shapeCard.modelData.badge; font.pixelSize: 12; color: window.muted }
+                                }
+                                Item { Layout.fillWidth: true }
+                                CheckBox {
+                                    checked: shapeCard.modelData.enabled
+                                    text: "사용"
+                                    onToggled: dashboard.setDrawShapeEnabled(shapeCard.modelData.key, checked)
+                                }
+                                CompactButton {
+                                    text: drawEdit.key === shapeCard.modelData.key ? "닫기" : "명령"
+                                    onClicked: drawEdit.key === shapeCard.modelData.key ? drawEdit.key = "" : drawEdit.edit(shapeCard.modelData)
+                                }
+                                CompactButton {
+                                    visible: !shapeCard.modelData.builtin
+                                    text: "예시 더하기"
+                                    onClicked: { drawEdit.padMode = "example"; drawEdit.exampleKey = shapeCard.modelData.key }
+                                }
+                                CompactButton {
+                                    visible: !shapeCard.modelData.builtin
+                                    text: "삭제"
+                                    danger: true
+                                    onClicked: confirmDialog.ask("그림 삭제", "'" + shapeCard.modelData.name + "' 그림을 지웁니다.", "삭제",
+                                                                 function () { dashboard.removeDrawShape(shapeCard.modelData.key) })
+                                }
+                            }
+                            // the command editor for this shape
+                            ColumnLayout {
+                                visible: drawEdit.key === shapeCard.modelData.key
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Segmented {
+                                    options: [["hotkey", "단축키"], ["youtube_key", "유튜브·미디어"], ["mouse_action", "마우스·시스템"], ["launch_app", "프로그램 실행"]]
+                                    current: drawEdit.type
+                                    onPicked: function (v) { drawEdit.type = v; drawEdit.value = "" }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    visible: drawEdit.type === "hotkey" || drawEdit.type === "launch_app"
+                                    TextField {
+                                        Layout.fillWidth: true
+                                        text: drawEdit.value
+                                        placeholderText: drawEdit.type === "hotkey" ? "예: ctrl+shift+t, win+d, f5" : "예: calc.exe 또는 https://..."
+                                        onTextEdited: drawEdit.value = text
+                                    }
+                                    CompactButton {
+                                        visible: drawEdit.type === "hotkey"
+                                        text: dashboard.llmContext.capturing ? "키를 누르세요…" : "⌨ 키 기억하기"
+                                        enabled: !dashboard.llmContext.capturing
+                                        onClicked: dashboard.captureKey()
+                                    }
+                                }
+                                StyledComboBox {
+                                    visible: drawEdit.type === "mouse_action" || drawEdit.type === "youtube_key"
+                                    Layout.fillWidth: true
+                                    readonly property var items: drawEdit.type === "mouse_action" ? dashboard.mouseActionPresets : dashboard.youtubeKeyPresets
+                                    model: items
+                                    textRole: "label"
+                                    currentIndex: {
+                                        for (var i = 0; i < items.length; i++) if (items[i].value === drawEdit.value) return i
+                                        return -1
+                                    }
+                                    displayText: currentIndex < 0 ? "골라 주세요" : currentText
+                                    onActivated: function (i) { drawEdit.value = items[i].value }
+                                }
+                                RowLayout {
+                                    ActionButton {
+                                        text: "명령 저장"
+                                        primary: true
+                                        enabled: drawEdit.value !== ""
+                                        onClicked: if (dashboard.setDrawBinding(drawEdit.key, drawEdit.type, drawEdit.value)) drawEdit.key = ""
+                                    }
+                                    TextLabel {
+                                        visible: drawEdit.type === "launch_app"
+                                        text: "⚠ 그림이 인식될 때마다 이 프로그램을 실행해요"
+                                        color: Theme.Studio.amber
+                                        font.pixelSize: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // the drawing pad: register a new shape, add an example, or test what a stroke is recognised as
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Segmented {
+                        Layout.fillWidth: true
+                        options: [["test", "시험해 보기"], ["new", "새 그림 등록"]]
+                        current: drawEdit.padMode === "example" ? "" : drawEdit.padMode
+                        onPicked: function (v) { drawEdit.padMode = v; drawEdit.strokes = []; drawPad.clear() }
+                    }
+                }
+                TextLabel {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 12
+                    color: window.muted
+                    text: drawEdit.padMode === "new" ? "이름을 적고 아래 칸에 마우스로 한 획으로 그리세요. 2~3번 조금씩 다르게 그리면 더 잘 알아봐요."
+                        : drawEdit.padMode === "example" ? "'" + drawEdit.exampleKey + "' 그림을 한 번 더 그리세요 (예시가 늘면 더 잘 알아봐요)."
+                        : "아래 칸에 마우스로 그려 보면 어떤 그림으로 알아보는지 보여 줘요."
+                }
+                RowLayout {
+                    visible: drawEdit.padMode === "new"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    TextField { id: newShapeName; Layout.fillWidth: true; placeholderText: "그림 이름 (예: 별, 하트, 위 화살표)"; maximumLength: 30 }
+                    TextLabel { text: "그린 횟수 " + drawEdit.strokes.length; font.pixelSize: 12 }
+                    CompactButton { text: "다시 그리기"; onClicked: { drawEdit.strokes = []; drawPad.clear() } }
+                    CompactButton {
+                        text: "등록"
+                        primary: true
+                        enabled: newShapeName.text.trim() !== "" && drawEdit.strokes.length > 0
+                        onClicked: if (dashboard.addDrawShape(newShapeName.text.trim(), drawEdit.strokes)) {
+                            drawEdit.strokes = []; newShapeName.text = ""; drawPad.clear(); drawEdit.padMode = "test"
+                        }
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 220
+                    radius: 8
+                    color: Theme.Studio.stage
+                    Canvas {
+                        id: drawPad
+                        objectName: "drawPad"
+                        anchors.fill: parent
+                        property var current: []
+                        property var done: []
+                        function clear() { current = []; done = []; requestPaint() }
+                        onPaint: {
+                            var c = getContext("2d"); c.reset()
+                            c.lineCap = "round"; c.lineJoin = "round"
+                            function line(pts, color, width) {
+                                c.strokeStyle = color; c.lineWidth = width; c.beginPath()
+                                for (var i = 0; i < pts.length; i++) { if (i === 0) c.moveTo(pts[i][0], pts[i][1]); else c.lineTo(pts[i][0], pts[i][1]) }
+                                c.stroke()
+                            }
+                            for (var k = 0; k < done.length; k++) line(done[k], "rgba(70,229,189,0.35)", 3)
+                            line(current, "#46E5BD", 4)
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.CrossCursor
+                            onPressed: function (m) { drawPad.current = [[m.x, m.y]]; drawPad.requestPaint() }
+                            onPositionChanged: function (m) { var c = drawPad.current; c.push([m.x, m.y]); drawPad.current = c; drawPad.requestPaint() }
+                            onReleased: {
+                                var stroke = drawPad.current
+                                if (stroke.length < 8) { drawPad.current = []; drawPad.requestPaint(); return }
+                                if (drawEdit.padMode === "new") {
+                                    var all = drawEdit.strokes.slice(); all.push(stroke); drawEdit.strokes = all
+                                    var d = drawPad.done.slice(); d.push(stroke); drawPad.done = d
+                                    drawPad.current = []
+                                } else if (drawEdit.padMode === "example") {
+                                    dashboard.addDrawExample(drawEdit.exampleKey, stroke)
+                                    drawEdit.padMode = "test"
+                                } else {
+                                    dashboard.testDrawStroke(stroke)
+                                }
+                                drawPad.requestPaint()
+                            }
+                        }
+                    }
+                    Label {
+                        visible: drawEdit.padMode === "test" && dashboard.drawTest.key !== undefined
+                        anchors { left: parent.left; top: parent.top; margins: 10 }
+                        text: dashboard.drawTest.ok ? ("✓ " + dashboard.drawTest.name + " (" + Math.round(dashboard.drawTest.score * 100) + "%)")
+                              : ("✕ " + (dashboard.drawTest.why || "") + (dashboard.drawTest.name ? " · 가장 비슷한 것: " + dashboard.drawTest.name
+                                 + " " + Math.round(dashboard.drawTest.score * 100) + "%" : ""))
+                        color: dashboard.drawTest.ok ? "#46E5BD" : "#FF8A8F"
+                        font.pixelSize: 14; font.bold: true; font.family: Theme.Studio.font
+                    }
+                }
+                TextLabel {
+                    Layout.fillWidth: true
+                    visible: dashboard.drawMessage !== ""
+                    text: dashboard.drawMessage
+                    color: "#0369A1"
+                    font.bold: true
+                    wrapMode: Text.Wrap
+                }
+                Divider {}
+                // ---------------------------------------------------------------- gesture sequences (src/sequence.py)
+                SectionLabel { text: "동작 이어 하기 · 손 모양으로 그리기" }
+                TextLabel {
+                    Layout.fillWidth: true
+                    text: "손 모양 2~3개를 차례로 하면(각각 잠깐 유지, 다음 모양은 1초 안에) 명령이 실행돼요. 실수로 실행되면 곤란한 명령에 좋아요. "
+                          + "손 모양을 유지한 채 손바닥으로 원·Z 같은 모양을 그려도 실행할 수 있어요(그리기 모드 없이). "
+                          + "새로 만들기는 위쪽 [말·글로 연결 (AI)]에서 \"V 사인 다음 주먹이면 창 닫기\", \"주먹으로 원 그리면 새로고침\"처럼 말하면 돼요."
+                    color: window.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                TextLabel {
+                    visible: dashboard.sequenceRows.length === 0
+                    text: "아직 없어요."
+                    color: window.muted
+                    font.pixelSize: 12
+                }
+                Repeater {
+                    model: dashboard.sequenceRows
+                    delegate: Rectangle {
+                        id: seqCard
+                        required property var modelData
+                        Layout.fillWidth: true
+                        implicitHeight: seqRow.implicitHeight + 16
+                        radius: 8
+                        color: Theme.Studio.paper
+                        border.color: window.line
+                        opacity: modelData.enabled ? 1 : 0.6
+                        RowLayout {
+                            id: seqRow
+                            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: 8 }
+                            spacing: 8
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 0
+                                TextLabel { text: seqCard.modelData.name; font.bold: true }
+                                TextLabel { Layout.fillWidth: true; text: seqCard.modelData.steps_text; font.pixelSize: 12; wrapMode: Text.Wrap }
+                                TextLabel { Layout.fillWidth: true; text: "→ " + seqCard.modelData.badge; font.pixelSize: 12; color: window.muted; wrapMode: Text.Wrap }
+                            }
+                            CheckBox {
+                                checked: seqCard.modelData.enabled
+                                text: "사용"
+                                onToggled: dashboard.setSequenceEnabled(seqCard.modelData.key, checked)
+                            }
+                            CompactButton {
+                                text: "삭제"
+                                danger: true
+                                onClicked: confirmDialog.ask("이어 하기 삭제", "'" + seqCard.modelData.name + "'을(를) 지웁니다.", "삭제",
+                                                             function () { dashboard.removeSequence(seqCard.modelData.key) })
+                            }
+                        }
+                    }
+                }
+                Divider {}
+                SectionLabel { text: "세부 값" }
+                ActionButton {
+                    Layout.fillWidth: true
+                    text: "엔진 세부 값 (슬라이더 창)"
+                    onClicked: { palmSettings.close(); dashboard.command(111) }
+                }
+            }
         }
     }
 
@@ -808,7 +1689,11 @@ ApplicationWindow {
                 Layout.preferredHeight: Math.min(300, window.height * .45)
                 radius: 16
                 color: window.navy
-                Image { anchors.fill: parent; source: dashboard.previewUrl; cache: false; fillMode: Image.PreserveAspectFit }
+                Image {
+                    id: setupPreview
+                    anchors.fill: parent; source: dashboard.previewUrl; cache: false; fillMode: Image.PreserveAspectFit
+                    HandSkeleton { anchors.fill: parent; imageWidth: setupPreview.paintedWidth; imageHeight: setupPreview.paintedHeight }
+                }
             }
             TextLabel {
                 visible: dashboard.stage === "capture"
@@ -883,9 +1768,9 @@ ApplicationWindow {
                 }
                 background: Rectangle {
                     radius: 8
-                    color: option.selected ? window.mint : option.down ? "#DDE7EC" : "#F0F3F6"
-                    border.color: option.activeFocus ? "#16846E" : "transparent"
-                    border.width: 2
+                    color: option.selected ? Theme.Studio.mint : option.down ? "#BCEFE1" : option.hovered ? Theme.Studio.mintWash : Theme.Studio.paper
+                    border.color: option.activeFocus ? Theme.Studio.mintDark : option.selected ? "transparent" : Theme.Studio.line
+                    border.width: option.activeFocus ? 2 : 1
                 }
             }
         }
@@ -899,7 +1784,7 @@ ApplicationWindow {
         Layout.minimumWidth: Math.min(implicitWidth, 56)
         Layout.preferredWidth: implicitWidth
         radius: 13
-        color: warn ? "#FFF1D6" : "#E8F7F2"
+        color: warn ? Theme.Studio.amberWash : Theme.Studio.mintWash
         border.color: warn ? "#F2B544" : "transparent"
         clip: true
         TextLabel {
@@ -912,7 +1797,7 @@ ApplicationWindow {
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
             font.pixelSize: 12
-            color: chip.warn ? "#8A5A00" : window.navy
+            color: chip.warn ? Theme.Studio.amber : window.navy
         }
     }
 
@@ -938,8 +1823,8 @@ ApplicationWindow {
         }
         background: Rectangle {
             radius: 7
-            color: scombo.down ? "#E8EEF2" : "white"
-            border.color: scombo.activeFocus ? "#16846E" : "#CBD5E1"
+            color: scombo.down ? Theme.Studio.mintWash : Theme.Studio.paper
+            border.color: scombo.activeFocus ? Theme.Studio.mintDark : Theme.Studio.line
             border.width: scombo.activeFocus ? 2 : 1
         }
     }
@@ -1210,6 +2095,11 @@ ApplicationWindow {
                     onClicked: trainingCenter.open()
                 }
                 ActionButton {
+                    objectName: "llmTopButton"
+                    text: "말·글로 연결 (AI)"
+                    onClicked: llmDialog.open()
+                }
+                ActionButton {
                     text: dashboard.chosenHand ? dashboard.chosenHand + " · 다시 설정" : "사용할 손 설정"
                     onClicked: dashboard.beginHandSetup()
                 }
@@ -1221,7 +2111,7 @@ ApplicationWindow {
                             dashboard.command(27)
                             pointerSettings.open()
                         } else {
-                            dashboard.command(111)
+                            palmSettings.open()
                         }
                     }
                 }
@@ -1287,15 +2177,7 @@ ApplicationWindow {
                                     current: dashboard.pointerOnly ? "index" : "palm"
                                     onPicked: function (value) { dashboard.setPointerPreset(value === "index") }
                                 }
-                                ActionButton {
-                                    Layout.fillWidth: true
-                                    Layout.minimumWidth: 0
-                                    implicitWidth: 0
-                                    leftPadding: 10; rightPadding: 10
-                                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                    text: dashboard.motionLabel
-                                    onClicked: dashboard.toggleMotion()
-                                }
+                                // motion mode and the cursor direction calibration: in [설정] (palmSettings), 2026-11-10
                                 ActionButton {
                                     Layout.fillWidth: true
                                     Layout.minimumWidth: 0
@@ -1304,26 +2186,6 @@ ApplicationWindow {
                                     enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                     text: dashboard.profileLabel + (dashboard.profileCount > 0 ? "  · 눌러서 바꾸기" : "")
                                     onClicked: dashboard.cycleProfile()
-                                }
-                                RowLayout {
-                                    visible: !dashboard.pointerOnly
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    ActionButton {
-                                        Layout.fillWidth: true
-                                        Layout.minimumWidth: 0
-                                        implicitWidth: 0
-                                        leftPadding: 10; rightPadding: 10
-                                        enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
-                                        text: dashboard.palmCalibrated ? "커서 방향 보정 다시" : "커서 방향 보정"
-                                        onClicked: dashboard.beginPalmCalibration()
-                                    }
-                                    ActionButton {
-                                        visible: dashboard.palmCalibrated && !dashboard.palmCalibrating
-                                        leftPadding: 10; rightPadding: 10
-                                        text: "초기화"
-                                        onClicked: dashboard.resetPalmCalibration()
-                                    }
                                 }
                                 ActionButton {
                                     visible: !dashboard.pointerOnly
@@ -1395,6 +2257,13 @@ ApplicationWindow {
                                     accent: dashboard.boxEditing
                                     text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
                                     onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
+                                }
+                                SectionLabel { visible: !(dashboard.virtualHandOn && !dashboard.pointerOnly); text: "커서 옆 손가락 표시" }
+                                Segmented {
+                                    visible: !(dashboard.virtualHandOn && !dashboard.pointerOnly)
+                                    options: [["off", "끔"], ["on", "켬"]]
+                                    current: dashboard.fingerOverlay ? "on" : "off"
+                                    onPicked: function (value) { dashboard.setFingerOverlay(value === "on") }
                                 }
                                 SectionLabel { visible: !dashboard.pointerOnly; text: "손 주변 확대 (시험)" }
                                 Segmented {
@@ -1713,6 +2582,7 @@ ApplicationWindow {
                             source: dashboard.previewUrl
                             cache: false
                             fillMode: Image.PreserveAspectFit
+                            HandSkeleton { anchors.fill: parent; imageWidth: capturePreview.paintedWidth; imageHeight: capturePreview.paintedHeight }
                         }
                         // The box for the hand on the screen: its inside is the whole monitor. Drag on the image to draw it.
                         Item {
@@ -1752,7 +2622,7 @@ ApplicationWindow {
                                     text: "손을 움직일 영역을 끌어서 그리세요 · 이 영역이 모니터 전체가 돼요"
                                     color: "#F5F7F8"
                                     font.pixelSize: 14
-                                    font.family: "Malgun Gothic"
+                                    font.family: Theme.Studio.font
                                 }
                             }
                             MouseArea {
@@ -3380,7 +4250,7 @@ ApplicationWindow {
                                             ctx.strokeRect(zx, zy, zw, zh)
                                             if (simTabRoot.fullScreenCoordMode) {
                                                 ctx.fillStyle = activeZone === zName ? "rgba(70, 229, 189, 0.78)" : "rgba(255, 255, 255, 0.20)"
-                                                ctx.font = (activeZone === zName ? "bold " : "") + "10px 'Malgun Gothic'"
+                                                ctx.font = (activeZone === zName ? "bold " : "") + "10px 'Noto Sans KR'"
                                                 ctx.textAlign = "left"
                                                 ctx.fillText(zName, zx + 5, zy + 13)
                                             }
@@ -3391,7 +4261,7 @@ ApplicationWindow {
                                     var arm = (f && f.active_arm) ? f.active_arm : null
                                     if (!hasHand && !arm) {
                                         ctx.fillStyle = "rgba(255, 255, 255, 0.82)"
-                                        ctx.font = "bold 11px 'Malgun Gothic'"
+                                        ctx.font = "bold 11px 'Noto Sans KR'"
                                         ctx.textAlign = "center"
                                         if (simTabRoot.totalFrames > 0) {
                                             ctx.fillText("이 프레임에는 손/팔이 감지되지 않았습니다", w / 2, h / 2 - 8)
@@ -3497,7 +4367,7 @@ ApplicationWindow {
 
                                         // Labels for Shoulder & Elbow + Angle
                                         ctx.fillStyle = "#FDE68A"
-                                        ctx.font = "bold 10px 'Malgun Gothic'"
+                                        ctx.font = "bold 10px 'Noto Sans KR'"
                                         ctx.textAlign = "left"
                                         ctx.fillText((arm.side_ko || "팔") + " 어깨", sx + 8, sy + 4)
                                         ctx.fillStyle = "#BAE6FD"
@@ -4752,8 +5622,12 @@ ApplicationWindow {
                 property string compRecipeGroup: "미디어"
                 property string recipeNote: ""
 
+                // the binding rows are rebuilt on every refresh: reset the edits only when another motion is picked,
+                // otherwise an unsaved choice (and the on/off button) snapped back to the saved value at once
+                property string editKey: ""
                 onSelectedRowObjChanged: {
-                    if (selectedRowObj) {
+                    if (selectedRowObj && selectedRowObj.key !== editKey) {
+                        editKey = selectedRowObj.key
                         editActionType = String(selectedRowObj.action_type || "hotkey")
                         editActionValue = String(selectedRowObj.action_value || "")
                         editBindingEnabled = Boolean(selectedRowObj.binding_enabled)
@@ -4944,7 +5818,15 @@ ApplicationWindow {
                                             CompactButton {
                                                 text: bindingsTabRoot.editBindingEnabled ? "동작 사용 중 (클릭 시 끔)" : "비활성화됨 (클릭 시 켬)"
                                                 accent: bindingsTabRoot.editBindingEnabled
-                                                onClicked: bindingsTabRoot.editBindingEnabled = !bindingsTabRoot.editBindingEnabled
+                                                // saved at once with the saved command (it used to change only an unsaved flag)
+                                                onClicked: {
+                                                    var row = bindingsTabRoot.selectedRowObj
+                                                    if (!row) return
+                                                    var on = !bindingsTabRoot.editBindingEnabled
+                                                    if (dashboard.saveGestureBinding(row.key, String(row.action_type || "mouse_action"),
+                                                                                     String(row.action_value || "none"), on))
+                                                        bindingsTabRoot.editBindingEnabled = on
+                                                }
                                             }
                                         }
 
@@ -6443,7 +7325,7 @@ ApplicationWindow {
                     text: "MANUX · " + dashboard.receptionText
                     color: "#F5F7F8"
                     font.pixelSize: 13
-                    font.family: "Malgun Gothic"
+                    font.family: Theme.Studio.font
                 }
             }
         }
@@ -6467,6 +7349,7 @@ ApplicationWindow {
         // Camera frames come ~30 times a second and unevenly: the drawn hand and the window glide toward the newest frame at the
         // screen's own rate (each display frame closes a share of the gap), so the motion is continuous instead of stepping.
         property var shown: null         // the joints as drawn now
+        property var shownAnchor: [0, 0] // the drawn anchor (thumb-index point placed on the cursor), glides too
         property real shownX: 0
         property real shownY: 0
         readonly property real glide: 0.04   // seconds: time constant of the glide
@@ -6476,6 +7359,7 @@ ApplicationWindow {
         onHandChanged: {
             if (hand.pts !== undefined && (shown === null || shown.length !== hand.pts.length)) {
                 shown = hand.pts.slice(); shownX = hand.x; shownY = hand.y
+                shownAnchor = hand.anchor ? hand.anchor.slice() : [0, 0]
                 placeAt(shownX, shownY)
                 handCanvas.requestPaint()
             }
@@ -6488,6 +7372,8 @@ ApplicationWindow {
                 var k = 1 - Math.exp(-Math.min(frameTime, 0.1) / w.glide)
                 var pts = w.shown
                 for (var i = 0; i < pts.length; i++) pts[i] += (h.pts[i] - pts[i]) * k
+                var a = w.shownAnchor, ta = h.anchor || [0, 0]
+                a[0] += (ta[0] - a[0]) * k; a[1] += (ta[1] - a[1]) * k
                 w.shownX += (h.x - w.shownX) * k
                 w.shownY += (h.y - w.shownY) * k
                 w.placeAt(w.shownX, w.shownY)
@@ -6509,12 +7395,14 @@ ApplicationWindow {
                 var h = virtualHandWindow.hand
                 var pts = virtualHandWindow.shown
                 if (!h.pts || pts === null) return
-                var cx = width / 2, cy = height / 2
+                // with an anchor (box mode) the window centre is the cursor and the hand is shifted so its anchor is there
+                var anc = h.anchor ? virtualHandWindow.shownAnchor : [0, 0]
+                var cx = width / 2 - anc[0], cy = height / 2 - anc[1]
                 function px(i) { return [cx + pts[2 * i], cy + pts[2 * i + 1]] }
                 ctx.lineCap = "round"
                 // a dark outline under a light line: visible on light and dark windows alike
                 for (var pass = 0; pass < 2; pass++) {
-                    ctx.strokeStyle = pass === 0 ? "rgba(17,35,49,0.55)" : "rgba(245,247,248,0.95)"
+                    ctx.strokeStyle = pass === 0 ? "rgba(17,35,49,0.55)" : (h.grip ? "#F2B544" : "rgba(245,247,248,0.95)")
                     ctx.lineWidth = pass === 0 ? 7 : 3.5
                     ctx.beginPath()
                     for (var b = 0; b < virtualHandWindow.bones.length; b++) {
@@ -6542,12 +7430,14 @@ ApplicationWindow {
                 ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 2 * Math.PI); ctx.stroke()
                 // the click point: where the thumb and the pinching finger meet
                 if (h.click) {
-                    var kx = cx + h.click[0], ky = cy + h.click[1]
+                    var kx = h.anchor ? width / 2 : cx + h.click[0], ky = h.anchor ? height / 2 : cy + h.click[1]
                     ctx.lineWidth = h.aim ? 2 : 3
                     ctx.strokeStyle = h.action !== "" ? "#E5484D" : (h.aim ? "rgba(17,35,49,0.45)" : "#112331")
                     ctx.beginPath(); ctx.arc(kx, ky, h.aim ? 6 : 9, 0, 2 * Math.PI); ctx.stroke()
                     if (h.action !== "") {
-                        ctx.font = "bold 16px 'Malgun Gothic'"
+                        ctx.font = "bold 16px 'Noto Sans KR'"
+                        ctx.lineWidth = 4; ctx.strokeStyle = "rgba(255,255,255,0.9)"
+                        ctx.strokeText(h.action, kx + 14, ky - 12)
                         ctx.fillStyle = "#E5484D"
                         ctx.fillText(h.action, kx + 14, ky - 12)
                     }
@@ -6555,6 +7445,9 @@ ApplicationWindow {
             }
         }
     }
+
+    FingerTracker { }
+    DrawOverlay { }
 
     // Motion-mode badge: always on top and click-through, in the top-right corner of the screen, so the user
     // can tell the mode from anywhere (also when this window is hidden or behind others).
@@ -6594,7 +7487,7 @@ ApplicationWindow {
                     color: dashboard.motionBadgeOn ? "#112331" : "#F5F7F8"
                     font.pixelSize: 16
                     font.bold: true
-                    font.family: "Malgun Gothic"
+                    font.family: Theme.Studio.font
                 }
             }
         }

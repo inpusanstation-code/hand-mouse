@@ -84,6 +84,9 @@ class ToggleSign:
             return None
         feats = hand_features(landmarks) if landmarks is not None else None
         ok = feats is not None and not blocked and self.pose(feats, model_confirmed=model_confirmed)
+        if ok:
+            from src.pose_probe import fingers_down
+            ok = not fingers_down(landmarks)      # an upside-down V is another sign, not the on/off V
         self.last_pose = ok
         if not ok:
             if self._since is not None and feats is not None and not blocked:
