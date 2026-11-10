@@ -10,7 +10,7 @@ the pinch rules are not running at all (the mode is its own); only these hand sh
 | (double click)               | tap                | a second close within `double_tap` s: same point, at once   | `mouse.left_click`     |
 | `virtual_hand.drag`          | begin / hold / end | thumb + index kept closed `pinch_hold` s, until it opens    | `mouse.drag`           |
 | `virtual_hand.right_click`   | tap                | thumb, index and middle together                            | `mouse.right_click`    |
-| `virtual_hand.scroll`        | begin / hold / end | a fist; sideways moves the page (right = down by default)   | `mouse.scroll` (x0.5)  |
+| `virtual_hand.scroll`        | begin / hold / end | a fist; sideways moves the page (right = down by default)   | `mouse.scroll` (x`scroll_speed`, 0.25) |
 | `virtual_hand.task_switcher` | tap                | thumb folded, four fingers up, held still 0.5 s             | `window.task_switcher` |
 
 While a click finger is closed the point holds where the hand aimed (0.15 s before the touch, if that was only the tilt of
@@ -42,13 +42,14 @@ GESTURE_PHASES = {
 }
 DEFAULT_BINDINGS = {
     PLACE: "mouse.place", LEFT: "mouse.left_click", RIGHT: "mouse.right_click", DRAG: "mouse.drag",
-    SCROLL: {"action": "mouse.scroll", "params": {"gain": .5}}, SWITCH: "window.task_switcher",
+    SCROLL: "mouse.scroll", SWITCH: "window.task_switcher",      # scroll speed: the scroll_speed setting (Intent.scale)
 }
 SETTINGS = {
     f"{ID}.box_left": .2, f"{ID}.box_top": .15, f"{ID}.box_right": .8, f"{ID}.box_bottom": .85,  # camera image, 0..1
     f"{ID}.pinch_hold": .45,          # s thumb + index stay closed before it is a drag instead of a click
     f"{ID}.double_tap": .7,           # s after a click in which the next close is the second click
     f"{ID}.scroll_follows_page": False,   # False: fist right = page down (the source's default)
+    f"{ID}.scroll_speed": .25,            # fist browsing speed (x the scroll gain); 2026-11-10: .5 was too fast
 }
 
 
@@ -172,7 +173,8 @@ class VirtualHandFeature:
             cx, _ = palm_centre(lm)
             follows = bool(s.get("scroll_follows_page", False))
             scroll_point = (.5, cx if follows else 1.0 - cx)   # sideways is easier than up and down
-            out.append(Intent(t, ID, SCROLL, "hold" if self._scrolling else "begin", point=scroll_point))
+            speed = max(.01, float(s.get("scroll_speed", .25)))
+            out.append(Intent(t, ID, SCROLL, "hold" if self._scrolling else "begin", point=scroll_point, scale=speed))
             self._scrolling = True
         elif dragging_now:
             out.append(Intent(t, ID, DRAG, "hold" if self._dragging else "begin"))

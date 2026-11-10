@@ -108,6 +108,7 @@ LABELS = {
     "box_left": "가상 손: 박스 왼쪽 (카메라 화면 비율)", "box_top": "가상 손: 박스 위쪽", "box_right": "가상 손: 박스 오른쪽",
     "box_bottom": "가상 손: 박스 아래쪽", "pinch_hold": "가상 손: 이만큼 붙이고 있으면 끌기 (초)",
     "double_tap": "가상 손: 더블클릭 간격 (초)", "scroll_follows_page": "가상 손: 주먹 스크롤 방향 반대로",
+    "scroll_speed": "가상 손: 주먹 브라우징 속도",
 }
 
 # These settings belong to separate editors, or are derived by the runtime.

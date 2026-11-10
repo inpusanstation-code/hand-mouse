@@ -298,3 +298,15 @@ def test_the_drawn_size_follows_slowly_not_in_one_frame():
     small = tuple((.5 + (x - .5) * .5, .6 + (y - .6) * .5, z) for x, y, z in OPEN)   # hand suddenly half the size
     run(f, [small], t0=2.0)
     assert max(abs(v) for v in f.last_view["pts"]) < 1.5 * before
+
+
+def test_fist_browsing_speed_is_a_setting_and_slower_by_default():
+    out, _ = run(vh.VirtualHandFeature(), [FIST] * 3)
+    scrolls = [i for i in out if i.gesture == vh.SCROLL]
+    assert scrolls and all(i.scale == .25 for i in scrolls)              # was 0.5 (2026-11-10: too fast)
+    out, _ = run(vh.VirtualHandFeature(), [FIST] * 3, settings={"scroll_speed": .1})
+    assert all(i.scale == .1 for i in out if i.gesture == vh.SCROLL)
+    from manux.actions.bindings import Binding
+    from manux.actions.router import Router
+    cmd = Router({vh.SCROLL: Binding("mouse.scroll")}).route(scrolls[0]).command
+    assert cmd.params["gain"] == .25                                      # what the sink scrolls with
