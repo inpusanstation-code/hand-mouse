@@ -34,7 +34,9 @@ set "APP_EXIT=%errorlevel%"
 rem Closing the app closes this window too. Only on an error the window stays so the message can be read.
 if not "%APP_EXIT%"=="0" (
     echo.
-    echo [Notice] App exited with error code %APP_EXIT%. Press any key to close.
+    echo [Notice] App exited with error code %APP_EXIT%.
+    echo          Error log: %APPDATA%\MANUX-dev\v04\logs\errors.log
+    echo          Press any key to close.
     pause > nul
 )
 endlocal & exit %APP_EXIT%

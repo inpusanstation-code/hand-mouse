@@ -905,11 +905,22 @@ class DesktopRuntime:
             self._seq += 1
 
     def _loop(self) -> None:
+        from manux.platform.errorlog import logger
+        log, last, repeats = logger("runtime"), None, 0
         while not self._stop.is_set():
             try:
                 self.step()
             except Exception as exc:                    # never let the runtime thread die silently
                 self._publish(ViewFrame(self._latest.snapshot, message=f"실행 오류: {exc!r}", camera_ok=False))
+                if repr(exc) != last:                   # errors.log: each new error with its traceback ...
+                    if repeats:
+                        log.error("previous error repeated %d more times", repeats)
+                    log.exception("runtime step failed")
+                    last, repeats = repr(exc), 0
+                else:                                   # ... and a count instead of the same one 5 times a second
+                    repeats += 1
+                    if repeats % 300 == 0:
+                        log.error("still failing (%d times): %r", repeats, exc)
                 time.sleep(0.2)
         self._close_pose()
 
@@ -1437,6 +1448,8 @@ def main(argv=None) -> int:
     info = read_build_info(paths.app_dir)
     if args.self_check is not None:
         return self_check(paths, args.hand_model or default_hand_model(paths), info, args.self_check)
+    from manux.platform.errorlog import install as install_error_log, logger as error_logger
+    error_log = install_error_log(paths.log_dir)
     updater = Updater(info, paths.frozen)
     updater.start()
     settings = load(schema(), paths.config_dir)
@@ -1453,6 +1466,8 @@ def main(argv=None) -> int:
             settings, args.hand_model or default_hand_model(paths), args.source)
     except (OSError, ValueError) as exc:
         print(exc, file=sys.stderr)
+        error_logger("startup").error("camera / replay could not start: %s", exc)
+        print(f"[MANUX] 오류 기록: {error_log}", file=sys.stderr)
         return 1
     models_dir = paths.data_dir / "models" / "spatial_mlp"
     active_cfg = models_dir / "active_model.json"
@@ -1482,6 +1497,8 @@ def main(argv=None) -> int:
         if preview is None:
             source.close()
             print(error, file=sys.stderr)
+            error_logger("startup").error("could not start: %s", error)
+            print(f"[MANUX] 오류 기록: {error_log}", file=sys.stderr)
             return 1
         runtime = build(settings, source, windows=not args.no_windows_input and sys.platform == "win32",
                         binding_overrides=read_bindings(args.bindings), policy_store=policy_store,
