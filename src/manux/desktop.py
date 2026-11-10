@@ -987,8 +987,21 @@ class DesktopRuntime:
             practice_cursor=practice.cursor_position if snap.output is OutputTarget.PRACTICE else None,
             practice_precision=bool(practice.precision) if snap.output is OutputTarget.PRACTICE else False,
             practice_events=tuple(self._practice_events), practice_epoch=self._practice_epoch,
-            rule_preview=rule_preview, mlp_badge=self._mlp_badge(),
+            rule_preview=rule_preview, mlp_badge=self._mlp_badge(), virtual_hand=self._virtual_hand_view(snap),
             frame_age_ms=max(0.0, (time.perf_counter() - frame.t) * 1000.0)))
+
+    def _virtual_hand_view(self, snap):
+        """The drawn hand for the UI: joints in logical px around the palm, the palm on the screen in physical px."""
+        if getattr(snap, "mode", "") != "virtual_hand" or snap.output is not OutputTarget.WINDOWS:
+            return None
+        feature = next((f for f in self.engine.features if f.id == "virtual_hand"), None)
+        sink = self.engine.sinks.get(OutputTarget.WINDOWS)
+        view = getattr(feature, "last_view", None)
+        palm = getattr(sink, "virtual_palm", None)
+        if view is None or palm is None:
+            return None
+        scale = sink._display_scale() if hasattr(sink, "_display_scale") else 1.0
+        return {**view, "palm": [int(palm[0]), int(palm[1])], "scale": float(scale)}
 
     def _mlp_badge(self):
         """One line about the pose-assist veto while it is on (same name as the studio button), else ""."""

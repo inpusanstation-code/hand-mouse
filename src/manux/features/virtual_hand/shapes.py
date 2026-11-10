@@ -268,3 +268,54 @@ class Grip:
             if now - self._lost > self.GRACE:
                 self.reset()
         return self.on
+
+
+# ---------------------------------------------------------------------------- the hand drawn on the screen
+SIZE_PX = 110.0          # wrist -> middle-finger knuckle of the drawn hand, logical pixels (the click offset unit)
+
+
+def view_points(lm: Landmarks, width: int, height: int, size_px: float = SIZE_PX) -> Optional[List[float]]:
+    """The 21 joints relative to the palm centre, scaled so the hand is `size_px` big: [x0, y0, x1, y1, ...] (logical
+    px). A far, small hand is drawn as large as a near one. None for a degenerate hand."""
+    pts = _pixels(lm, width, height)
+    if pts is None:
+        return None
+    k = size_px / math.dist(pts[0], pts[9])
+    cx, cy = palm_centre(lm)
+    ox, oy = cx * width, cy * height
+    flat: List[float] = []
+    for x, y in pts:
+        flat += [round((x - ox) * k, 1), round((y - oy) * k, 1)]
+    return flat
+
+
+def pinch_point(pts: Sequence[float], finger: str = "index") -> List[float]:
+    """Where the thumb and `finger` meet on the drawn hand (logical px from the palm centre)."""
+    t, f = THUMB_TIP, TIPS[finger]
+    return [round((pts[2 * t] + pts[2 * f]) / 2, 1), round((pts[2 * t + 1] + pts[2 * f + 1]) / 2, 1)]
+
+
+def triple_point(pts: Sequence[float]) -> List[float]:
+    """Centre of the thumb, index and middle tips on the drawn hand."""
+    ids = (THUMB_TIP, TIPS["index"], TIPS["middle"])
+    return [round(sum(pts[2 * i] for i in ids) / 3, 1), round(sum(pts[2 * i + 1] for i in ids) / 3, 1)]
+
+
+class ViewSmoother:
+    """Steadies the drawn joints, each with its own speed (a still palm stays still while a finger closes).
+    Source measurement: fingertip jitter (frame-to-frame second difference, median) 6.8 px -> 2.2 px."""
+
+    MIN_CUTOFF, BETA = .5, .03
+
+    def __init__(self) -> None:
+        self._filters = [OneEuro(self.MIN_CUTOFF, self.BETA) for _ in range(21)]
+
+    def reset(self) -> None:
+        for f in self._filters:
+            f.reset()
+
+    def __call__(self, pts: Sequence[float], now: Optional[float] = None) -> List[float]:
+        out: List[float] = []
+        for i, f in enumerate(self._filters):
+            out += [round(v, 1) for v in f(pts[2 * i:2 * i + 2], now)]
+        return out

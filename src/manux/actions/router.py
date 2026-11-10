@@ -47,6 +47,10 @@ class Router:
         if intent.scale is not None and "gain" in s.params:
             params = dict(binding.params)
             params["gain"] = float(params.get("gain", 1.0)) * intent.scale
+        if "offset" in s.params:            # per-frame only: a binding cannot fix it
+            params = {k: v for k, v in params.items() if k != "offset"}
+            if intent.offset is not None:
+                params["offset"] = (float(intent.offset[0]), float(intent.offset[1]))
         cmd = ActionCommand(t=intent.t, action=binding.action, phase=intent.phase,
                             gesture=intent.gesture, point=intent.point, params=params)
         return Routed(intent, cmd)

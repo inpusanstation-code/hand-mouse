@@ -128,3 +128,14 @@ def windows_monitors() -> List[Monitor]:  # pragma: no cover - needs Windows
         return found
     except Exception:
         return []
+
+
+def system_scale() -> float:
+    """Windows display scale (1.0 = 96 DPI, 1.5 = 150 %), 1.0 elsewhere or when it cannot be read.
+    The virtual hand is drawn in logical pixels and clicked in physical ones."""
+    try:
+        import ctypes
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+        return max(.5, min(4.0, dpi / 96.0)) if dpi else 1.0
+    except (AttributeError, OSError):
+        return 1.0

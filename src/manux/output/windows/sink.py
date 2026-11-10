@@ -101,6 +101,7 @@ class WindowsOutputSink:
         self.glide_sends = 0                  # cursor positions sent by the glide thread (diagnostics)
         self._last_left_click: Optional[Tuple[float, Tuple[int, int]]] = None  # (cmd.t, position) for the drag guard
         self._drag_deferred: Optional[Tuple[float, Tuple[int, int]]] = None   # (click t, start) while the press waits
+        self.virtual_palm: Optional[Tuple[int, int]] = None   # last mouse.place palm point (physical px), for the UI
 
     # ------------------------------------------------------------------ public API
     def apply(self, cmd: ActionCommand) -> OutputResult:
@@ -440,10 +441,22 @@ class WindowsOutputSink:
         m = self.cursor.absolute_monitor
         nx, ny = (min(1.0, max(0.0, float(v))) for v in cmd.point)
         x, y = int(round(m.left + nx * (m.width - 1))), int(round(m.top + ny * (m.height - 1)))
+        self.virtual_palm = (x, y)                     # where the drawn hand's palm is (the UI draws it there)
+        offset = cmd.params.get("offset")
+        if offset is not None:                         # the click lands between the drawn fingers, not at the palm
+            size = float(self.config.virtual_hand_px) or 110.0 * self._display_scale()
+            x = min(m.right - 1, max(m.left, int(round(x + float(offset[0]) * size))))
+            y = min(m.bottom - 1, max(m.top, int(round(y + float(offset[1]) * size))))
         self.cursor.warp(x, y)
         self._move_gesture, self._move_t = cmd.gesture, cmd.t
         self._place(x, y)
         return OK
+
+    def _display_scale(self) -> float:
+        if getattr(self, "_scale", None) is None:
+            from manux.platform.monitors import system_scale
+            self._scale = system_scale()
+        return self._scale
 
     def _click(self, cmd: ActionCommand, button: str) -> OutputResult:
         self._settle()

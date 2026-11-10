@@ -158,10 +158,14 @@ class Intent:
     # Per-frame speed factor (v0.3 hand-shape / long-press multiplier). The router multiplies it into the
     # binding's "gain" for actions that take a gain; other actions ignore it. None = 1.
     scale: Optional[float] = None
+    # Per-frame point offset (2026-11-10, virtual hand): where the click lands relative to `point`, in units of the
+    # hand drawn on the screen (the router passes it as params["offset"] to actions that take an "offset"). None = 0.
+    offset: Optional[Point] = None
 
     def __post_init__(self) -> None:
         if self.scale is not None and not (_finite(self.scale) and self.scale > 0):
             raise ValueError("scale must be a positive finite number")
+        _check_point("offset", self.offset)
         if not GESTURE_ID_RE.match(self.gesture):
             raise ValueError(f"gesture id must look like '<feature>.<name>', got {self.gesture!r}")
         if not isinstance(self.source, str) or not FEATURE_ID_RE.fullmatch(self.source):

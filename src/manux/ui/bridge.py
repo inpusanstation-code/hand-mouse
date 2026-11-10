@@ -488,6 +488,7 @@ class Bridge(QObject):
     studioChanged = Signal()
     customPoseChanged = Signal()
     everydayChanged = Signal()
+    virtualHandChanged = Signal()
 
     def __init__(self, runtime, settings: store.Settings, config_dir: Path, *,
                  services: Optional[Dict[str, Callable]] = None, hotkeys=None, hotkey_defaults=None,
@@ -545,6 +546,7 @@ class Bridge(QObject):
         self.live_gesture = ""
         self.contact_text = ""
         self.mlp_badge_text = ""
+        self._virtual_hand: Dict[str, Any] = {}
         self._custom_view = {"poses": [], "session": None, "message": "", "revision": -1}
         self.metrics = ("", -1, False)
         self.reception = ("paused", "입력 꺼짐")
@@ -2751,6 +2753,11 @@ class Bridge(QObject):
     def details(self):
         return self.state[4]
 
+    @Property("QVariantMap", notify=virtualHandChanged)
+    def virtualHand(self):
+        """{pts: 42 logical px around the palm, click: [x, y] or None, aim, grip, lost, palm: physical px, scale}."""
+        return dict(self._virtual_hand)
+
     @Property(str, notify=liveChanged)
     def mlpBadge(self):
         return self.mlp_badge_text
@@ -3099,6 +3106,10 @@ class Bridge(QObject):
             self.receptionChanged.emit()
         live = guide.active_key(self._cards(), view.actions if detected and not paused else (),
                                 motion_on=self.motion_on and not paused)
+        drawn = dict(getattr(view, "virtual_hand", None) or {})
+        if drawn != self._virtual_hand:
+            self._virtual_hand = drawn
+            self.virtualHandChanged.emit()
         badge = getattr(view, "mlp_badge", "")
         if badge != self.mlp_badge_text:
             self.mlp_badge_text = badge

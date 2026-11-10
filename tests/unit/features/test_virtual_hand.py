@@ -166,3 +166,79 @@ def test_the_composed_engine_routes_the_virtual_hand_to_mouse_actions():
         assert ("mouse.place", "hold", "ok") in results and ("mouse.left_click", "tap", "ok") in results
     finally:
         engine.shutdown()
+
+
+# ------------------------------------------------------------------ the drawn hand and the click between its fingers
+def test_router_passes_the_frame_offset_only_to_actions_that_take_it():
+    from manux.actions.bindings import Binding
+    from manux.actions.router import Router
+    from manux.core.contracts import Intent
+    router = Router({vh.PLACE: Binding("mouse.place", {"offset": (9.0, 9.0)}), vh.LEFT: Binding("mouse.left_click")})
+    cmd = router.route(Intent(1.0, vh.ID, vh.PLACE, "hold", point=(.5, .5), offset=(.1, -.2))).command
+    assert cmd.params["offset"] == (.1, -.2)
+    assert "offset" not in router.route(Intent(1.0, vh.ID, vh.PLACE, "hold", point=(.5, .5))).command.params
+    assert "offset" not in router.route(Intent(1.0, vh.ID, vh.LEFT, "tap", offset=(.1, .1))).command.params
+    with pytest.raises(ValueError):
+        Intent(1.0, vh.ID, vh.PLACE, "hold", point=(.5, .5), offset=(float("nan"), 0))
+
+
+def test_mouse_place_offset_moves_the_cursor_between_the_drawn_fingers():
+    from manux.core.contracts import ActionCommand
+    from manux.output.windows import FakeBackend, WindowsOutputConfig, WindowsOutputSink
+    from manux.platform.monitors import ScreenLayout
+    sink = WindowsOutputSink(FakeBackend((10, 10)), ScreenLayout.single(1920, 1080),
+                             WindowsOutputConfig(virtual_hand_px=100.0), threaded=False)
+    sink.apply(ActionCommand(t=0.0, action="mouse.place", phase="hold", gesture=vh.PLACE, point=(.5, .5),
+                             params={"offset": (-.3, -.6)}))
+    palm = sink.virtual_palm
+    assert sink.cursor.pos == (palm[0] - 30, palm[1] - 60)
+    sink.apply(ActionCommand(t=0.0, action="mouse.place", phase="hold", gesture=vh.PLACE, point=(0.0, 0.0),
+                             params={"offset": (-5.0, -5.0)}))
+    assert sink.cursor.pos == (0, 0)                                  # never off the monitor
+
+
+def test_the_feature_draws_the_hand_and_offsets_only_while_the_fingers_meet():
+    f = vh.VirtualHandFeature()
+    out, t = run(f, [OPEN] * 4)
+    assert all(i.offset is None for i in out if i.gesture == vh.PLACE)
+    view = f.last_view
+    assert len(view["pts"]) == 42 and view["aim"] and view["click"] is not None and not view["lost"]
+    out, t = run(f, [PINCH] * 4, t0=t)
+    offsets = [i.offset for i in out if i.gesture == vh.PLACE and i.offset is not None]
+    assert offsets and all(o == offsets[0] for o in offsets)          # a click stays where the fingers met
+    assert not f.last_view["aim"]
+    out, t = run(f, [OPEN] * 2, t0=t)
+    assert taps(out, vh.LEFT) and next(i for i in out if i.gesture == vh.PLACE).offset == offsets[0]
+    run(f, [None], t0=t + 1)
+    assert f.last_view["lost"]
+
+
+def test_a_drag_carries_the_offset_with_the_fingers():
+    f = vh.VirtualHandFeature()
+    moving = [tuple((x + .003 * k, y, z) for x, y, z in PINCH) for k in range(25)]   # the pinched hand slides right
+    out, _ = run(f, [OPEN] * 2 + moving)
+    assert phases(out, vh.DRAG)[0] == "begin"
+    places = [i for i in out if i.gesture == vh.PLACE][-5:]
+    assert all(i.offset is not None for i in places)
+    assert places[-1].point[0] > places[0].point[0]                  # the palm (and the dragged thing) moves
+
+
+def test_the_runtime_hands_the_drawing_to_the_ui_only_in_this_mode():
+    from types import SimpleNamespace
+    from manux.app import schema
+    from manux.core.contracts import OutputTarget
+    from manux.desktop import build
+    from manux.settings.store import Settings
+    runtime = build(Settings(schema()), SimpleNamespace(close=lambda: None), windows=False)
+    try:
+        feature = next(x for x in runtime.engine.features if x.id == vh.ID)
+        feature.last_view = {"pts": [0.0] * 42, "click": None, "aim": True, "grip": False, "lost": False}
+        runtime.engine.sinks[OutputTarget.WINDOWS] = SimpleNamespace(virtual_palm=(800, 600), _display_scale=lambda: 1.5)
+        snap = lambda mode, out=OutputTarget.WINDOWS: SimpleNamespace(mode=mode, output=out)
+        view = runtime._virtual_hand_view(snap("virtual_hand"))
+        assert view["palm"] == [800, 600] and view["scale"] == 1.5 and len(view["pts"]) == 42
+        assert runtime._virtual_hand_view(snap("pinch")) is None
+        assert runtime._virtual_hand_view(snap("virtual_hand", OutputTarget.PRACTICE)) is None
+    finally:
+        runtime.engine.sinks.pop(OutputTarget.WINDOWS, None)
+        runtime.stop()

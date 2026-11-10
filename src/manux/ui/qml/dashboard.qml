@@ -1818,4 +1818,5 @@ ApplicationWindow {
             onClicked: dashboard.closeTrackingTest()
         }
     }
+    VirtualHandOverlay { controller: dashboard }
 }

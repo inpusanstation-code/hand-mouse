@@ -55,3 +55,4 @@ class ViewFrame:
     practice_epoch: int = 0                    # persistent reset boundary; latest-only reads are safe
     rule_preview: Optional[Snapshot] = None    # practice-only rules during registration or recording
     mlp_badge: str = ""                        # pose-assist veto state while it is on; "" hides the line
+    virtual_hand: Optional[Mapping[str, Any]] = None   # the hand to draw at the cursor (virtual hand mode), else None

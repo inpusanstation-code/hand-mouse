@@ -104,6 +104,17 @@
 - **옮기지 않은 것**: 원본의 torch 사용 중 학습기(`models`, `trainer`, `replay`, `memory`, `live`, `baseline`, `dataset`, `update_job`, `app_job`, `versions`, `safety`). MANUX 재학습·평가·설치·복원과 겹치고, 원본에서도 실데이터로 교체가 성공한 적이 없다.
 - 시험: `tests/unit/data/test_everyday.py` 7개(가만히 있는 손은 후보 없음, 핀치는 후보 하나, 미라벨 후보는 학습 제외, 라벨 후 학습 포함, 아무것도 아님 = none, 켜야만·실사용에서만 수집, 큐가 차면 버림), 화면 시험 1개.
 
-## 아직 안 한 것 (3단계 남은 일)
-1. 가상 손의 화면 손 그림과 손가락 사이 클릭(계약 변경 제안 필요).
-2. 녹화 파일(`recordings/`)은 저장소 밖 + `tools/hub.py`로 공유(AGENTS 규칙), virtual-hand의 `config/gestures.json` 값은 PC별 조정값이라 옮기지 않음.
+## 가상 손의 화면 손 그림과 손가락 사이 클릭 (3단계 5번, 완료)
+- **계약 변경**(`docs/contracts.md` §5·§7, 영향: `core`·`actions`·`output`·`features/virtual_hand`): `Intent.offset` 추가. `scale`처럼 프레임마다 바뀌는 값으로, 라우터가 `offset`을 받는 액션(`mouse.place`)에만 `params["offset"]`으로 넘기고 바인딩이 준 값은 버린다. 단위는 화면에 그린 손 크기(110 논리 px).
+- 기능: 원본의 `view`·`click_offset`·`pinch_point`·`triple_point`·`ViewSmoother`를 `features/virtual_hand/shapes.py`로. 엄지+검지가 닿는 동안·클릭하는 프레임에는 그린 손의 두 손가락이 만나는 점이 오프셋이 되고(닿은 순간 값으로 고정), 끌기 중에는 손가락을 따라간다. 더블클릭 두 번째는 첫 클릭과 같은 점·오프셋. 손을 놓치면 `last_view.lost`.
+- 출력: `mouse.place`가 손바닥 위치(`virtual_palm`, 화면 그림의 기준) + 오프셋 × (110 × Windows 배율, `platform/monitors.system_scale`) 에 커서를 둔다. 모니터 밖으로는 나가지 않는다. `cursor.virtual_hand_px`로 직접 정할 수 있다.
+- 화면: `ui/qml/VirtualHandOverlay.qml` — 클릭이 통과하는(`WindowTransparentForInput`) 항상 위 투명 창이 손바닥 위치에 손 뼈대와 클릭 점을 그린다(겨누는 중 = 고리, 클릭·끌기 중 = 채운 점, 주먹 = 주황). 손을 놓치면 0.4초 흐리게 남았다가 사라진다. 가상 손 모드이면서 실제 Windows 출력일 때만 보인다(일시정지 중에는 숨김, 원본은 일시정지 중에도 그렸음).
+- 원본과 다른 점: 원본은 QML `FrameAnimation`으로 모니터 주사율 보간을 했고 창 전환 화면 위로 1초에 4번 다시 올렸다. 여기는 브리지 폴링마다 위치를 바꾸고, 창 전환 위로 올리기는 하지 않았다. 여러 모니터의 배율이 다르면 위치가 어긋날 수 있다(시스템 배율 하나만 씀).
+- 시험: `tests/unit/features/test_virtual_hand.py` +5(라우터 오프셋, 출력 오프셋·모니터 경계, 그림·오프셋 고정, 끌기 중 이동, 런타임이 이 모드에서만 그림을 넘김), `tests/unit/ui/test_bridge.py` +1(창이 손바닥을 따라가고 놓치면 흐려졌다 사라짐). 실제 화면에서는 보지 않았다.
+
+## 병합 중 함께 고친 것
+- `PointerSetupPage.qml:190` "Unable to assign [undefined] to bool": testing-mlp가 고친 것(`Boolean(page.setup.hand)`)을 2단계에서 빠뜨려 이번에 넣었다.
+- 확인만 하고 두었다: `studio/TrainingProgressPage.qml`의 undefined 경고 다수는 학습 센터 서비스가 없는 시험·헤드리스 실행에서만 난다(실제 앱은 `progress()`가 모든 키를 채움).
+
+## 아직 안 한 것
+1. 녹화 파일(`recordings/`)은 저장소 밖 + `tools/hub.py`로 공유(AGENTS 규칙), virtual-hand의 `config/gestures.json` 값은 PC별 조정값이라 옮기지 않음.

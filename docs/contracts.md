@@ -254,7 +254,7 @@ v0.4 확인기는 모델 정보 파일의 클래스 → 동작 ID 대응표를 �
 | 액션 ID | phase | params | v0.3 이름 |
 | --- | --- | --- | --- |
 | `mouse.move` | hold | `gain` | `move_cursor` |
-| `mouse.place` | hold | — | — (2026-11-10 추가: `point`는 현재 모니터의 0..1 위치. 가상 손 박스가 정한다. 배율·평활 없음) |
+| `mouse.place` | hold | `offset` | — (2026-11-10 추가: `point`는 현재 모니터의 0..1 위치(가상 손의 손바닥). `offset`은 프레임별 값 `Intent.offset`에서만 온다: 화면에 그린 손 크기 단위의 클릭 지점. 배율·평활 없음) |
 | `mouse.left_click` | tap | — | `left_click` |
 | `mouse.right_click` | tap | — | `right_click` |
 | `mouse.drag` | begin / hold / end | `gain` | `drag_hold`, `drag_toggle` |
@@ -269,6 +269,7 @@ v0.4 확인기는 모델 정보 파일의 클래스 → 동작 ID 대응표를 �
 
 이 표는 코드 [`actions/catalog.py`](../src/manux/actions/catalog.py)와 같아야 한다(`tests/unit/actions/test_actions.py`가 비교한다). **제안** 줄은 목록에 넣지 않는다.
 
+- `Intent.offset`(2026-11-10 추가, 계약 변경, 영향: `core`·`actions`·`output`·`features/virtual_hand`): `scale`처럼 프레임마다 바뀌는 값. 라우터는 `offset`을 받는 액션(`mouse.place`)에만 `params["offset"]`으로 넘기고, 바인딩이 준 `offset`은 버린다. 단위는 화면에 그린 손 크기(손목→중지 뿌리, 110 논리 px × Windows 배율)다.
 - `params`(S3 추가, 계약 변경): 바인딩이 줄 수 있는 키. `gain`은 양수 배율(`mouse.move`: 커서 이동 배율 / `mouse.drag`: 드래그 중 커서 이동 배율 / `mouse.scroll`: 스크롤 배율). 프레임마다 바뀌는 값은 `params`가 아니라 `Intent.scale`로 온다(§5).
 - `window.task_switcher`는 Ctrl+Alt+Tab으로 Windows 창 선택기를 연다. 키는 즉시 모두 해제하고 열린 선택기에서 포인터로 고를 수 있다.
 

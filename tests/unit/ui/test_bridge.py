@@ -500,3 +500,26 @@ def test_movement_style_picker_switches_to_the_virtual_hand_mode_and_back(bridge
     assert b.movementStyle == "palm" and SetBaseMode("pinch") in drained(rt)
     b.setMovementStyle("nonsense")
     assert b.movementStyle == "palm" and not drained(rt)
+
+
+def test_virtual_hand_overlay_follows_the_palm_and_fades_after_a_loss(bridge):
+    from PySide6.QtCore import QObject
+    from PySide6.QtTest import QTest
+    from manux.ui.view import ViewFrame
+    b, rt = bridge
+    overlay = b.window.findChild(QObject, "virtualHandOverlay")
+    assert overlay is not None and not overlay.property("visible")
+    drawn = {"pts": [float(i % 7) for i in range(42)], "click": [-10.0, -40.0], "aim": False, "grip": False,
+             "lost": False, "palm": [900, 600], "scale": 1.5}
+    rt.view = (1, ViewFrame(None, virtual_hand=drawn))
+    b.poll(); QTest.qWait(20)
+    assert b.virtualHand["palm"] == [900, 600]
+    assert overlay.property("visible") and overlay.property("x") == round(900 / 1.5 - 170) and overlay.property("y") == round(600 / 1.5 - 170)
+    rt.view = (2, ViewFrame(None, virtual_hand={**drawn, "lost": True}))
+    b.poll(); QTest.qWait(20)
+    assert overlay.property("visible")                         # faint for a moment
+    QTest.qWait(500)
+    assert not overlay.property("visible")
+    rt.view = (3, ViewFrame(None))
+    b.poll(); QTest.qWait(20)
+    assert b.virtualHand == {} and not overlay.property("visible")

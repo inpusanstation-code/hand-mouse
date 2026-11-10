@@ -25,8 +25,9 @@ from __future__ import annotations
 from typing import List, Optional, Sequence, Tuple
 
 from manux.core.contracts import Activity, FrameContext, HandObservation, Intent
-from manux.features.virtual_hand.shapes import (BoxMapper, Grip, ShapePinch, ShapeSwitch, ShapeTriple, is_fist,
-                                                palm_centre, valid_box)
+from manux.features.virtual_hand.shapes import (SIZE_PX, BoxMapper, Grip, ShapePinch, ShapeSwitch, ShapeTriple,
+                                                ViewSmoother, is_fist, palm_centre, pinch_point, triple_point,
+                                                valid_box, view_points)
 
 __all__ = ["ID", "MODE", "GESTURES", "GESTURE_PHASES", "DEFAULT_BINDINGS", "SETTINGS", "VirtualHandFeature"]
 
@@ -61,11 +62,13 @@ class VirtualHandFeature:
         self.triple = ShapeTriple()
         self.switch = ShapeSwitch()
         self.grip = Grip()
+        self.smoother = ViewSmoother()
+        self.last_view: Optional[dict] = None      # the hand to draw on the screen (read by the UI, never by others)
         self.reset("init")
 
     # ------------------------------------------------------------------ Feature protocol
     def reset(self, reason: str) -> None:
-        for part in (self.box, self.pinch, self.triple, self.switch, self.grip):
+        for part in (self.box, self.pinch, self.triple, self.switch, self.grip, self.smoother):
             part.reset()
         self._since: Optional[float] = None       # when thumb + index closed (this press)
         self._dragging = False
@@ -73,7 +76,9 @@ class VirtualHandFeature:
         self._double = False                      # this press is a double click's second click
         self._triple_press = False                # this press became a right click
         self._triple_open_t = float("-inf")
-        self._last_tap: Optional[Tuple[float, Tuple[float, float]]] = None
+        self._last_tap: Optional[Tuple[float, Tuple[float, float], Optional[List[float]]]] = None
+        self._click: Optional[List[float]] = None  # drawn-hand px where the click lands while engaged
+        self.last_view = None
         self._last_release_t = getattr(self, "_last_t", float("-inf"))
         self._last_t = float("-inf")
 
@@ -90,6 +95,9 @@ class VirtualHandFeature:
             self._close_spans(t, out)
             self.pinch.reset()
             self.triple.reset()
+            self._click = None
+            if self.last_view is not None:
+                self.last_view = {**self.last_view, "lost": True}   # the UI fades it, then hides it
             return out
         lm, w, h = hand.landmarks, hand.frame.width, hand.frame.height
         pinch_hold, double_tap = float(s.get("pinch_hold", .45)), float(s.get("double_tap", .7))
@@ -110,11 +118,12 @@ class VirtualHandFeature:
             self.triple.reset()
             self._since, self._double, self._triple_press = None, False, False
 
-        second = None
+        second = second_offset = None
         if pinch_evt == "down":
             self._since = t
             if self._last_tap is not None and t - self._last_tap[0] <= double_tap:
-                second, self._since, self._double = self._last_tap[1], None, True
+                second, second_offset = self._last_tap[1], self._last_tap[2]
+                self._since, self._double = None, True
             self._last_tap = None
         # held closed long enough: a drag, not a click (stays a drag until the fingers open)
         dragging_now = self.pinch.closed and self._since is not None and t - self._since >= pinch_hold \
@@ -128,6 +137,30 @@ class VirtualHandFeature:
         if second is not None:
             point = second                         # exactly the first click's point: Windows pairs them
 
+        # ---- the drawn hand, and where its fingers meet: a click lands there, not at the palm
+        drawn = view_points(lm, w, h)
+        if drawn is not None:
+            drawn = self.smoother(drawn, t)
+        meet = None
+        if drawn is not None and not grip:
+            if self.pinch.closed or tap or pinch_evt == "up":
+                meet = pinch_point(drawn, "index")
+            elif self.triple.closed or right_evt == "down":
+                meet = triple_point(drawn)
+        engaged = meet is not None and (aiming or dragging_now or self._dragging or tap or right_evt == "down"
+                                        or pinch_evt == "up")
+        if engaged:
+            if self._click is None or dragging_now or self._dragging:
+                self._click = list(meet)       # a click stays where the fingers met; a dragged thing rides along
+        else:
+            self._click = None
+        offset = second_offset if second is not None else (
+            (self._click[0] / SIZE_PX, self._click[1] / SIZE_PX) if self._click is not None else None)
+        if drawn is not None:
+            self.last_view = {"pts": drawn, "click": list(self._click) if self._click else
+                              (pinch_point(drawn, "index") if not grip else None),
+                              "aim": self._click is None, "grip": bool(grip), "lost": False}
+
         # ---- spans first: a drag or a scroll that should end ends before anything new starts
         if self._dragging and not (self.pinch.closed and not self.triple.closed):
             out.append(Intent(t, ID, DRAG, "end"))
@@ -138,7 +171,7 @@ class VirtualHandFeature:
             self._scrolling = False
             self._last_release_t = t
 
-        out.append(Intent(t, ID, PLACE, "hold", point=point))
+        out.append(Intent(t, ID, PLACE, "hold", point=point, offset=offset))
         if grip:
             cx, _ = palm_centre(lm)
             follows = bool(s.get("scroll_follows_page", False))
@@ -150,7 +183,7 @@ class VirtualHandFeature:
             self._dragging = True
         elif tap or second is not None:
             out.append(Intent(t, ID, LEFT, "tap"))
-            self._last_tap = (t, point) if tap else None
+            self._last_tap = (t, point, offset) if tap else None
         elif right_evt == "down":
             out.append(Intent(t, ID, RIGHT, "tap"))
         elif not self.pinch.closed and not self.triple.closed and self.switch.step(lm, w, h, t):

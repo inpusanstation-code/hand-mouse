@@ -36,7 +36,7 @@ class ActionSpec:
 
 _SPECS = (
     ActionSpec("mouse.move", HOLD, params=("gain",), v03=("move_cursor",)),
-    ActionSpec("mouse.place", HOLD),          # point = 0..1 of the current monitor (virtual hand box), no gain
+    ActionSpec("mouse.place", HOLD, params=("offset",)),   # point = 0..1 of the monitor; offset in drawn-hand units
     ActionSpec("mouse.left_click", TAP, v03=("left_click",)),
     ActionSpec("mouse.right_click", TAP, v03=("right_click",)),
     ActionSpec("mouse.drag", SPAN, params=("gain",), v03=("drag_hold", "drag_toggle")),

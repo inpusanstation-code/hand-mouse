@@ -1241,4 +1241,5 @@ ApplicationWindow {
             onClicked: dashboard.closeTrackingTest()
         }
     }
+    Current.VirtualHandOverlay { controller: dashboard }
 }

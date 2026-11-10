@@ -44,6 +44,9 @@ class WindowsOutputConfig:
     # moves 8 px or this time has passed since the click (testing-mlp d1713f2 used 0.52). 0 = off: the press is
     # immediate, so the drag grabs exactly where it began.
     drag_after_click_guard: float = 0.0
+    # virtual hand: the hand drawn on the screen is this many physical pixels from wrist to middle knuckle; a
+    # mouse.place "offset" is in those units. 0 = 110 logical px x the Windows display scale (what the UI draws).
+    virtual_hand_px: float = 0.0
     # grab scroll (touchscreen style) and inertia
     scroll_gain: float = 36000.0             # wheel units per frame width of hand motion
     scroll_deadzone: float = 0.01
