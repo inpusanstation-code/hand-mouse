@@ -197,30 +197,64 @@ def test_mouse_place_offset_moves_the_cursor_between_the_drawn_fingers():
     assert sink.cursor.pos == (0, 0)                                  # never off the monitor
 
 
-def test_the_feature_draws_the_hand_and_offsets_only_while_the_fingers_meet():
+def test_the_cursor_is_the_clicking_point_and_the_drawing_is_anchored_on_it():
+    """2026-11-10: no per-click offset any more (it made the cursor jump when the fingers met)."""
     f = vh.VirtualHandFeature()
-    out, t = run(f, [OPEN] * 4)
-    assert all(i.offset is None for i in out if i.gesture == vh.PLACE)
+    out, t = run(f, [OPEN] * 6 + [PINCH] * 4 + [OPEN] * 3)
+    assert all(i.offset is None for i in out if i.gesture == vh.PLACE) and taps(out, vh.LEFT)
     view = f.last_view
-    assert len(view["pts"]) == 42 and view["aim"] and view["click"] is not None and not view["lost"]
-    out, t = run(f, [PINCH] * 4, t0=t)
-    offsets = [i.offset for i in out if i.gesture == vh.PLACE and i.offset is not None]
-    assert offsets and all(o == offsets[0] for o in offsets)          # a click stays where the fingers met
-    assert not f.last_view["aim"]
-    out, t = run(f, [OPEN] * 2, t0=t)
-    assert taps(out, vh.LEFT) and next(i for i in out if i.gesture == vh.PLACE).offset == offsets[0]
-    run(f, [None], t0=t + 1)
-    assert f.last_view["lost"]
+    assert len(view["pts"]) == 42 and len(view["anchor"]) == 2 and view["aim"] and not view["lost"]
+    f2 = vh.VirtualHandFeature()
+    run(f2, [OPEN] * 6)
+    run(f2, [PINCH] * 3, t0=2.0)
+    frozen = list(f2.last_view["anchor"])
+    run(f2, [PINCH] * 3, t0=2.2)
+    assert f2.last_view["anchor"] == frozen and not f2.last_view["aim"]       # still while clicking
 
 
-def test_a_drag_carries_the_offset_with_the_fingers():
+def test_box_edges_are_monitor_edges():
+    def at(dx):
+        moved = tuple((x + dx, y, z) for x, y, z in OPEN)
+        out, _ = run(vh.VirtualHandFeature(), [moved] * 20)
+        return [i.point for i in out if i.gesture == vh.PLACE][-1]
+    cx, _ = shapes.palm_centre(OPEN)
+    assert at(.8 - cx + .02)[0] == 1.0 and at(.2 - cx - .02)[0] == 0.0       # past the box edge = exactly the edge
+
+
+def steps(points):
+    import math
+    return [math.dist(a, b) for a, b in zip(points, points[1:])]
+
+
+def test_releasing_a_hold_eases_to_the_hand_instead_of_jumping():
     f = vh.VirtualHandFeature()
-    moving = [tuple((x + .003 * k, y, z) for x, y, z in PINCH) for k in range(25)]   # the pinched hand slides right
-    out, _ = run(f, [OPEN] * 2 + moving)
-    assert phases(out, vh.DRAG)[0] == "begin"
-    places = [i for i in out if i.gesture == vh.PLACE][-5:]
-    assert all(i.offset is not None for i in places)
-    assert places[-1].point[0] > places[0].point[0]                  # the palm (and the dragged thing) moves
+    still = [OPEN] * 10
+    pinched_moving = [tuple((x + .006 * k, y, z) for x, y, z in PINCH) for k in range(10)]   # moves while held
+    after = [tuple((x + .06, y, z) for x, y, z in OPEN)] * 15
+    out, _ = run(f, still + pinched_moving + after)
+    pts = [i.point for i in out if i.gesture == vh.PLACE]
+    assert max(steps(pts[19:])) < .5 * (pts[-1][0] - pts[19][0])            # no single-frame landing
+    assert abs(pts[-1][0] - pts[-2][0]) < 1e-3                               # and it arrives
+
+
+def test_finding_the_hand_again_eases_in():
+    f = vh.VirtualHandFeature()
+    out, t = run(f, [OPEN] * 10)
+    far = tuple((x + .2, y, z) for x, y, z in OPEN)
+    out2, _ = run(f, [None] * 6 + [far] * 12, t0=t)
+    pts = [i.point for i in out2 if i.gesture == vh.PLACE]
+    total = abs(pts[-1][0] - [i.point for i in out if i.gesture == vh.PLACE][-1][0])
+    assert total > .2 and max(steps(pts)) < .5 * total
+
+
+def test_aim_back_only_undoes_a_tilt_not_a_real_move():
+    m = shapes.BoxMapper()
+    box = (.2, .15, .8, .85)
+    for k in range(10):                                                      # a fast real move just before the pinch
+        m.target(tuple((x + .02 * k, y, z) for x, y, z in OPEN), box, now=k / 30)
+    moving_to = m.pos
+    held = m.target(tuple((x + .2, y, z) for x, y, z in OPEN), box, hold=True, now=10 / 30)
+    assert held == moving_to                                                 # no jump back 0.15 s along the move
 
 
 def test_the_runtime_hands_the_drawing_to_the_ui_only_in_this_mode():
@@ -232,7 +266,7 @@ def test_the_runtime_hands_the_drawing_to_the_ui_only_in_this_mode():
     runtime = build(Settings(schema()), SimpleNamespace(close=lambda: None), windows=False)
     try:
         feature = next(x for x in runtime.engine.features if x.id == vh.ID)
-        feature.last_view = {"pts": [0.0] * 42, "click": None, "aim": True, "grip": False, "lost": False}
+        feature.last_view = {"pts": [0.0] * 42, "anchor": [0.0, 0.0], "aim": True, "grip": False, "lost": False}
         runtime.engine.sinks[OutputTarget.WINDOWS] = SimpleNamespace(virtual_palm=(800, 600), _display_scale=lambda: 1.5)
         snap = lambda mode, out=OutputTarget.WINDOWS: SimpleNamespace(mode=mode, output=out)
         view = runtime._virtual_hand_view(snap("virtual_hand"))

@@ -13,9 +13,10 @@ the pinch rules are not running at all (the mode is its own); only these hand sh
 | `virtual_hand.scroll`        | begin / hold / end | a fist; sideways moves the page (right = down by default)   | `mouse.scroll` (x0.5)  |
 | `virtual_hand.task_switcher` | tap                | thumb folded, four fingers up, held still 0.5 s             | `window.task_switcher` |
 
-While a click finger is closed the point holds where the palm was 0.15 s before the touch, so the click lands where the
-hand aimed, not where the pinch tilted it. The click lands at the cursor (the palm). The source also drew a hand on the
-screen and clicked where its thumb and index met; that needs a contract change (a click offset) and is not ported yet.
+While a click finger is closed the point holds where the hand aimed (0.15 s before the touch, if that was only the tilt of
+the closing fingers). The cursor is the clicking point and maps the box onto the monitor edge to edge; the hand drawn on
+the screen is shifted so that its thumb-index point sits on the cursor (2026-11-10: the source's per-click offset from
+the palm made the cursor jump when the fingers met and kept clicks off the right and bottom edges).
 
 Differences from the source: its fist came from the rule engine (`active_gesture == "fist"`); features do not import
 each other here, so `shapes.is_fist` judges it from the shape. Its F-key click log and TCN click check are not ported.
@@ -25,9 +26,9 @@ from __future__ import annotations
 from typing import List, Optional, Sequence, Tuple
 
 from manux.core.contracts import Activity, FrameContext, HandObservation, Intent
-from manux.features.virtual_hand.shapes import (SIZE_PX, BoxMapper, Grip, ShapePinch, ShapeSwitch, ShapeTriple,
+from manux.features.virtual_hand.shapes import (BoxMapper, Grip, ShapePinch, ShapeSwitch, ShapeTriple,
                                                 OneEuro, ViewSmoother, hand_size_px, is_fist, palm_centre,
-                                                pinch_point, triple_point, valid_box, view_points)
+                                                pinch_point, valid_box, view_points)
 
 __all__ = ["ID", "MODE", "GESTURES", "GESTURE_PHASES", "DEFAULT_BINDINGS", "SETTINGS", "VirtualHandFeature"]
 
@@ -78,7 +79,7 @@ class VirtualHandFeature:
         self._triple_press = False                # this press became a right click
         self._triple_open_t = float("-inf")
         self._last_tap: Optional[Tuple[float, Tuple[float, float], Optional[List[float]]]] = None
-        self._click: Optional[List[float]] = None  # drawn-hand px where the click lands while engaged
+        self._anchor: Optional[List[float]] = None  # drawn-hand px of the thumb-index point (the cursor sits there)
         self.last_view = None
         self._last_release_t = getattr(self, "_last_t", float("-inf"))
         self._last_t = float("-inf")
@@ -96,7 +97,6 @@ class VirtualHandFeature:
             self._close_spans(t, out)
             self.pinch.reset()
             self.triple.reset()
-            self._click = None
             if self.last_view is not None:
                 self.last_view = {**self.last_view, "lost": True}   # the UI fades it, then hides it
             return out
@@ -119,11 +119,11 @@ class VirtualHandFeature:
             self.triple.reset()
             self._since, self._double, self._triple_press = None, False, False
 
-        second = second_offset = None
+        second = None
         if pinch_evt == "down":
             self._since = t
             if self._last_tap is not None and t - self._last_tap[0] <= double_tap:
-                second, second_offset = self._last_tap[1], self._last_tap[2]
+                second = self._last_tap[1]
                 self._since, self._double = None, True
             self._last_tap = None
         # held closed long enough: a drag, not a click (stays a drag until the fingers open)
@@ -138,30 +138,24 @@ class VirtualHandFeature:
         if second is not None:
             point = second                         # exactly the first click's point: Windows pairs them
 
-        # ---- the drawn hand, and where its fingers meet: a click lands there, not at the palm
+        # ---- the drawn hand. The cursor IS the clicking point (box edge = monitor edge, no jump when the fingers
+        # meet: the old per-click offset caused 18.5 jumps >= 60 px a minute in the 2026-11-10 replay). The drawing is
+        # shifted so that its thumb-index point (`anchor`, slowly followed, frozen while clicking) sits on the cursor.
         size = hand_size_px(lm, w, h, hand.world)
         drawn = view_points(lm, w, h, hand_px=self.size_filter((size,), t)[0] if size else None)
         if drawn is not None:
             drawn = self.smoother(drawn, t)
-        meet = None
-        if drawn is not None and not grip:
-            if self.pinch.closed or tap or pinch_evt == "up":
-                meet = pinch_point(drawn, "index")
-            elif self.triple.closed or right_evt == "down":
-                meet = triple_point(drawn)
-        engaged = meet is not None and (aiming or dragging_now or self._dragging or tap or right_evt == "down"
-                                        or pinch_evt == "up")
-        if engaged:
-            if self._click is None or dragging_now or self._dragging:
-                self._click = list(meet)       # a click stays where the fingers met; a dragged thing rides along
-        else:
-            self._click = None
-        offset = second_offset if second is not None else (
-            (self._click[0] / SIZE_PX, self._click[1] / SIZE_PX) if self._click is not None else None)
+        engaged = (self.pinch.closed or self.triple.closed or dragging_now or self._dragging or tap
+                   or right_evt == "down" or pinch_evt == "up")
         if drawn is not None:
-            self.last_view = {"pts": drawn, "click": list(self._click) if self._click else
-                              (pinch_point(drawn, "index") if not grip else None),
-                              "aim": self._click is None, "grip": bool(grip), "lost": False}
+            aim_px = pinch_point(drawn, "index")
+            if self._anchor is None:
+                self._anchor = list(aim_px)
+            elif not engaged and not grip:
+                self._anchor = [a + .15 * (b - a) for a, b in zip(self._anchor, aim_px)]
+            self.last_view = {"pts": drawn, "anchor": [round(v, 1) for v in self._anchor], "aim": not engaged,
+                              "grip": bool(grip), "lost": False}
+        offset = None
 
         # ---- spans first: a drag or a scroll that should end ends before anything new starts
         if self._dragging and not (self.pinch.closed and not self.triple.closed):

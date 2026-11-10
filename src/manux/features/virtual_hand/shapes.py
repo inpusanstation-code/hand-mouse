@@ -72,41 +72,67 @@ class OneEuro:
 
 
 class BoxMapper:
-    """Palm centre in the box -> 0..1 on the monitor; the box edges are the monitor edges, steadied by a One Euro filter.
-    While `hold` is true the point stays where the palm was AIM_BACK s before (the aim, not the pinch tilt)."""
+    """Hand in the box -> 0..1 on the monitor: the box edges ARE the monitor edges (the cursor, i.e. the clicking point,
+    reaches every edge). Steadied by a One Euro filter. While `hold` is true the point stays where it aimed: where the
+    palm was AIM_BACK s before, if that is within AIM_BACK_MAX (the tilt of closing fingers, not a real move).
+
+    No jumps (2026-11-10 replay of 40 min of recordings, cursor steps >= 60 px): releasing a hold, letting go of a fist
+    or finding the hand again used to land on the live position in one frame (hold end 10.9/min, fist 7.9/min, regained
+    2.2/min); now the point eases there over EASE s. The aim-back went back any distance (8.9/min); now only tilt-sized.
+    """
 
     MIN_CUTOFF, BETA, SPEED_SCALE = .4, .012, 1000.0
+    EASE = .2              # s from a held / lost position to the live one
+    GAP = .1               # s without a hand after which the next position eases in
+    AIM_BACK_MAX = .02     # monitor fractions: a longer way back is a real move, not the pinch tilt
 
     def __init__(self) -> None:
+        self._filter = OneEuro(self.MIN_CUTOFF, self.BETA, speed_scale=self.SPEED_SCALE)
+        self.reset()
+
+    def reset(self) -> None:
         self.pos: Optional[Tuple[float, float]] = None
         self._history: deque = deque(maxlen=30)
         self.held = False
-        self._filter = OneEuro(self.MIN_CUTOFF, self.BETA, speed_scale=self.SPEED_SCALE)
-
-    def reset(self) -> None:
-        self.pos = None
-        self._history.clear()
-        self.held = False
         self._filter.reset()
+        self._ease_from: Optional[Tuple[float, float]] = None
+        self._ease_t = 0.0
+        self._last_t: Optional[float] = None
+
+    def _start_ease(self, live: Tuple[float, float], now: float) -> None:
+        self._ease_from, self._ease_t = self.pos, now
+        self._filter.reset(live)               # the filter restarts at the live hand, the ease covers the distance
+        self._filter.t = now
 
     def target(self, lm: Landmarks, box, hold: bool = False, now: float = 0.0, aim: bool = True) -> Tuple[float, float]:
         x0, y0, x1, y1 = box
         cx, cy = palm_centre(lm)
         nx = min(1.0, max(0.0, (cx - x0) / (x1 - x0)))
         ny = min(1.0, max(0.0, (cy - y0) / (y1 - y0)))
+        gap = self._last_t is not None and now - self._last_t > self.GAP
+        self._last_t = now
         if hold and self.pos is not None:
             if not self.held:
                 self.held = True
+                self._ease_from = None
                 earlier = [p for t, p in self._history if t <= now - AIM_BACK] if aim else []
-                if earlier:
+                if earlier and math.dist(earlier[-1], self.pos) <= self.AIM_BACK_MAX:
                     self.pos = earlier[-1]
-                self._filter.reset(self.pos)
-                self._filter.t = now
             return self.pos
+        if self.pos is not None and (self.held or gap):
+            self._start_ease((nx, ny), now)
         self.held = False
         fx, fy = self._filter((nx, ny), now)
         fx = nx if abs(fx - nx) < 1e-3 else fx       # the filter only nears a clamped edge: the box edge is the monitor edge
         fy = ny if abs(fy - ny) < 1e-3 else fy
+        if self._ease_from is not None:
+            k = (now - self._ease_t) / self.EASE
+            if k >= 1.0:
+                self._ease_from = None
+            else:
+                k = k * k * (3 - 2 * k)               # smoothstep: no kick at either end
+                (ax, ay) = self._ease_from
+                fx, fy = ax + (fx - ax) * k, ay + (fy - ay) * k
         self.pos = (fx, fy)
         self._history.append((now, self.pos))
         return self.pos

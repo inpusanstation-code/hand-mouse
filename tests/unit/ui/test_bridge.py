@@ -509,7 +509,7 @@ def test_virtual_hand_overlay_follows_the_palm_and_fades_after_a_loss(bridge):
     b, rt = bridge
     overlay = b.window.findChild(QObject, "virtualHandOverlay")
     assert overlay is not None and not overlay.property("visible")
-    drawn = {"pts": [float(i % 7) for i in range(42)], "click": [-10.0, -40.0], "aim": False, "grip": False,
+    drawn = {"pts": [float(i % 7) for i in range(42)], "anchor": [-10.0, -40.0], "aim": False, "grip": False,
              "lost": False, "palm": [900, 600], "scale": 1.5}
     rt.view = (1, ViewFrame(None, virtual_hand=drawn))
     b.poll(); QTest.qWait(20)

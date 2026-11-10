@@ -2,8 +2,9 @@ import QtQuick
 import QtQuick.Window
 
 // The control hand drawn on the screen in the virtual hand mode (from virtual-hand-20261110 `virtualHandWindow`).
-// A click-through, always-on-top, frameless window centred on the palm; the dot is where a click lands (between the
-// drawn thumb and index). It only shows what controller.virtualHand says; it judges nothing.
+// A click-through, always-on-top, frameless window centred on the cursor (the clicking point). The hand is drawn
+// shifted by `anchor` so that its thumb-index point sits on the cursor; the ring / dot there is where a click lands.
+// It only shows what controller.virtualHand says; it judges nothing.
 Window {
     id: overlay
     required property var controller
@@ -38,7 +39,8 @@ Window {
             const ctx = getContext("2d")
             ctx.reset()
             if (!overlay.hasHand) return
-            const p = overlay.hand.pts, cx = width / 2, cy = height / 2
+            const p = overlay.hand.pts, a = overlay.hand.anchor || [0, 0]
+            const cx = width / 2 - a[0], cy = height / 2 - a[1]          // the palm, so that the anchor lands on the cursor
             ctx.lineCap = "round"
             ctx.strokeStyle = overlay.hand.grip ? "#B54708" : "#0B6E5B"
             ctx.lineWidth = 5
@@ -52,11 +54,10 @@ Window {
             for (let i = 0; i < 21; i++) {
                 ctx.beginPath(); ctx.arc(cx + p[2 * i], cy + p[2 * i + 1], 3.5, 0, 2 * Math.PI); ctx.fill()
             }
-            const c = overlay.hand.click
-            if (c && c.length === 2) {
-                ctx.beginPath(); ctx.arc(cx + c[0], cy + c[1], 9, 0, 2 * Math.PI)
-                if (overlay.hand.aim) { ctx.strokeStyle = "#46E5BD"; ctx.lineWidth = 2; ctx.stroke() }   // where it would click
-                else { ctx.fillStyle = "#46E5BD"; ctx.fill() }                                          // clicking / dragging here
+            if (!overlay.hand.grip) {
+                ctx.beginPath(); ctx.arc(width / 2, height / 2, 9, 0, 2 * Math.PI)      // the cursor: where it clicks
+                if (overlay.hand.aim) { ctx.strokeStyle = "#46E5BD"; ctx.lineWidth = 2; ctx.stroke() }
+                else { ctx.fillStyle = "#46E5BD"; ctx.fill() }
             }
         }
     }
