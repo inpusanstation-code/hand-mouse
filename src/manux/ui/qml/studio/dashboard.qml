@@ -338,6 +338,13 @@ ApplicationWindow {
                                 onPicked: function (value) { dashboard.setMovementStyle(value) }
                             }
                             ActionButton {
+                                objectName: "drawVirtualBox"
+                                Layout.fillWidth: true
+                                visible: dashboard.movementStyle === "virtual"
+                                text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
+                                onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
+                            }
+                            ActionButton {
                                 Layout.fillWidth: true
                                 enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                 text: dashboard.motionLabel
@@ -576,6 +583,7 @@ ApplicationWindow {
                             fillMode: Image.PreserveAspectFit
 
                     Current.HandSkeleton { anchors.fill: parent; bridge: dashboard; imageWidth: parent.paintedWidth; imageHeight: parent.paintedHeight }
+                    Current.VirtualBoxLayer { anchors.fill: parent; bridge: dashboard; imageWidth: parent.paintedWidth; imageHeight: parent.paintedHeight }
                 }
                         Item {
                             visible: dashboard.recMode === "guided" && dashboard.recCondition !== ""

@@ -523,3 +523,24 @@ def test_virtual_hand_overlay_follows_the_palm_and_fades_after_a_loss(bridge):
     rt.view = (3, ViewFrame(None))
     b.poll(); QTest.qWait(20)
     assert b.virtualHand == {} and not overlay.property("visible")
+
+
+def test_virtual_box_is_drawn_on_the_preview_and_saved(bridge):
+    from PySide6.QtCore import QObject
+    from PySide6.QtTest import QTest
+    b, rt = bridge
+    b.control_hand = "Right"; b.finishSplash()
+    if b.stage != "main":
+        b._set_stage("main")
+    b.setMovementStyle("virtual"); QTest.qWait(20)
+    layers = [o for o in b.window.findChildren(QObject, "virtualBoxLayer")]
+    assert layers and any(o.property("visible") for o in layers)
+    assert b.virtualBox == [.2, .15, .8, .85]
+    b.setBoxEditing(True)
+    assert b.boxEditing
+    assert b.setVirtualBox(.7, .9, .3, .2)                                   # either drag direction
+    assert b.virtualBox == [.3, .2, .7, .9] and not b.boxEditing
+    assert rt.settings.get("virtual_hand.box_left") == .3
+    assert not b.setVirtualBox(.3, .3, .35, .9) and b.virtualBox == [.3, .2, .7, .9]   # too narrow: refused
+    b.setMovementStyle("palm"); QTest.qWait(20)
+    assert not any(o.property("visible") for o in layers)

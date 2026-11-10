@@ -999,6 +999,36 @@ class Bridge(QObject):
                 return
         self.setPointerPreset(style == "index")
 
+    BOX_KEYS = ("virtual_hand.box_left", "virtual_hand.box_top", "virtual_hand.box_right", "virtual_hand.box_bottom")
+
+    @Property("QVariantList", notify=stateChanged)
+    def virtualBox(self):
+        """[x0, y0, x1, y1] on the camera image, 0..1: the area that stands for the whole monitor."""
+        return [float(self.settings.get(k)) for k in self.BOX_KEYS]
+
+    @Property(bool, notify=stateChanged)
+    def boxEditing(self):
+        return bool(getattr(self, "_box_editing", False))
+
+    @Slot(bool)
+    def setBoxEditing(self, on):
+        self._box_editing = bool(on)
+        self.stateChanged.emit()
+
+    @Slot(float, float, float, float, result=bool)
+    def setVirtualBox(self, x0, y0, x1, y1):
+        """From a drag on the preview, either direction. A box under 10% of the image either way is refused."""
+        box = [round(min(1.0, max(0.0, v)), 4) for v in (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))]
+        self._box_editing = False
+        if box[2] - box[0] < .1 or box[3] - box[1] < .1:
+            self.stateChanged.emit()
+            return False
+        for key, value in zip(self.BOX_KEYS, box):
+            self.settings.set(key, value)
+        self._save()
+        self.stateChanged.emit()
+        return True
+
     @Slot()
     def togglePointerPreset(self):
         self.setPointerPreset(not self.use_index_pointer)

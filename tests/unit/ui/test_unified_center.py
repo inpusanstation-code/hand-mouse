@@ -118,6 +118,13 @@ def test_everyday_section_on_the_recording_page_switches_and_lists(tmp_path):
         popup.setProperty("pageIndex", 1); QTest.qWait(40)
         check = b.window.findChild(QQuickItem, "everydayCollect")
         assert check is not None and check.isVisible() and not check.property("checked")
+        for width in (780, 1140):                       # the label must fit its column (2026-11-10 report: it spilled out)
+            b.window.setWidth(width); QTest.qWait(30)
+            label = b.window.findChild(QQuickItem, "everydayCollectLabel")
+            box = check.parentItem().parentItem().parentItem()
+            right = label.mapToItem(box, label.property("width"), 0).x()
+            assert label.isVisible() and right <= box.property("width") + 1, (width, right, box.property("width"))
+            assert label.property("lineCount") >= 1 and label.property("contentWidth") <= label.property("width") + 1
         b.setEverydayCollect(True); QTest.qWait(20)
         assert settings.get("data.collect_everyday") is True and check.property("checked")
         b.refreshEveryday()
@@ -125,5 +132,46 @@ def test_everyday_section_on_the_recording_page_switches_and_lists(tmp_path):
         assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Cannot assign", "Binding loop"))], messages
     finally:
         qInstallMessageHandler(None)
+        b.close()
+        runtime.stop()
+
+
+def test_checking_a_task_keeps_the_list_where_it_was(tmp_path):
+    """2026-11-10 report: checking a task scrolled the list to the top, so another row's check sat under the pointer."""
+    from manux.desktop import build
+    from types import SimpleNamespace
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    service = TrainingCenterService(tmp_path/'config', tmp_path/'data', tmp_path/'recordings', specs=training_specs())
+    service.configure("synthetic")
+    b = Bridge(runtime, settings, tmp_path/'config', services={"training_center": service}, layout="studio")
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        assert QMetaObject.invokeMethod(b.window.findChild(QObject, "openLearningCenter"), "click")
+        for _ in range(80):
+            QTest.qWait(30)
+            if not b.studio.busy and not b.training_busy:
+                break
+        popup = b.window.findChild(QObject, "studioDataManagement")
+        b.window.setWidth(1140); b.window.setHeight(720)
+        popup.setProperty("pageIndex", 0); QTest.qWait(60)
+        tasks = b.window.findChild(QQuickItem, "trainingTasks")
+        assert tasks.property("contentHeight") > tasks.property("height") + 200, "needs a list longer than the view"
+        tasks.setProperty("contentY", 200.0); QTest.qWait(40)
+        before = tasks.property("contentY")
+        def items(item):
+            for child in item.childItems():
+                yield child
+                yield from items(child)
+        visible_checks = [c for c in items(tasks) if c.objectName().startswith("taskCheck_")
+                          and c.isVisible() and 0 <= c.mapToItem(tasks, 0, 0).y() < tasks.property("height") - 40]
+        check = visible_checks[len(visible_checks) // 2]
+        key = check.objectName().removeprefix("taskCheck_")
+        was = key in b.training_selected
+        assert QMetaObject.invokeMethod(check, "click")
+        QTest.qWait(80)
+        assert (key in b.training_selected) != was
+        assert abs(tasks.property("contentY") - before) < 5, (before, tasks.property("contentY"))
+    finally:
         b.close()
         runtime.stop()

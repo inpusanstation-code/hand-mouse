@@ -127,6 +127,16 @@ Popup {
                             Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0; Layout.minimumWidth: 120
                             clip: true; spacing: 6; model: studio.controller.trainingRows.filter(function(r){return !studio.search || (r.name+" "+r.instruction).toLowerCase().indexOf(studio.search.toLowerCase())>=0})
                             ScrollBar.vertical: ScrollBar {}
+                            // A check rebuilds trainingRows, and a new model scrolls the list back to the top, so the row
+                            // under the pointer changed (2026-11-10 report). Keep the scroll position across that rebuild.
+                            property real keepY: -1
+                            onModelChanged: {
+                                if (keepY < 0) return
+                                const y = keepY; keepY = -1
+                                Qt.callLater(function() {
+                                    tasks.contentY = Math.max(tasks.originY, Math.min(y, tasks.originY + tasks.contentHeight - tasks.height))
+                                })
+                            }
                             delegate: Rectangle {
                                 id: task; required property var modelData
                                 width: tasks.width; height: taskContent.implicitHeight+20
@@ -136,7 +146,7 @@ Popup {
                                 TapHandler { onTapped: studio.detailKey=task.modelData.key }
                                 RowLayout {
                                     id: taskContent; anchors {left:parent.left;right:parent.right;top:parent.top;margins:10}
-                                    StudioCheck { objectName: "taskCheck_"+task.modelData.key; checked: task.modelData.selected; Accessible.name: task.modelData.name+" 선택"; onClicked: {studio.detailKey=task.modelData.key;studio.controller.setTrainingSelected(task.modelData.key,checked)} }
+                                    StudioCheck { objectName: "taskCheck_"+task.modelData.key; checked: task.modelData.selected; Accessible.name: task.modelData.name+" 선택"; onClicked: {tasks.keepY=tasks.contentY;studio.detailKey=task.modelData.key;studio.controller.setTrainingSelected(task.modelData.key,checked)} }
                                     ColumnLayout {
                                         Layout.fillWidth: true; spacing: 3
                                         Copy { Layout.fillWidth: true; text: task.modelData.name; font.bold: true }

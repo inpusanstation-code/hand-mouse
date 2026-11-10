@@ -274,13 +274,42 @@ class Grip:
 SIZE_PX = 110.0          # wrist -> middle-finger knuckle of the drawn hand, logical pixels (the click offset unit)
 
 
-def view_points(lm: Landmarks, width: int, height: int, size_px: float = SIZE_PX) -> Optional[List[float]]:
-    """The 21 joints relative to the palm centre, scaled so the hand is `size_px` big: [x0, y0, x1, y1, ...] (logical
-    px). A far, small hand is drawn as large as a near one. None for a degenerate hand."""
+# Palm segments for the size estimate: their 3D length never changes, their 2D length shrinks when they turn away.
+SIZE_SEGMENTS = ((0, 5), (0, 9), (0, 13), (0, 17), (5, 17), (5, 9), (9, 13), (13, 17), (1, 5))
+
+
+def hand_size_px(lm: Landmarks, width: int, height: int, world: Optional[Landmarks] = None) -> Optional[float]:
+    """Wrist -> middle knuckle as it would look facing the camera, in image pixels.
+
+    The plain 2D wrist -> middle knuckle length collapses when the fingers turn toward the camera, which drew a huge
+    hand (2026-11-10 report). With the 3D world joints (metres, the same whatever the turn), the palm segment lying
+    flattest to the image gives the pixels per metre; times the 3D palm length it is the size. Without world joints:
+    the largest of a few 2D palm lengths divided by their usual share of the palm length."""
     pts = _pixels(lm, width, height)
     if pts is None:
         return None
-    k = size_px / math.dist(pts[0], pts[9])
+    if world is not None and len(world) == 21:
+        ratios = []
+        for a, b in SIZE_SEGMENTS:
+            metres = math.dist(world[a], world[b])
+            if metres > 1e-4:
+                ratios.append(math.dist(pts[a], pts[b]) / metres)
+        palm_m = math.dist(world[0], world[9])
+        if ratios and palm_m > 1e-4:
+            return max(ratios) * palm_m
+    shares = {(0, 9): 1.0, (0, 5): .95, (0, 17): .85, (5, 17): .75}
+    return max(math.dist(pts[a], pts[b]) / share for (a, b), share in shares.items())
+
+
+def view_points(lm: Landmarks, width: int, height: int, size_px: float = SIZE_PX,
+                hand_px: Optional[float] = None) -> Optional[List[float]]:
+    """The 21 joints relative to the palm centre, scaled so the hand is `size_px` big: [x0, y0, x1, y1, ...] (logical
+    px). A far, small hand is drawn as large as a near one. `hand_px` is the hand's size in the image
+    (`hand_size_px`, smoothed by the caller); the plain wrist -> middle knuckle length when not given."""
+    pts = _pixels(lm, width, height)
+    if pts is None:
+        return None
+    k = size_px / max(1.0, hand_px if hand_px else math.dist(pts[0], pts[9]))
     cx, cy = palm_centre(lm)
     ox, oy = cx * width, cy * height
     flat: List[float] = []

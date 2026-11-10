@@ -242,3 +242,25 @@ def test_the_runtime_hands_the_drawing_to_the_ui_only_in_this_mode():
     finally:
         runtime.engine.sinks.pop(OutputTarget.WINDOWS, None)
         runtime.stop()
+
+
+def test_turning_the_hand_toward_the_camera_does_not_blow_up_the_drawing():
+    """2026-11-10 report: fingers turned toward the camera drew a huge hand (the 2D wrist -> knuckle length collapsed)."""
+    world = tuple((x - .5, y - .7, 0.0) for x, y, _ in OPEN)                   # metres-ish, flat palm
+    facing = OPEN
+    turned = tuple((x, .70 + (y - .70) * .25, z) for x, y, z in OPEN)          # same hand, fingers pointing at the camera
+    flat_size = shapes.hand_size_px(facing, W, H, world)
+    assert shapes.hand_size_px(turned, W, H, world) == pytest.approx(flat_size, rel=.05)
+    import math
+    naive = lambda lm: math.dist((lm[0][0] * W, lm[0][1] * H), (lm[9][0] * W, lm[9][1] * H))
+    assert naive(turned) < .3 * naive(facing)                                # what used to scale the drawing
+    assert shapes.hand_size_px(turned, W, H) >= .7 * shapes.hand_size_px(facing, W, H)   # no world: palm width rescues
+
+
+def test_the_drawn_size_follows_slowly_not_in_one_frame():
+    f = vh.VirtualHandFeature()
+    run(f, [OPEN] * 10)
+    before = max(abs(v) for v in f.last_view["pts"])
+    small = tuple((.5 + (x - .5) * .5, .6 + (y - .6) * .5, z) for x, y, z in OPEN)   # hand suddenly half the size
+    run(f, [small], t0=2.0)
+    assert max(abs(v) for v in f.last_view["pts"]) < 1.5 * before

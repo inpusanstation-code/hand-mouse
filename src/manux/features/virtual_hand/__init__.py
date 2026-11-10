@@ -26,8 +26,8 @@ from typing import List, Optional, Sequence, Tuple
 
 from manux.core.contracts import Activity, FrameContext, HandObservation, Intent
 from manux.features.virtual_hand.shapes import (SIZE_PX, BoxMapper, Grip, ShapePinch, ShapeSwitch, ShapeTriple,
-                                                ViewSmoother, is_fist, palm_centre, pinch_point, triple_point,
-                                                valid_box, view_points)
+                                                OneEuro, ViewSmoother, hand_size_px, is_fist, palm_centre,
+                                                pinch_point, triple_point, valid_box, view_points)
 
 __all__ = ["ID", "MODE", "GESTURES", "GESTURE_PHASES", "DEFAULT_BINDINGS", "SETTINGS", "VirtualHandFeature"]
 
@@ -63,12 +63,13 @@ class VirtualHandFeature:
         self.switch = ShapeSwitch()
         self.grip = Grip()
         self.smoother = ViewSmoother()
+        self.size_filter = OneEuro(.3, .002)       # the drawn hand's scale changes slowly, never in one frame
         self.last_view: Optional[dict] = None      # the hand to draw on the screen (read by the UI, never by others)
         self.reset("init")
 
     # ------------------------------------------------------------------ Feature protocol
     def reset(self, reason: str) -> None:
-        for part in (self.box, self.pinch, self.triple, self.switch, self.grip, self.smoother):
+        for part in (self.box, self.pinch, self.triple, self.switch, self.grip, self.smoother, self.size_filter):
             part.reset()
         self._since: Optional[float] = None       # when thumb + index closed (this press)
         self._dragging = False
@@ -138,7 +139,8 @@ class VirtualHandFeature:
             point = second                         # exactly the first click's point: Windows pairs them
 
         # ---- the drawn hand, and where its fingers meet: a click lands there, not at the palm
-        drawn = view_points(lm, w, h)
+        size = hand_size_px(lm, w, h, hand.world)
+        drawn = view_points(lm, w, h, hand_px=self.size_filter((size,), t)[0] if size else None)
         if drawn is not None:
             drawn = self.smoother(drawn, t)
         meet = None
