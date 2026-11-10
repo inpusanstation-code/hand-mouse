@@ -126,6 +126,15 @@ ApplicationWindow {
                     }
                 }
                 Divider {}
+                SectionLabel { text: "창 닫기" }
+                CheckBox {
+                    objectName: "closeToTray"
+                    visible: dashboard.trayAvailable
+                    text: "창 닫기(X)를 누르면 트레이로 숨기기 (끄면 완전히 종료)"
+                    checked: dashboard.closeToTray
+                    onClicked: dashboard.setCloseToTray(checked)
+                }
+                Divider {}
                 SectionLabel { text: "어디서든 쓰는 단축키" }
                 Repeater {
                     model: [["toggle", "켜기 / 끄기"], ["hide", "창 숨기기 / 보이기"], ["emergency", "긴급 정지"]]
@@ -216,6 +225,16 @@ ApplicationWindow {
                         font.pixelSize: 11
                     }
                     SectionLabel { text: "이동 방식" }
+                    ActionButton {
+                        objectName: "settingsPointerSetup"
+                        Layout.fillWidth: true
+                        visible: dashboard.pointerSetupAvailable && !dashboard.pointerOnly
+                        enabled: dashboard.recMode === "off" && !dashboard.trackingActive
+                        text: "커서 자동 설정"
+                        onClicked: { settingsDialog.close(); dashboard.beginPointerSetup() }
+                        ToolTip.visible: hovered; ToolTip.delay: 400
+                        ToolTip.text: "화면 몇 곳을 손으로 가리키며 내 자세에 맞는 커서 범위·속도를 자동으로 맞춥니다. 자리나 카메라를 바꿨을 때 쓰세요."
+                    }
                     Segmented {
                         enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                         options: [["palm", "손바닥 (기본)"], ["index", "검지 포인터 (시험)"], ["virtual", "가상 손 (시험)"]]
@@ -592,6 +611,12 @@ ApplicationWindow {
                 x: (mainScroll.availableWidth - width) / 2
                 spacing: 16
                 Item { Layout.preferredHeight: 4 }
+                Comp.CustomPoses {                                  // the first thing on the page (2026-11-10 request)
+                    objectName: "mainCustomPoses"
+                    Layout.fillWidth: true
+                    controller: dashboard
+                    idle: !dashboard.recActive
+                }
                 Rectangle {
                     Layout.fillWidth: true
                     implicitHeight: statusColumn.implicitHeight + 32
@@ -725,12 +750,7 @@ ApplicationWindow {
                             text: dashboard.boxEditing ? "그리는 중 · 미리보기에서 끌어 그리세요 · 누르면 취소" : "손 움직일 영역 다시 그리기 (가상 손)"
                             onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
                         }
-                        Comp.CustomPoses {
-                            objectName: "mainCustomPoses"
-                            Layout.fillWidth: true
-                            controller: dashboard
-                            idle: !dashboard.recActive
-                        }
+
                         RowLayout {
                             visible: !dashboard.pointerOnly && !dashboard.calibratingPointer
                             Layout.fillWidth: true
@@ -807,12 +827,6 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     TextLabel { text: "쓸 수 있는 동작"; font.pixelSize: 18; font.bold: true }
                     Item { Layout.fillWidth: true }
-                    ActionButton {
-                        visible: dashboard.pointerSetupAvailable && !dashboard.pointerOnly
-                        enabled: dashboard.recMode === "off" && !dashboard.trackingActive
-                        text: "커서 자동 설정"
-                        onClicked: dashboard.beginPointerSetup()
-                    }
                     ActionButton {
                         visible: dashboard.tutorialAvailable
                         text: "동작 다시 배우기"

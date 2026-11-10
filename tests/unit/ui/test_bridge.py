@@ -544,3 +544,26 @@ def test_virtual_box_is_drawn_on_the_preview_and_saved(bridge):
     assert not b.setVirtualBox(.3, .3, .35, .9) and b.virtualBox == [.3, .2, .7, .9]   # too narrow: refused
     b.setMovementStyle("palm"); QTest.qWait(20)
     assert not any(o.property("visible") for o in layers)
+
+
+def test_closing_with_x_can_quit_instead_of_hiding_to_the_tray(tmp_path):
+    from manux.ui.bridge import Bridge
+    settings = Settings(schema())
+    rt = FakeRuntime(settings)
+    b = Bridge(rt, settings, tmp_path, hide_to_tray=True)
+    try:
+        assert b.trayAvailable and b.closeToTray and b.hidesToTray          # default: X hides to the tray
+        b.setCloseToTray(False)
+        assert not b.hidesToTray and not b.closed
+        b.window.close()                                                   # X: quits now
+        assert b.closed
+    finally:
+        b.close()
+    b2 = Bridge(FakeRuntime(settings), settings, tmp_path, hide_to_tray=True)
+    try:
+        assert not b2.hidesToTray                                         # the choice is remembered
+        b2.setCloseToTray(True)
+        b2.window.close()
+        assert not b2.closed and not b2.window.isVisible()                # back to hiding
+    finally:
+        b2.close()

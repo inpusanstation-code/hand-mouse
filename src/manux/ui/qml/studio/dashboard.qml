@@ -319,8 +319,6 @@ ApplicationWindow {
                     anchors.fill: parent
                     anchors.margins: 16
                     spacing: 8
-                    Current.QuickSpeedControls { Layout.fillWidth: true; controller: dashboard }
-                    ActionButton { text: "동작 다시 배우기"; Layout.fillWidth: true; onClicked: dashboard.beginTutorial() }
                     ScrollView {
                         id: sideScroll
                         Layout.fillWidth: true
@@ -330,7 +328,13 @@ ApplicationWindow {
                         ColumnLayout {
                             width: sideScroll.availableWidth
                             spacing: 8
-                            TextLabel { text: "포인터"; font.pixelSize: 20; font.bold: true }
+                            Comp.CustomPoses {
+                                objectName: "mainCustomPoses"
+                                Layout.fillWidth: true
+                                controller: dashboard
+                                idle: !dashboard.recActive
+                            }
+                            TextLabel { text: "이동 방식"; font.pixelSize: 17; font.bold: true; Layout.topMargin: 6 }
                             Segmented {
                                 enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                 options: [["index", "검지 포인터"], ["palm", "손바닥 (Dan)"], ["virtual", "가상 손 (시험)"]]
@@ -344,12 +348,9 @@ ApplicationWindow {
                                 text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
                                 onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
                             }
-                            Comp.CustomPoses {
-                                objectName: "mainCustomPoses"
-                                Layout.fillWidth: true
-                                controller: dashboard
-                                idle: !dashboard.recActive
-                            }
+                            TextLabel { text: "속도"; font.pixelSize: 17; font.bold: true; Layout.topMargin: 6 }
+                            Current.QuickSpeedControls { Layout.fillWidth: true; controller: dashboard }
+                            TextLabel { text: "동작"; font.pixelSize: 17; font.bold: true; Layout.topMargin: 6 }
                             ActionButton {
                                 Layout.fillWidth: true
                                 enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
@@ -362,29 +363,7 @@ ApplicationWindow {
                                 text: dashboard.profileLabel + (dashboard.profileCount > 0 ? "  (눌러서 바꾸기)" : "  (없음)")
                                 onClicked: dashboard.cycleProfile()
                             }
-                            RowLayout {
-                                visible: !dashboard.pointerOnly
-                                Layout.fillWidth: true
-                                spacing: 6
-                                ActionButton {
-                                    Layout.fillWidth: true
-                                    enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
-                                    text: dashboard.palmCalibrated ? "커서 방향 보정 다시" : "커서 방향 보정"
-                                    onClicked: dashboard.beginPalmCalibration()
-                                }
-                                ActionButton {
-                                    visible: dashboard.palmCalibrated && !dashboard.palmCalibrating
-                                    text: "초기화"
-                                    onClicked: dashboard.resetPalmCalibration()
-                                }
-                            }
-                            ActionButton {
-                                Layout.fillWidth: true
-                                visible: dashboard.pointerSetupAvailable && !dashboard.pointerOnly
-                                enabled: dashboard.recMode === "off" && !dashboard.trackingActive
-                                text: "커서 자동 설정"
-                                onClicked: dashboard.beginPointerSetup()
-                            }
+                            ActionButton { text: "동작 다시 배우기"; Layout.fillWidth: true; onClicked: dashboard.beginTutorial() }
                             SectionLabel { visible: !dashboard.pointerOnly && dashboard.tcnAvailable; text: "손짓 확인 (TCN: 학습된 동작)" }
                             Segmented {
                                 visible: !dashboard.pointerOnly && dashboard.tcnAvailable

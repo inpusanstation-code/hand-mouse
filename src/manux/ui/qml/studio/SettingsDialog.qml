@@ -113,6 +113,44 @@ Dialog {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
+                    visible: tabs.currentIndex === 1 && !settings.controller.pointerOnly
+                    spacing: 4
+                    Label { text: "커서 보정"; font.bold: true; color: "#112331" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Button {
+                            objectName: "settingsPalmCalibration"
+                            Layout.fillWidth: true
+                            enabled: !settings.controller.palmCalibrating && !settings.controller.trackingActive
+                            text: settings.controller.palmCalibrated ? "커서 방향 보정 다시" : "커서 방향 보정"
+                            onClicked: { settings.close(); settings.controller.beginPalmCalibration() }
+                            ToolTip.visible: hovered; ToolTip.delay: 400
+                            ToolTip.text: "손을 위·아래·왼쪽·오른쪽으로 움직여 카메라 각도를 잽니다. 손을 곧게 움직여도 커서가 비스듬히 가는 문제를 바로잡습니다."
+                        }
+                        Button {
+                            visible: settings.controller.palmCalibrated && !settings.controller.palmCalibrating
+                            text: "초기화"
+                            onClicked: settings.controller.resetPalmCalibration()
+                            ToolTip.visible: hovered; ToolTip.delay: 400; ToolTip.text: "방향 보정을 지우고 보정 전 방향으로 돌아갑니다."
+                        }
+                    }
+                    Button {
+                        objectName: "settingsPointerSetup"
+                        Layout.fillWidth: true
+                        visible: settings.controller.pointerSetupAvailable
+                        enabled: settings.controller.recMode === "off" && !settings.controller.trackingActive
+                        text: "커서 자동 설정"
+                        onClicked: { settings.close(); settings.controller.beginPointerSetup() }
+                        ToolTip.visible: hovered; ToolTip.delay: 400
+                        ToolTip.text: "화면 몇 곳을 손으로 가리키며 내 자세에 맞는 커서 범위·속도를 자동으로 맞춥니다. 자리나 카메라를 바꿨을 때 쓰세요."
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.Wrap; color: "#526575"; font.pixelSize: 12
+                        text: "자리·카메라를 바꿨거나 커서가 비스듬히·좁게 움직일 때 쓰세요. 누르면 설정 창이 닫히고 안내가 시작됩니다."
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
                     visible: tabs.currentIndex === 1
                     Label { text: "검지 포인터 추가 감도 · " + settings.controller.pointerSensitivity + "%"; color: "#112331" }
                     Slider {
@@ -134,6 +172,13 @@ Dialog {
                         text: "화면 구석 상태 표시"
                         checked: settings.controller.overlayVisible
                         onClicked: settings.controller.setOverlayVisible(checked)
+                    }
+                    CheckBox {
+                        objectName: "closeToTray"
+                        visible: settings.controller.trayAvailable
+                        text: "창 닫기(X)를 누르면 트레이로 숨기기 (끄면 완전히 종료)"
+                        checked: settings.controller.closeToTray
+                        onClicked: settings.controller.setCloseToTray(checked)
                     }
                     Button {
                         text: "데이터 관리 · 녹화 별명 · train / eval"

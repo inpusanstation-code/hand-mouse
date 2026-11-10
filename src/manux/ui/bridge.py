@@ -2929,9 +2929,23 @@ class Bridge(QObject):
     def quitApp(self):
         self.closed = True
 
-    @Property(bool, constant=True)
+    @Property(bool, notify=stateChanged)
     def hidesToTray(self):
+        """X hides the window to the tray: only when a tray exists and the person has not chosen to quit on X."""
+        return self.hide_to_tray and self.closeToTray
+
+    @Property(bool, notify=stateChanged)
+    def trayAvailable(self):
         return self.hide_to_tray
+
+    @Property(bool, notify=stateChanged)
+    def closeToTray(self):
+        return self.preferences.value("closeToTray", True, type=bool)
+
+    @Slot(bool)
+    def setCloseToTray(self, on):
+        self.preferences.setValue("closeToTray", bool(on))
+        self.stateChanged.emit()
 
     @Slot()
     def hideDashboard(self):

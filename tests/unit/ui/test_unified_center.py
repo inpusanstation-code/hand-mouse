@@ -294,3 +294,35 @@ def test_fist_style_choice_on_the_first_page_switches_both_speeds(tmp_path, layo
         qInstallMessageHandler(None)
         b.close()
         runtime.stop()
+
+
+@pytest.mark.parametrize("layout", ["standard", "studio"])
+def test_first_page_order_and_calibration_moved_to_settings(tmp_path, layout):
+    from manux.desktop import build, CustomPoses
+    from types import SimpleNamespace
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    runtime.custom_poses = CustomPoses(tmp_path / "cp")
+    runtime.pointer_setup_dir = tmp_path
+    b = Bridge(runtime, settings, tmp_path/'config', layout=layout)
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        if b.stage != "main":
+            b._set_stage("main")
+        b.window.setWidth(1140); b.window.setHeight(760); QTest.qWait(60)
+
+        def visible_items(item=None):
+            for child in (item or b.window.contentItem()).childItems():
+                if child.isVisible():
+                    yield child
+                    yield from visible_items(child)
+        items = list(visible_items())
+        texts = [str(i.property("text") or "") for i in items]
+        assert not any(t.startswith("커서 방향 보정") or t == "커서 자동 설정" for t in texts)   # in settings now
+        section = b.window.findChild(QQuickItem, "mainCustomPoses")
+        top = section.mapToScene(section.position() * 0).y()
+        others = [i for i in items if str(i.property("text") or "") in ("동작 다시 배우기", "쓸 수 있는 동작")]
+        assert others and all(i.mapToScene(i.position() * 0).y() > top for i in others)
+    finally:
+        b.close()
+        runtime.stop()
