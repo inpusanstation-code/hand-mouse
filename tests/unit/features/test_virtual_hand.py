@@ -115,7 +115,7 @@ def test_a_fist_scrolls_and_lets_go_after_the_grace():
 
 def test_scroll_direction_setting_flips_the_page_way():
     def first_y(settings):
-        out, _ = run(vh.VirtualHandFeature(), [FIST] * 2, settings=settings)
+        out, _ = run(vh.VirtualHandFeature(), [FIST] * 3, settings=settings)      # a fist starts after 3 frames
         return next(i.point[1] for i in out if i.gesture == vh.SCROLL)
     cx, _ = shapes.palm_centre(FIST)
     assert first_y({}) == pytest.approx(1 - cx) and first_y({"scroll_follows_page": True}) == pytest.approx(cx)
@@ -226,14 +226,17 @@ def steps(points):
     return [math.dist(a, b) for a, b in zip(points, points[1:])]
 
 
-def test_releasing_a_hold_eases_to_the_hand_instead_of_jumping():
+def test_releasing_a_hold_follows_the_hand_from_the_held_point_without_an_extra_ease():
+    """2026-11-10 restored from the hand-mouse virtual-hand branch: no 0.2 s ease after a hold ('stops, then fast')."""
     f = vh.VirtualHandFeature()
     still = [OPEN] * 10
     pinched_moving = [tuple((x + .006 * k, y, z) for x, y, z in PINCH) for k in range(10)]   # moves while held
     after = [tuple((x + .06, y, z) for x, y, z in OPEN)] * 15
     out, _ = run(f, still + pinched_moving + after)
     pts = [i.point for i in out if i.gesture == vh.PLACE]
-    assert max(steps(pts[19:])) < .5 * (pts[-1][0] - pts[19][0])            # no single-frame landing
+    held, final = pts[18][0], pts[-1][0]
+    assert abs(pts[19][0] - held) < 1e-6 or pts[19][0] > held                # starts from the held point
+    assert abs(pts[24][0] - final) < .25 * abs(final - held)                 # most of the way within 5 frames (no 0.2 s ramp)
     assert abs(pts[-1][0] - pts[-2][0]) < 1e-3                               # and it arrives
 
 
@@ -310,3 +313,154 @@ def test_fist_browsing_speed_is_a_setting_and_slower_by_default():
     from manux.actions.router import Router
     cmd = Router({vh.SCROLL: Binding("mouse.scroll")}).route(scrolls[0]).command
     assert cmd.params["gain"] == .25                                      # what the sink scrolls with
+
+
+def test_drawn_hand_size_and_full_resolution_crop_are_settings_on_by_default():
+    """2026-11-10: the drawn hand was too small (110 px) and a small hand in the camera gave false clicks."""
+    from types import SimpleNamespace
+    from manux.app import schema
+    from manux.desktop import build
+    from manux.engine.commands import SetBaseMode
+    from manux.settings.store import Settings
+    settings = Settings(schema())
+    assert settings.get("virtual_hand.draw_size") == 160.0 and settings.get("virtual_hand.hand_crop") is True
+    asked = []
+    source = SimpleNamespace(close=lambda: None, error="", read=lambda hand, crop: asked.append(crop))
+    runtime = build(settings, source, windows=False)
+    try:
+        runtime.step(); assert asked[-1] is False                     # pinch mode: tracking.hand_crop (off)
+        runtime.engine.commands.put(SetBaseMode("virtual_hand")); runtime.engine.frame_missing(1.0)
+        runtime.step(); assert asked[-1] is True                      # virtual hand: full-resolution crop
+        settings.set("virtual_hand.hand_crop", False)
+        runtime.step(); assert asked[-1] is False
+    finally:
+        runtime.stop()
+    lm = [(.5 + .01 * (i % 5), .5 + .01 * (i // 5), 0.) for i in range(21)]
+    small = shapes.view_points(lm, 1280, 720, size_px=110.0)
+    big = shapes.view_points(lm, 1280, 720, size_px=160.0)
+    assert abs(big[8] / small[8] - 160 / 110) < 1e-2
+
+
+def test_a_brief_fist_does_not_freeze_the_cursor_and_a_held_one_keeps_its_grace():
+    """2026-11-10: a relaxed hand read as a fist for a frame or two froze the cursor, then it jumped after."""
+    g = shapes.Grip()
+    assert not g.step(True, 0.0) and not g.step(True, .033) and g.step(True, .066)      # 3 frames to start
+    assert not g.step(False, .1)                                                       # short fist: no grace
+    g = shapes.Grip()
+    for k in range(15):
+        g.step(True, k / 30)                                                           # held 0.5 s
+    assert g.step(False, .55) and g.step(False, .9) and not g.step(False, 1.0)        # 0.4 s grace
+
+
+def test_fist_uses_the_3d_joints_when_given():
+    flat = [(0., 0., 0.)] * 21
+    world = [list(p) for p in flat]
+    for pip, tip in ((6, 8), (10, 12), (14, 16), (18, 20)):
+        world[pip] = [0., .05, 0.]
+        world[tip] = [0., .046, 0.]                     # 92%: barely curled -> not a fist (FIST_CURL .9)
+    open_ish = [tuple(p) for p in world]
+    assert not shapes.is_fist(FIST, open_ish)
+    for _pip, tip in ((6, 8), (10, 12), (14, 16), (18, 20)):
+        world[tip] = [0., .03, 0.]
+    assert shapes.is_fist(OPEN, [tuple(p) for p in world])   # the 3D joints decide, not the 2D picture
+
+
+def _run_world(feature, frames, t0=1.0, fps=30):
+    """Like run() but with world joints (the image points as metres: enough for the shape checks)."""
+    out, t = [], t0
+    for lm in frames:
+        frame = FrameInfo(seq=int(t * 1000), t=t, width=W, height=H, mirrored=True)
+        obs = HandObservation(frame=frame, landmarks=lm, handedness="Right", score=.99, world=lm)
+        out.extend(feature.step(obs, FrameContext(frame, Stage.MAIN, OutputTarget.WINDOWS, vh.MODE, settings={})))
+        t += 1 / fps
+    return out, t
+
+
+class _Shape:
+    threshold = .4
+
+    def __init__(self, value):
+        self.value, self.calls = value, 0
+
+    def score(self, world):
+        self.calls += 1
+        return self.value
+
+
+def test_a_click_needs_the_persons_pinch_shape_not_only_touching_tips():
+    """2026-11-10: the virtual hand works on the pinch hand shape, not on two fingertips meeting."""
+    f = vh.VirtualHandFeature()
+    f.shape_model = _Shape(.1)                                    # tips touch, but not the person's pinch shape
+    out, _ = _run_world(f, [OPEN] * 3 + [PINCH] * 3 + [OPEN] * 3)
+    assert not taps(out, vh.LEFT) and f.shape_model.calls > 0
+    f = vh.VirtualHandFeature()
+    f.shape_model = _Shape(.9)
+    out, _ = _run_world(f, [OPEN] * 3 + [PINCH] * 3 + [OPEN] * 3)
+    assert len(taps(out, vh.LEFT)) == 1
+    f = vh.VirtualHandFeature()                                   # no model: contact alone, as before
+    out, _ = _run_world(f, [OPEN] * 3 + [PINCH] * 3 + [OPEN] * 3)
+    assert len(taps(out, vh.LEFT)) == 1
+
+
+def test_no_right_click_from_a_curled_hand_or_a_fist_forming():
+    """2026-11-10 '자꾸 이유없이 우클릭': three tips together with the ring and little fingers curled is not a right click."""
+    curled = hand({8: (.475, .49), 12: (.48, .49), 4: (.4775, .495), 16: (.52, .62), 20: (.55, .62)})
+    out, _ = run(vh.VirtualHandFeature(), [OPEN] * 3 + [curled] * 6 + [OPEN] * 3)
+    assert not taps(out, vh.RIGHT)
+    out, _ = run(vh.VirtualHandFeature(), [OPEN] * 3 + [TRIPLE] * 6 + [OPEN] * 3)
+    assert len(taps(out, vh.RIGHT)) == 1                                           # the real right-click shape
+    out, _ = run(vh.VirtualHandFeature(), [OPEN] * 3 + [TRIPLE] * 2 + [OPEN] * 3)
+    assert not taps(out, vh.RIGHT)                                                 # 2 frames are not enough
+    out, _ = run(vh.VirtualHandFeature(), [FIST] * 5 + [TRIPLE] * 6 + [OPEN] * 3)
+    assert not taps(out, vh.RIGHT)                                                 # right after a fist
+
+
+def test_drawn_hand_has_the_pictures_shape_and_a_steady_size_when_bent_or_turned():
+    """2026-11-10: bending the hand drew it abnormally small; the 3D-based drawings then looked twisted. The shape is the
+    camera picture's; the size is the larger of the palm length and the knuckle row, so bending or turning keeps it."""
+    import math as _m
+
+    def squash(lm, sx, sy):                                    # bent down (sy < 1) / turned edge-on (sx < 1)
+        cx, cy = shapes.palm_centre(lm)
+        return tuple((cx + (x - cx) * sx, cy + (y - cy) * sy, z) for x, y, z in lm)
+
+    def palm(pts):
+        return max(_m.dist(pts[0:2], pts[18:20]), _m.dist(pts[10:12], pts[34:36]) / shapes.HandDrawer.ACROSS)
+
+    sizes = []
+    for sx, sy in ((1, 1), (1, .55), (.6, 1)):
+        d = shapes.HandDrawer()
+        lm = squash(OPEN, sx, sy)
+        pts = d(lm, None, W, H, size_px=160.0, now=0.0)
+        img = [(p[0] * W, p[1] * H) for p in lm]
+        k = pts[18] / (img[9][0] - shapes.palm_centre(lm)[0] * W) if abs(img[9][0] - shapes.palm_centre(lm)[0] * W) > 1e-6 else             pts[19] / (img[9][1] - shapes.palm_centre(lm)[1] * H)
+        assert all(abs(pts[2 * i] - k * (img[i][0] - shapes.palm_centre(lm)[0] * W)) < .2 for i in range(21))   # same shape
+        sizes.append(palm(pts))
+    assert max(sizes) - min(sizes) < 0.15 * 160.0, sizes                          # bent or turned: about the same size
+
+
+def test_drawn_hand_shows_pinch_lines_and_the_action_name_for_a_moment():
+    """2026-11-10 restored from the hand-mouse virtual-hand branch: near / pinched / action lines and '좌클릭' text."""
+    f = vh.VirtualHandFeature()
+    near = hand({4: (.462, .53)})                                                 # thumb on its way to the index tip
+    run(f, [OPEN] * 3 + [near])
+    assert f.last_view["guides"] == [["index", "near"]] and f.last_view["action"] == ""
+    run(f, [PINCH] * 3, t0=2.0)
+    assert f.last_view["guides"] == [["index", "pinched"]]
+    run(f, [OPEN], t0=2.2)
+    assert f.last_view["action"] == "좌클릭"
+    run(f, [OPEN] * 3, t0=2.4)
+    assert f.last_view["action"] == "좌클릭"                                      # still shown (0.8 s)
+    run(f, [OPEN], t0=3.5)
+    assert f.last_view["action"] == "" and f.last_view["guides"] == []
+
+
+def test_the_box_stays_inside_the_picture_where_the_hand_is_not_lost():
+    """2026-11-10: a box drawn to the image edge made the hand leave the picture to reach the monitor edge."""
+    assert shapes.safe_box((.543, .4144, .9362, .9815)) == pytest.approx((.543, .4144, .9, .9))
+    assert shapes.safe_box((.2, .15, .8, .85)) == (.2, .15, .8, .85)
+    f = vh.VirtualHandFeature()
+    bottom_right = tuple((x + .4, y + .25, z) for x, y, z in OPEN)        # palm centre at about (.905, .86)
+    out, _ = run(f, [bottom_right] * 20, settings={"box_left": .5, "box_top": .4, "box_right": .99, "box_bottom": .99})
+    pt = [i.point for i in out if i.gesture == vh.PLACE][-1]
+    assert pt[0] == pytest.approx(1.0)                                     # the monitor edge before the picture edge

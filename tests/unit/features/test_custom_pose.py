@@ -64,20 +64,22 @@ def test_a_registered_class_wins_only_inside_its_spread_and_against_known_poses(
     assert again.classify(feats(ROCK, 1))["label"] == "rock" and np.isinf(again.classes["open"].threshold)
 
 
-def test_registration_runs_prep_do_rest_checks_and_only_approval_adds_the_class():
+def test_registration_runs_rest_then_holds_learns_and_only_approval_adds_the_class():
     memory = PoseMemory()
     session = RegistrationSession("락", memory, ASPECT)
-    assert session.slot == "slot1" and session.view()["state"] == "prep"
+    assert session.slot == "slot1" and session.view()["state"] == "rest"
     demonstrate(session, ROCK)
     assert session.state == "review", session.message
     report = session.view()["report"]
-    assert report["demos"] == 5 and report["recognised"] >= 3 and report["reliable"] and not report["rest_fires"]
+    assert report["demos"] == 3 and report["recognised"] >= 2 and report["reliable"] and not report["rest_fires"]
     assert "락" not in memory.classes                              # nothing added before the person approves
     result = session.approve()
-    assert result == {"event": "class_added", "label": "락", "slot": "slot1", "prototypes": 3, "neural_weights_changed": False}
-    assert memory.classes["락"].source == USER_SOURCE
+    assert result == {"event": "class_added", "label": "락", "slot": "slot1", "prototypes": 3, "neural_weights_changed": False,
+                      "classifier": True}
+    assert memory.classes["락"].source == USER_SOURCE and memory.classes["락"].mlp is not None
     demos = session.demo_frames()
-    assert demos["label_source"] == "user_confirmed" and len(demos["demos"]) == 5 and "image" not in str(demos.keys())
+    assert demos["label_source"] == "user_confirmed" and len(demos["demos"]) == 3 and demos["rest"]
+    assert "image" not in str(demos.keys())
 
 
 def test_registration_waits_for_the_hand_and_fails_on_too_little_demonstration():
@@ -85,7 +87,7 @@ def test_registration_waits_for_the_hand_and_fails_on_too_little_demonstration()
     lm, world = pose(**ROCK)
     for k in range(30):
         session.update(k / 30, None, None)                       # no hand: the clock does not run
-    assert session.state == "prep" and not session.view()["hand"]
+    assert session.state == "rest" and not session.view()["hand"]
     demonstrate(session, ROCK)
     assert session.state == "failed" and session.message
 
@@ -105,7 +107,7 @@ def test_names_and_slots_are_checked():
 def test_recognizer_fires_once_per_hold_after_the_run():
     memory = PoseMemory()
     feats = np.concatenate([pose_features([dict(zip(("lm", "world"), pose(**ROCK, jitter=.002, seed=i)), t=0.0)], ASPECT) for i in range(30)])
-    memory.add_class("rock", feats, demo_ids=np.repeat(np.arange(3), 10), extra={"slot": "slot1"})
+    memory.add_class("rock", feats, demo_ids=np.repeat(np.arange(3), 10), extra={"slot": "slot1", "hold": 0})
     rec = PoseRecognizer(memory)
     lm, world = pose(**ROCK)
     fired = [rec.step(i / 30, lm, world, ASPECT) for i in range(10)]
@@ -125,7 +127,7 @@ def test_feature_slots_are_unbound_by_default_and_fire_their_slot():
     assert f.step(HandObservation(frame, lm, "Right", .99, world), ctx) == ()      # no memory: nothing
     memory = PoseMemory()
     feats = np.concatenate([pose_features([dict(zip(("lm", "world"), pose(**ROCK, jitter=.002, seed=i)), t=0.0)], ASPECT) for i in range(30)])
-    memory.add_class("rock", feats, demo_ids=np.repeat(np.arange(3), 10), source=USER_SOURCE, extra={"slot": "slot3"})
+    memory.add_class("rock", feats, demo_ids=np.repeat(np.arange(3), 10), source=USER_SOURCE, extra={"slot": "slot3", "hold": 0})
     f.set_memory(memory)
     out = []
     for i in range(6):
@@ -147,13 +149,18 @@ def test_register_bind_and_run_through_the_real_engine(tmp_path):
         cp.bind("slot1", "mouse.drag")                            # only tap commands
     assert (tmp_path / "custom_poses" / "memory.json").is_file() and list((tmp_path / "custom_poses" / "demos").glob("*.json"))
     again = CustomPoses(tmp_path / "custom_poses")                # survives a restart
-    assert again.view()["poses"] == [{"slot": "slot1", "name": "락", "demos": 5, "action": "nav.back", "keys": "",
-                                      "keys_label": ""}]
+    assert again.view()["poses"] == [{"slot": "slot1", "name": "락", "demos": 3, "action": "nav.back", "keys": "",
+                                      "keys_label": "", "hold": .4}]           # no earlier data: the default hold
+    again.set_hold("slot1", 1.25)
+    assert CustomPoses(tmp_path / "custom_poses").view()["poses"][0]["hold"] == 1.25
+    with pytest.raises(ValueError):
+        again.set_hold("slot1", 9)
+    again.set_hold("slot1", .4)
     engine = build_engine(Settings(schema()), "pinch")
     try:
         again.attach(engine)
         results, lm, world = [], *pose(**ROCK)
-        for i in range(8):
+        for i in range(40):                                       # longer than the gesture's hold time
             frame = FrameInfo(i, 1 + i / 30, 1280, 720, True)
             results += engine.step(frame, HandObservation(frame, lm, "Right", .99, world)).results
         assert ("nav.back", "tap", "ok") in results
@@ -172,7 +179,7 @@ def test_a_failed_registration_is_dropped_with_a_reason(tmp_path):
     cp.session.config.do_seconds = .3                            # every demonstration too short
     lm, world = pose(**ROCK)
     failed = [cp.step(k / 30, lm, world) for k in range(30 * 30)]
-    assert failed.count(True) == 1 and cp.session is None and "짧" in cp.message
+    assert failed.count(True) == 1 and cp.session is None and "지금" in cp.message
     assert not cp.step(31.0, lm, world)                          # nothing running any more
 
 
@@ -208,10 +215,108 @@ def test_a_registered_gesture_can_press_any_key_combination_including_win(tmp_pa
         engine.commands.put(SetStage(Stage.MAIN)); engine.commands.put(SetControl(True))
         lm, world = pose(**ROCK)
         results = []
-        for i in range(8):
+        for i in range(40):                                       # longer than the gesture's hold time
             frame = FrameInfo(i, 1 + i / 30, 1280, 720, True)
             results += engine.step(frame, HandObservation(frame, lm, "Right", .99, world)).results
         assert ("keys.press", "tap", "ok") in results
         assert [e[1] for e in backend.events if e[0] == "key" and e[2]] == ["shift", "win", "s"]
     finally:
         engine.shutdown()
+
+
+def test_saving_the_review_registers_the_gesture_with_its_command_and_a_refused_key_registers_nothing(tmp_path):
+    """2026-11-10: the command is picked in the review and nothing is registered before 저장."""
+    from manux.desktop import CustomPoses
+    cp = CustomPoses(tmp_path / "cp")
+    cp.start("락", ASPECT)
+    demonstrate(cp.session, ROCK)
+    assert cp.view()["poses"] == [] and cp.session.state == "review"          # reviewed, not registered yet
+    with pytest.raises(ValueError):
+        cp.approve("keys.press", "alt+f4")
+    assert cp.view()["poses"] == [] and cp.session is not None and cp.session.state == "review"
+    assert not (tmp_path / "cp" / "memory.json").exists()
+    cp.approve("keys.press", "ctrl + c")
+    row = cp.view()["poses"][0]
+    assert (row["name"], row["action"], row["keys"]) == ("락", "keys.press", "ctrl+c") and cp.session is None
+    assert CustomPoses(tmp_path / "cp").view()["poses"][0]["keys"] == "ctrl+c"   # saved to disk
+
+
+def test_the_classifier_learns_the_pose_against_the_rest_block_and_earlier_resting_hands():
+    """2026-11-10: rest and command poses recorded in separate blocks, a small MLP learns them (measured better than the
+    distance to demonstrations at the same false-fire rate on the person's recordings)."""
+    feats = lambda shape, n, seed=0: np.concatenate([pose_features([dict(zip(("lm", "world"), pose(**shape, jitter=.004, seed=seed + i)), t=0.0)], ASPECT) for i in range(n)])
+    past = [feats(OPEN, 200, 1000), feats(dict(curled=("ring", "pinky")), 200, 2000), feats(OPEN, 200, 3000)]
+    session = RegistrationSession("락", PoseMemory(), ASPECT, negatives=past)
+    demonstrate(session, ROCK)
+    report = session.view()["report"]
+    assert session.state == "review" and report["reliable"] and report["recognised"] >= 2
+    assert report["fires_per_min"] is not None and report["fires_per_min"] <= 2.0 and report["checked_minutes"] > 0
+    session.approve()
+    memory = session.memory
+    assert memory.classes["락"].mlp is not None
+    assert memory.classify(feats(ROCK, 1, 77))["label"] == "락"
+    assert memory.classify(feats(OPEN, 1, 78))["label"] != "락"
+    again = PoseMemory.from_dict(memory.to_dict())                 # the classifier survives saving
+    assert again.classify(feats(ROCK, 1, 79))["label"] == "락"
+
+
+def test_a_pose_the_person_makes_all_the_time_is_called_unsafe():
+    feats = lambda shape, n, seed=0: np.concatenate([pose_features([dict(zip(("lm", "world"), pose(**shape, jitter=.002, seed=seed + i)), t=0.0)], ASPECT) for i in range(n)])
+    past = [feats(ROCK, 300, 500), feats(ROCK, 300, 900)]          # earlier resting hands ARE the new pose (same jitter)
+    session = RegistrationSession("락", PoseMemory(), ASPECT, negatives=past)
+    demonstrate(session, ROCK)
+    report = session.view()["report"]
+    assert session.state == "review" and not report["reliable"] and report["rest_fires"]
+
+
+def test_the_app_trains_in_the_background_and_reports_when_done():
+    session = RegistrationSession("락", PoseMemory(), ASPECT, threaded=True)
+    t = demonstrate(session, ROCK, seconds=60.0)
+    import time
+    deadline = time.perf_counter() + 20
+    while session.state == "training" and time.perf_counter() < deadline:
+        lm, world = pose(**OPEN)
+        session.update(t, lm, world); t += 1 / 30
+        time.sleep(.01)
+    assert session.state == "review" and session.report["fires_per_min"] is None   # no earlier data: rest block only
+
+
+def test_earlier_resting_hands_are_read_once_and_then_come_from_the_cache(tmp_path, monkeypatch):
+    import time
+    from manux.desktop import PastNegatives
+    (tmp_path / "rec").mkdir()
+    (tmp_path / "rec" / "a.jsonl.gz").write_bytes(b"x")
+    calls = []
+
+    def fake_read(self, paths):
+        calls.append(len(paths))
+        return [np.ones((12, 63), np.float32), np.zeros((15, 63), np.float32)]
+    monkeypatch.setattr(PastNegatives, "_read", fake_read)
+    for _ in range(2):
+        n = PastNegatives(tmp_path / "rec", tmp_path / "cp" / "negatives.npz")
+        n.start()
+        deadline = time.perf_counter() + 5
+        while n.get() is None and time.perf_counter() < deadline:
+            time.sleep(.01)
+        assert [len(s) for s in n.get()] == [12, 15] and not n.error
+    assert calls == [1]                                            # the second time from the cache
+
+
+def test_a_gesture_fires_only_after_its_hold_time_and_registration_chooses_one():
+    """2026-11-10 '지나가는 동작에도 너무 금방 반응한다': a hold in seconds (decimals), chosen at registration."""
+    memory = PoseMemory()
+    feats = np.concatenate([pose_features([dict(zip(("lm", "world"), pose(**ROCK, jitter=.002, seed=i)), t=0.0)], ASPECT) for i in range(30)])
+    memory.add_class("rock", feats, demo_ids=np.repeat(np.arange(3), 10), extra={"slot": "slot1", "hold": .5})
+    rec = PoseRecognizer(memory)
+    lm, world = pose(**ROCK)
+    fired = [rec.step(i / 30, lm, world, ASPECT) for i in range(30)]
+    assert fired.count("rock") == 1 and fired.index("rock") == 15            # 0.5 s at 30 fps
+    passing = [rec.step(2 + i / 30, *pose(**(ROCK if i % 12 < 8 else OPEN)), ASPECT) for i in range(60)]
+    assert "rock" not in passing                                              # 0.27 s glimpses never fire
+    feats_of = lambda shape, n, seed: np.concatenate([pose_features([dict(zip(("lm", "world"), pose(**shape, jitter=.002, seed=seed + i)), t=0.0)], ASPECT) for i in range(n)])
+    session = RegistrationSession("락", PoseMemory(), ASPECT, negatives=[feats_of(OPEN, 300, 100), feats_of(OPEN, 300, 400)])
+    demonstrate(session, ROCK)
+    report = session.view()["report"]
+    assert report["hold"] in (.2, .3, .4, .5, .6, .7, .8, 1.0) and report["fires_at_hold"] is not None
+    session.approve(hold=.75)
+    assert session.memory.classes["락"].extra["hold"] == .75                  # the person's choice wins

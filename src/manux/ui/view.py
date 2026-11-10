@@ -42,6 +42,8 @@ class ViewFrame:
     rec: Optional[Mapping[str, Any]] = None    # dataset recording view (guided / free), None = off
     frame_age_ms: Optional[float] = None      # app capture timestamp -> runtime publish, not sensor/display latency
     pose_status: str = ""                    # optional recording-only Pose tracking status
+    body: Optional[Tuple[Tuple[float, float, float], ...]] = None   # 33-point skeleton (tracking.body_assist)
+    body_roi: Optional[Tuple[float, float, float, float]] = None    # skeleton's hand search square, 0..1
     spatial_guard_enabled: bool = False      # actual runtime state, never a UI prediction
     preview_guides: Tuple[Tuple[int, str], ...] = ()  # fingertip index + near/pinched/action; display only
     preview_anchor: Optional[Tuple[float, float]] = None

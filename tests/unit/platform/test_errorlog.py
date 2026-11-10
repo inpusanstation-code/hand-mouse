@@ -1,6 +1,7 @@
 """errors.log (2026-11-10 request): errors are written to their own file, with the home folder masked."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -18,7 +19,8 @@ def run_child(tmp_path, body):
         path = install(Path({str(tmp_path)!r}), qt=False)
         assert install(Path({str(tmp_path)!r}) / "other", qt=False) == path      # once per process
     """) + textwrap.dedent(body)
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}                      # same bytes whatever the console code page
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8", env=env, timeout=60)
 
 
 def test_errors_threads_and_crashes_go_to_errors_log_with_home_masked(tmp_path):

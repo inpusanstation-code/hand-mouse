@@ -41,3 +41,29 @@ def test_bundled_pose_can_process_a_synthetic_blank_frame():
         assert tracker.detect(np.zeros((480, 640, 3), dtype=np.uint8), 1.) is None
         assert tracker.detect(np.zeros((480, 640, 3), dtype=np.uint8), 1.1) is None
     finally: tracker.close()
+
+
+def test_bundled_full_pose_is_the_official_file_and_loads():
+    pytest.importorskip("mediapipe")
+    np = pytest.importorskip("numpy")
+    import hashlib
+    from manux.tracking.pose import FULL_SHA256
+    path = Path(__file__).resolve().parents[3] / "models" / "pose_landmarker_full.task"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == FULL_SHA256
+    tracker = PoseTracker(path)
+    try:
+        assert tracker.detect_all(np.zeros((480, 640, 3), dtype=np.uint8), 1.) is None
+    finally: tracker.close()
+
+
+def test_recording_does_not_take_arm_points_from_a_full_model_skeleton(tmp_path):
+    runtime = build(Settings(schema()), SimpleNamespace(close=lambda: None), windows=False)
+    full_points = tuple([(.5, .5, .9)] * 33)
+    body = SimpleNamespace(model=tmp_path / "pose_landmarker_full.task", fresh=lambda t, w=.3: full_points)
+    runtime.source = SimpleNamespace(body=body, close=lambda: None)
+    runtime.pose_model = tmp_path / "missing_lite.task"
+    runtime.settings.set("tracking.pose_enabled", True)
+    runtime._rec = SimpleNamespace()
+    assert runtime._pose_step(object(), 0) is None and runtime._pose_failed   # tried its own Lite, not the Full points
+    runtime._rec = None
+    runtime.stop()

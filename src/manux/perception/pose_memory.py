@@ -9,6 +9,11 @@ weights.
 Measured in the source on one person's guided recordings (5 demonstrations from one session, scored on another):
 missed 44% of the time (FRR), took another gesture or rest for the new one 5.3% (FAR). One session's demonstrations
 are weak when the posture changes; demonstrate in the postures you will use.
+
+2026-11-10: a registered class may carry a small classifier (`ClassEntry.mlp`, perception.small_mlp) trained on the
+person's pose against their resting hands (perception.pose_registration). Such a class is decided by its classifier
+(score >= its threshold; the highest score wins among them) instead of the distance limit; classes without one (older
+registrations, known poses) work as before.
 """
 from __future__ import annotations
 
@@ -30,6 +35,17 @@ POSE_DIM = 63
 CUSTOM_PROTOTYPES = 3
 LIMIT_QUANTILE, LIMIT_FACTOR = .9, 1.5
 RUN_FRAMES = 4                       # frames in a row before a registered gesture counts
+DEFAULT_HOLD = .3                    # s a registered gesture is held before it fires when its class sets none
+HOLD_RANGE = (0.0, 3.0)              # the hold the person may set (s)
+
+
+def hold_of(entry: "ClassEntry") -> float:
+    """Seconds this gesture must be held (`extra["hold"]`; 2026-11-10: '지나가는 동작에도 너무 금방 반응한다')."""
+    try:
+        value = float(entry.extra.get("hold", DEFAULT_HOLD))
+    except (TypeError, ValueError):
+        value = DEFAULT_HOLD
+    return min(HOLD_RANGE[1], max(HOLD_RANGE[0], value))
 
 
 @dataclass
@@ -43,6 +59,16 @@ class ClassEntry:
     distance_mean: float = 0.0
     distance_std: float = 0.0
     extra: Dict[str, Any] = field(default_factory=dict)
+    mlp: Optional[Dict[str, Any]] = None   # {"model": SmallMLP dict, "threshold": float, "examples": [[63]...]} or None
+    _scorer: Any = field(default=None, repr=False, compare=False)
+
+    def scorer(self):
+        if self.mlp is None:
+            return None
+        if self._scorer is None:
+            from manux.perception.small_mlp import SmallMLP
+            self._scorer = SmallMLP.from_dict(self.mlp["model"])
+        return self._scorer
 
 
 def pose_features(frames: Sequence[Mapping[str, Any]], aspect: float) -> np.ndarray:
@@ -113,18 +139,31 @@ class PoseMemory:
         return self.classes.pop(label, None) is not None
 
     def classify_arrays(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Class index per frame (-1 = none), and the distance to it."""
+        """Class index per frame (-1 = none), and the distance to it (1 - score for a classifier class)."""
         x = np.atleast_2d(np.asarray(x, dtype=np.float32))
         entries = list(self.classes.values())
         if not entries:
             return np.full(len(x), -1), np.full(len(x), np.inf)
-        d = np.stack([distances(x, e.prototypes) for e in entries], axis=1)
-        limits = np.array([e.threshold for e in entries])
-        allowed = np.where(d <= limits, d, np.inf)
-        best = allowed.argmin(axis=1)
         rows = np.arange(len(x))
-        index = np.where(np.isfinite(allowed[rows, best]), best, -1)
-        return index, d[rows, best]
+        learned = [i for i, e in enumerate(entries) if e.mlp is not None]
+        plain = [i for i, e in enumerate(entries) if e.mlp is None]
+        index, dist = np.full(len(x), -1), np.full(len(x), np.inf)
+        if plain:
+            d = np.stack([distances(x, entries[i].prototypes) for i in plain], axis=1)
+            limits = np.array([entries[i].threshold for i in plain])
+            allowed = np.where(d <= limits, d, np.inf)
+            best = allowed.argmin(axis=1)
+            found = np.isfinite(allowed[rows, best])
+            index = np.where(found, np.asarray(plain)[best], -1)
+            dist = d[rows, best]
+        if learned:
+            s = np.stack([entries[i].scorer().score(x) for i in learned], axis=1)
+            over = s - np.array([entries[i].mlp["threshold"] for i in learned])
+            best = over.argmax(axis=1)
+            hit = over[rows, best] >= 0
+            index = np.where(hit, np.asarray(learned)[best], index)
+            dist = np.where(hit, 1.0 - s[rows, best], dist)
+        return index, dist
 
     def classify(self, pose: np.ndarray) -> Dict[str, Any]:
         index, dist = self.classify_arrays(pose)
@@ -139,7 +178,8 @@ class PoseMemory:
                 "classes": [{"label": e.label, "prototypes": np.round(e.prototypes, 5).tolist(),
                              "threshold": None if np.isinf(e.threshold) else e.threshold, "samples": e.samples,
                              "demos": e.demos, "source": e.source, "distance_mean": e.distance_mean,
-                             "distance_std": e.distance_std, "extra": e.extra} for e in self.classes.values()]}
+                             "distance_std": e.distance_std, "extra": e.extra,
+                             **({"mlp": e.mlp} if e.mlp is not None else {})} for e in self.classes.values()]}
 
     @classmethod
     def from_dict(cls, doc: Mapping[str, Any]) -> "PoseMemory":
@@ -151,7 +191,7 @@ class PoseMemory:
                 row["label"], np.asarray(row["prototypes"], dtype=np.float32),
                 float("inf") if row["threshold"] is None else float(row["threshold"]), int(row["samples"]),
                 int(row["demos"]), str(row["source"]), float(row["distance_mean"]), float(row["distance_std"]),
-                dict(row.get("extra") or {}))
+                dict(row.get("extra") or {}), row.get("mlp"))
         return memory
 
     def save(self, path: Path | str) -> Path:
@@ -178,7 +218,8 @@ class PoseMemory:
 
 
 class PoseRecognizer:
-    """Frame by frame: a registered gesture that has won `run` frames in a row, reported once per hold."""
+    """Frame by frame: a registered gesture that has won `run` frames in a row AND been held its hold time
+    (`hold_of`, seconds), reported once per hold."""
 
     def __init__(self, memory: PoseMemory, run: int = RUN_FRAMES) -> None:
         self.memory, self.run = memory, run
@@ -187,6 +228,7 @@ class PoseRecognizer:
     def reset(self) -> None:
         self._label: Optional[str] = None
         self._count = 0
+        self._since = 0.0
         self.current: Optional[str] = None
 
     def step(self, t: float, lm: Any, world: Any, aspect: float) -> Optional[str]:
@@ -201,8 +243,8 @@ class PoseRecognizer:
         if label == self._label:
             self._count += 1
         else:
-            self._label, self._count, self.current = label, 1, None
-        if self._count == self.run:
+            self._label, self._count, self.current, self._since = label, 1, None, t
+        if self.current is None and self._count >= self.run and t - self._since >= hold_of(entry) - 1e-9:
             self.current = label
             return label
         return None

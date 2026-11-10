@@ -424,6 +424,12 @@ ApplicationWindow {
                                     current: dashboard.handCrop ? "on" : "off"
                                     onPicked: function (value) { dashboard.setHandCrop(value === "on") }
                                 }
+                                SectionLabel { text: "몸·머리 뼈대로 먼 손 찾기 (시험)" }
+                                Segmented {
+                                    options: [["off", "끔"], ["on", "켬"]]
+                                    current: dashboard.bodyAssist ? "on" : "off"
+                                    onPicked: function (value) { dashboard.setBodyAssist(value === "on") }
+                                }
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 6

@@ -567,3 +567,33 @@ def test_closing_with_x_can_quit_instead_of_hiding_to_the_tray(tmp_path):
         assert not b2.closed and not b2.window.isVisible()                # back to hiding
     finally:
         b2.close()
+
+
+def test_the_drawn_hand_window_is_put_back_on_top_while_it_is_shown(tmp_path):
+    """2026-11-10 '바탕화면 보기로 내리면 간헐적으로 가상손이 사라진다': 4 times a second the window is re-shown."""
+    from PySide6.QtTest import QTest
+    from manux.ui.bridge import Bridge
+    from manux.ui.view import ViewFrame
+    calls = []
+    settings = Settings(schema())
+    rt = FakeRuntime(settings)
+    b = Bridge(rt, settings, tmp_path, services={"keep_on_top": lambda win_id: calls.append(win_id)})
+    try:
+        b.poll(); assert calls == []                                   # no hand drawn: nothing to keep
+        drawn = {"pts": [0.0] * 42, "anchor": [0.0, 0.0], "aim": True, "grip": False, "lost": False,
+                 "palm": [600, 400], "scale": 1.0}
+        rt.view = (1, ViewFrame(None, virtual_hand=drawn))
+        b.poll(); QTest.qWait(20); b.poll()
+        assert calls and all(isinstance(c, int) for c in calls)
+        n = len(calls)
+        b.poll()
+        assert len(calls) == n                                         # not on every poll: 4 times a second
+        QTest.qWait(260); b.poll()
+        assert len(calls) == n + 1
+    finally:
+        b.close()
+
+
+def test_keep_on_top_does_nothing_without_a_window():
+    from manux.platform.topmost import reassert
+    assert reassert(0) is False

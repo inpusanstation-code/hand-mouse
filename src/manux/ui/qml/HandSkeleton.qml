@@ -22,9 +22,35 @@ Item {
         onPaint: {
             if (!available) return
             let c = getContext("2d"); c.reset()
-            let p = root.points
-            if (!p || p.length !== 21) return
             c.save(); c.beginPath(); c.rect(0, 0, width, height); c.clip()
+            // Body/head skeleton (tracking.body_assist): drawn only; the runtime decides where to search.
+            let b = root.bridge.previewBody || []
+            if (b.length === 33) {
+                let bones = [[8,6],[6,5],[5,4],[4,0],[0,1],[1,2],[2,3],[3,7],[10,9],
+                             [11,12],[11,13],[13,15],[12,14],[14,16],[15,17],[15,19],[15,21],[16,18],[16,20],[16,22],
+                             [11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28]]
+                c.strokeStyle = Theme.Studio.amber; c.lineWidth = 2; c.lineCap = "round"; c.globalAlpha = 0.8
+                for (let e of bones) {
+                    let a = b[e[0]], z = b[e[1]]
+                    if (a[2] < 0.5 || z[2] < 0.5) continue
+                    c.beginPath(); c.moveTo(a[0]*width, a[1]*height); c.lineTo(z[0]*width, z[1]*height); c.stroke()
+                }
+                c.fillStyle = Theme.Studio.amber
+                for (let k = 0; k < 29; k++) {
+                    let v = b[k]
+                    if (v[2] >= 0.5) { c.beginPath(); c.arc(v[0]*width, v[1]*height, k < 11 ? 2 : 3, 0, Math.PI*2); c.fill() }
+                }
+                c.globalAlpha = 1
+            }
+            let r = root.bridge.previewBodyRoi || []
+            if (r.length === 4) {
+                c.strokeStyle = Theme.Studio.amber; c.lineWidth = 1.5
+                c.setLineDash ? c.setLineDash([6, 4]) : null
+                c.strokeRect(r[0]*width, r[1]*height, (r[2]-r[0])*width, (r[3]-r[1])*height)
+                c.setLineDash ? c.setLineDash([]) : null
+            }
+            let p = root.points
+            if (!p || p.length !== 21) { c.restore(); return }
             let chains = [[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20],[5,9,13,17]]
             c.strokeStyle = Theme.Studio.mint; c.lineWidth = 2; c.lineCap = "round"
             for (let chain of chains) {

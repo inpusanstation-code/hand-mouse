@@ -27,6 +27,11 @@ uv pip install --python .venv-cuda/Scripts/python.exe -e ".[ui,vision,ml,train,h
 
 해당 CUDA 13.2 wheel·드라이버 조합은 이 PC에서 확인했다. 다른 드라이버는 [공식 PyTorch 설치표](https://pytorch.org/get-started/locally/)를 확인한다.
 이 환경을 다시 `uv sync`하면 프로젝트의 CPU 기본 배포 패키지로 바뀔 수 있으므로 명시한 Python으로 실행한다.
+
+소스 실행기 `run_manux.bat`(2026-11-10)은 `nvidia-smi`가 있으면 기본 `.venv`에 CUDA torch(cu132)를 유지한다:
+`uv sync ... --no-install-package torch --inexact`로 torch를 건드리지 않고, CUDA 빌드가 없을 때만 위 index에서
+설치하며, 앱은 `uv run --no-sync`로 띄운다(일반 `uv run`/`uv sync`는 잠금 파일의 CPU 빌드로 되돌린다).
+GPU가 없거나 설치에 실패하면 CPU 빌드로 동기화한다. 학습 장치 기본값은 `auto`(CUDA → XPU → CPU)다.
 현재 testing의 원본 UI를 쓰려면 위 명령에 `--ui studio`를 추가할 수 있다.
 
 OpenVINO는 선택 extra다. CPU torch와 독립적인 추론 런타임을 사용한다.

@@ -74,6 +74,9 @@ class CameraInput:
         self.landmarker = None
         self.error = ""
         self._next_try = 0.0
+        self.pose_model: Optional[Path] = None        # set by main(); needed only for tracking.body_assist
+        self.body = None                              # tracking.body.BodyGuide while body_assist is on
+        self.body_status = ""
 
     def _open(self) -> bool:
         now = time.perf_counter()
@@ -107,10 +110,30 @@ class CameraInput:
             return None
         frame, image = item
         self.tracker.use_crop = use_crop
+        self._sync_body()
         result = self.tracker.step(frame, image, control_hand or "Right")
         from manux.tracking.selection import physical_side
         hands = tuple(SeenHand(physical_side(h, frame.mirrored, self.tracker.min_score), h.score) for h in result.hands)
         return frame, image, result.hand, hands, result.detect_ms
+
+    def _sync_body(self) -> None:
+        """Attach / detach the body skeleton guide to follow `tracking.body_assist` (checked every frame)."""
+        want = bool(self.settings.get("tracking.body_assist")) and self.pose_model is not None
+        if want and self.body is None and not self.body_status.startswith("몸 기준 손 찾기 사용 불가"):
+            from manux.tracking.body import BodyGuide
+            self.body = BodyGuide(self.pose_model, every_n=self.settings.get("tracking.body_every_n_frames"))
+        if self.body is not None and (not want or self.body.failed):
+            if self.body.failed:
+                self.body_status = "몸 기준 손 찾기 사용 불가 · 손 추적은 그대로 합니다"
+            self.body.close()
+            self.body = None
+        if not want:
+            self.body_status = ""
+        elif self.body is not None:
+            self.body.every_n = max(1, int(self.settings.get("tracking.body_every_n_frames")))
+            self.body_status = f"몸 기준 손 찾기 켜짐 · 찾아 준 횟수 {self.body.used}"
+        if self.tracker is not None:
+            self.tracker.body = self.body
 
     def mode_text(self) -> str:
         mode = self.camera.actual_mode() if self.camera is not None else None
@@ -125,6 +148,9 @@ class CameraInput:
             self.camera.release()
         if self.landmarker is not None:
             self.landmarker.close()
+        if self.body is not None:
+            self.body.close()
+            self.body = None
 
 
 class ReplayInput:
@@ -169,6 +195,85 @@ class ReplayInput:
         return None
 
 
+class PastNegatives:
+    """Not-gesture hand poses from the person's own recordings, the "resting hands" a new gesture is learned against
+    (perception.pose_registration). Read once on a background thread and cached in `cache` (an .npz keyed by the
+    recordings' names and sizes); `get()` is None until ready. Evaluation and derived recordings are left out."""
+
+    LABELS = ("none", "idle", "transition")
+    MAX_FRAMES = 20000
+
+    def __init__(self, recordings_dir: Optional[Path], cache: Path) -> None:
+        self.recordings_dir, self.cache = recordings_dir, Path(cache)
+        self._seqs: Optional[list] = None
+        self._thread: Optional[threading.Thread] = None
+        self.error = ""
+
+    def start(self) -> None:
+        if self._thread is None and self._seqs is None and self.recordings_dir is not None:
+            self._thread = threading.Thread(target=self._load, name="manux-past-negatives", daemon=True)
+            self._thread.start()
+
+    def get(self) -> Optional[list]:
+        return self._seqs
+
+    def _paths(self):
+        folder = Path(self.recordings_dir)
+        return sorted(p for p in folder.rglob("*.jsonl.gz") if "derived" not in p.parts) if folder.is_dir() else []
+
+    def _load(self) -> None:
+        import hashlib
+        import numpy as np
+        try:
+            paths = self._paths()
+            sig = hashlib.sha256("|".join(f"{p.name}:{p.stat().st_size}" for p in paths).encode()).hexdigest()
+            if self.cache.is_file():
+                with np.load(self.cache, allow_pickle=False) as doc:
+                    if str(doc["sig"]) == sig:
+                        self._seqs = [doc[k] for k in sorted(doc.files) if k.startswith("seq")]
+                        return
+            seqs = self._read(paths)
+            self.cache.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.cache.with_name(self.cache.stem + ".tmp.npz")
+            np.savez_compressed(tmp, sig=np.array(sig), **{f"seq{i:05d}": s for i, s in enumerate(seqs)})
+            os.replace(tmp, self.cache)
+            self._seqs = seqs
+        except Exception as exc:                        # registration then learns against the rest block alone
+            self.error = repr(exc)
+            self._seqs = []
+
+    def _read(self, paths) -> list:
+        import numpy as np
+        from manux.perception.pose_memory import pose_features
+        seqs: list = []
+        for path in paths:
+            try:
+                rec = read(path)
+            except (OSError, ValueError):
+                continue
+            if not rec.complete or str(rec.meta.get("split", "train")) == "eval" or rec.meta.get("lineage"):
+                continue
+            run: list = []
+            aspect = 720 / 1280
+            for item in replay(rec):
+                lab = str((item.record.get("label") or {}).get("target", "none"))
+                hand = item.hand
+                aspect = item.frame.height / max(1, item.frame.width)
+                if hand is not None and hand.world is not None and lab in self.LABELS:
+                    run.append({"t": item.frame.t, "lm": hand.landmarks, "world": hand.world})
+                    continue
+                if len(run) >= 10:
+                    seqs.append(pose_features(run, aspect))
+                run = []
+            if len(run) >= 10:
+                seqs.append(pose_features(run, aspect))
+        total = sum(len(s) for s in seqs)
+        if total > self.MAX_FRAMES:                     # evenly thinned, whole sequences kept (they are run-checked)
+            keep = max(1, int(len(seqs) * self.MAX_FRAMES / total))
+            seqs = [seqs[i] for i in np.linspace(0, len(seqs) - 1, keep).astype(int)]
+        return [s.astype(np.float32) for s in seqs]
+
+
 class CustomPoses:
     """Registered gestures (perception/pose_memory.py) on disk and in the running engine. Runtime thread only.
 
@@ -176,10 +281,14 @@ class CustomPoses:
     demos/<session>.json  the approved demonstrations' joints (user_confirmed), for later training.
     """
 
-    def __init__(self, folder: Path, known_samples: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()) -> None:
+    def __init__(self, folder: Path, known_samples: Callable[[], Sequence[Mapping[str, Any]]] = lambda: (),
+                 negatives: Optional[PastNegatives] = None) -> None:
         from manux.perception.pose_memory import PoseMemory
         self.folder = Path(folder)
         self.known_samples = known_samples
+        self.negatives = negatives                # earlier not-gesture poses (None: the rest block alone)
+        if negatives is not None:
+            negatives.start()
         self.memory = PoseMemory()
         self.bindings: Dict[str, Any] = {}      # gesture -> None | action id | {"action": "keys.press", "params": {...}}
         self.session = None
@@ -251,12 +360,17 @@ class CustomPoses:
 
     def start(self, name: str, aspect: float) -> None:
         from manux.perception.pose_registration import RegistrationSession
-        self.session = RegistrationSession(name, self._known_memory(), aspect)
+        past = self.negatives.get() if self.negatives is not None else None
+        self.session = RegistrationSession(name, self._known_memory(), aspect, negatives=past,
+                                           threaded=self.negatives is not None)
         self.message = ""
 
-    def approve(self) -> None:
+    def approve(self, action: Optional[str] = None, keys: str = "", hold: Optional[float] = None) -> None:
+        """Register the reviewed gesture together with its command (one 저장). The command is checked first, so a
+        refused key combination leaves nothing registered and the review open."""
         from manux.features.custom_pose import gesture_of
-        result = self.session.approve()
+        value = self._binding_value(action, keys)
+        result = self.session.approve(hold=None if hold is None else self._hold_value(hold))
         entry = self.session.memory.classes[result["label"]]
         self.memory.classes[entry.label] = entry               # known Pose Studio classes stay out of the saved memory
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -264,9 +378,9 @@ class CustomPoses:
         demos.mkdir(exist_ok=True)
         (demos / f"{self.session.session}.json").write_text(json.dumps(self.session.demo_frames()), encoding="utf-8")
         self.memory.save(self.folder / "memory.json")
-        self.bindings.setdefault(gesture_of(result["slot"]), None)
+        self.bindings[gesture_of(result["slot"])] = value
         self._save_bindings()
-        self.message = f"'{entry.label}' 등록됨 · 실행할 명령을 고르세요"
+        self.message = f"'{entry.label}' 등록됨" + ("" if value else " · 명령 없음(‘등록된 동작 보기’에서 고를 수 있습니다)")
         self.session = None
         self._live = None
 
@@ -277,16 +391,36 @@ class CustomPoses:
 
     def bind(self, slot: str, action: Optional[str], keys: str = "") -> None:
         """action None/"" = do nothing; "keys.press" needs `keys` ("ctrl+c", "win+shift+s", ...)."""
+        from manux.features.custom_pose import gesture_of
+        self.bindings[gesture_of(slot)] = self._binding_value(action, keys)
+        self._save_bindings()
+
+    @staticmethod
+    def _binding_value(action: Optional[str], keys: str = "") -> Any:
         from manux.actions.keys import combo_text, parse_combo
-        from manux.features.custom_pose import COMMANDS, gesture_of
+        from manux.features.custom_pose import COMMANDS
         if action and action not in COMMANDS:
             raise ValueError("이 동작에 연결할 수 없는 명령입니다")
         if action == "keys.press":
-            value: Any = {"action": "keys.press", "params": {"keys": combo_text(parse_combo(keys))}}
-        else:
-            value = action or None
-        self.bindings[gesture_of(slot)] = value
-        self._save_bindings()
+            return {"action": "keys.press", "params": {"keys": combo_text(parse_combo(keys))}}
+        return action or None
+
+    @staticmethod
+    def _hold_value(seconds) -> float:
+        from manux.perception.pose_memory import HOLD_RANGE
+        value = float(seconds)
+        if not HOLD_RANGE[0] <= value <= HOLD_RANGE[1]:
+            raise ValueError(f"유지 시간은 {HOLD_RANGE[0]:g}~{HOLD_RANGE[1]:g}초로 정해 주세요")
+        return round(value, 2)
+
+    def set_hold(self, slot: str, seconds) -> None:
+        """How long the registered gesture must be held before it fires (seconds, decimals)."""
+        value = self._hold_value(seconds)
+        for entry in self.memory.registered():
+            if entry.extra.get("slot") == slot:
+                entry.extra["hold"] = value
+        self.memory.save(self.folder / "memory.json")
+        self._live = None
 
     def remove(self, slot: str) -> None:
         from manux.features.custom_pose import gesture_of
@@ -315,8 +449,9 @@ class CustomPoses:
                 keys_label = combo_label(parse_combo(keys)) if keys else ""
             except ValueError:
                 keys_label = keys
+            from manux.perception.pose_memory import hold_of
             rows.append({"slot": e.extra.get("slot", ""), "name": e.label, "demos": e.demos, "action": action,
-                         "keys": keys, "keys_label": keys_label})
+                         "keys": keys, "keys_label": keys_label, "hold": hold_of(e)})
         return {"poses": sorted(rows, key=lambda r: r["slot"]), "session": self.session.view() if self.session else None,
                 "message": self.message, "revision": self.revision}
 
@@ -456,6 +591,7 @@ class DesktopRuntime:
         self.spatial_feature: Optional[SpatialPoseFeature] = None
         self.spatial_guard: Optional[SpatialPoseGuard] = None
         self.custom_poses: Optional[CustomPoses] = None   # registered gestures (set by main)
+        self.pinch_shape = None          # the person's perception.pinch_shape model for the virtual hand (set by main)
         self.everyday: Optional[EverydayCollector] = None  # everyday-use candidates (set by main; on with data.collect_everyday)
         engine.settings_for = self.settings_for
         # tracking test (S6): owned by this thread; the UI asks with start/close and reads ViewFrame.tracking
@@ -928,12 +1064,15 @@ class DesktopRuntime:
         self._drain_runtime_requests()
         if self.custom_poses is not None:
             self.custom_poses.attach(self.engine)      # also after any pipeline rebuild
+        for feature in self.engine.features:           # the virtual hand clicks on the person's pinch shape
+            if feature.id == "virtual_hand" and getattr(feature, "shape_model", None) is not self.pinch_shape:
+                feature.shape_model = self.pinch_shape
         self._tracking_requests()
         self.reload_model()
         self._sync_control_model()
         if self._stop.is_set():
             return
-        item = self.source.read(self.control_hand, self.use_crop)
+        item = self.source.read(self.control_hand, self.use_crop or self._virtual_hand_crop())
         if item is None:
             now = time.perf_counter()
             self._recording_step(now, None, None)
@@ -1011,7 +1150,7 @@ class DesktopRuntime:
             camera_mode=self._metrics[0], brightness=self._metrics[1], low_light=self._metrics[2],
             fps=float(self.source.fps), detect_ms=float(detect_ms), actions=actions,
             model_status=self._model_view_status(), tracking=tracking, recent=self.recent,
-            rec=self._rec_view(frame.t), pose_status=self.pose_status,
+            rec=self._rec_view(frame.t), pose_status=self.pose_status, **self._body_view(frame),
             spatial_guard_enabled=bool(self.spatial_guard and self.spatial_guard.enabled),
             preview_guides=guides, preview_anchor=anchor, preview_moving=moving, pointer_setup=pointer_setup,
             control_hand=hand.handedness if hand is not None else self.control_hand,
@@ -1021,6 +1160,22 @@ class DesktopRuntime:
             practice_events=tuple(self._practice_events), practice_epoch=self._practice_epoch,
             rule_preview=rule_preview, mlp_badge=self._mlp_badge(), virtual_hand=self._virtual_hand_view(snap),
             frame_age_ms=max(0.0, (time.perf_counter() - frame.t) * 1000.0)))
+
+    def _body_view(self, frame):
+        """Latest skeleton and the square it proposed (only while tracking.body_assist runs), for the preview."""
+        body = getattr(self.source, "body", None)
+        if body is None:
+            return {}
+        points = body.fresh_view(frame.t)            # smoothed for drawing; the search uses raw points
+        roi = body.roi if frame.t - body.roi_t <= .3 and frame.width and frame.height else None
+        return {"body": points, "body_roi": (roi[0] / frame.width, roi[1] / frame.height,
+                                             roi[2] / frame.width, roi[3] / frame.height) if roi else None}
+
+    def _virtual_hand_crop(self) -> bool:
+        """2026-11-10 '손 스켈레톤이 너무 작아서 오탐지': the virtual hand judges fingertip shapes, so in its mode the hand
+        is looked at at full resolution (the hand crop) unless virtual_hand.hand_crop is off."""
+        return (self.engine.arbiter.mode == "virtual_hand"
+                and bool(self.settings_for("virtual_hand").get("hand_crop", True)))
 
     def _virtual_hand_view(self, snap):
         """The drawn hand for the UI: joints in logical px around the palm, the palm on the screen in physical px."""
@@ -1054,6 +1209,13 @@ class DesktopRuntime:
         if self._rec is None:
             self.pose_status = "팔·어깨 기록 켜짐 · 다음 녹화부터 추가 처리"
             return None
+        body = getattr(self.source, "body", None)
+        same_model = body is not None and self.pose_model is not None and Path(body.model) == Path(self.pose_model)
+        points = body.fresh(now, 0.0) if same_model else None
+        if points is not None:                          # body_assist already ran the recordings' Lite Pose on this frame
+            from manux.tracking.pose import arm
+            self.pose_status = "팔·어깨 기록 중"
+            return arm(points)
         if self._pose_failed or image is None or self._frames % self.settings.get("tracking.pose_every_n_frames"):
             return None
         try:
@@ -1180,13 +1342,26 @@ class DesktopRuntime:
                 cp.start(str(values.get("name", "")), float(values.get("aspect", 720 / 1280)))
                 self.engine.commands.put(SetBusy("enrolling", True))
             elif op == "approve":
-                cp.approve()
-                self.engine.commands.put(SetBusy("enrolling", False))
+                try:
+                    hold = values.get("hold")
+                    cp.approve(str(values.get("action", "")) or None, str(values.get("keys", "")),
+                               None if hold in (None, "") else float(hold))
+                except ValueError as refused:            # e.g. a refused key combination: keep the review open
+                    if cp.session is not None and cp.session.state == "review":
+                        cp.message = str(refused)
+                        op = "review"
+                    else:
+                        raise
+                if op == "approve":
+                    self.engine.commands.put(SetBusy("enrolling", False))
             elif op == "cancel":
                 cp.cancel()
                 self.engine.commands.put(SetBusy("enrolling", False))
             elif op == "bind":
                 cp.bind(str(values.get("slot", "")), str(values.get("action", "")) or None, str(values.get("keys", "")))
+                cp.message = ""
+            elif op == "hold":
+                cp.set_hold(str(values.get("slot", "")), values.get("seconds"))
                 cp.message = ""
             elif op == "remove":
                 cp.remove(str(values.get("slot", "")))
@@ -1504,7 +1679,12 @@ def main(argv=None) -> int:
                         binding_overrides=read_bindings(args.bindings), policy_store=policy_store,
                         spatial_pose_model=init_spatial_model)
         runtime.model_status = "가져온 모델 읽기 실패 · 학습센터에서 복구 상태를 확인하세요"
-    runtime.pose_model = paths.app_dir / "models" / "pose_landmarker_lite.task"
+    runtime.pose_model = paths.app_dir / "models" / "pose_landmarker_lite.task"   # recordings' six arm points
+    from manux.perception.pinch_shape import load_optional as load_pinch_shape
+    runtime.pinch_shape = load_pinch_shape(paths.data_dir)   # tools/train_pinch_shape.py; none -> contact alone
+    if isinstance(source, CameraInput):
+        full = paths.app_dir / "models" / "pose_landmarker_full.task"   # steadier skeleton for the preview / hand search
+        source.pose_model = full if full.exists() else runtime.pose_model
     runtime.pointer_setup_dir = paths.config_dir
     runtime.log_dir = paths.log_dir
     runtime.spatial_model_path = spatial_model_path
@@ -1527,7 +1707,9 @@ def main(argv=None) -> int:
     tc.simulation_config = {"simulation_mode": args.tcn_mode,
                             "simulation_model": str(args.tcn_model) if args.tcn_model else None}
     studio = make_pose_studio(paths.data_dir, runtime.set_spatial_model)
-    runtime.custom_poses = CustomPoses(paths.data_dir / "custom_poses", known_samples=studio.load_all_samples)
+    runtime.custom_poses = CustomPoses(paths.data_dir / "custom_poses", known_samples=studio.load_all_samples,
+                                       negatives=PastNegatives(paths.recordings_dir,
+                                                               paths.data_dir / "custom_poses" / "negatives.npz"))
     from manux.data import everyday as everyday_data
     from manux.data.everyday import folder_of
     runtime.everyday = EverydayCollector(folder_of(paths.recordings_dir), meta=lambda: {
@@ -1548,6 +1730,7 @@ def main(argv=None) -> int:
                    "studio_categories": lambda: list(STUDIO_CATEGORIES),
                    "studio_system_action": normalize_system_action,
                    "everyday": everyday_service(folder_of(paths.recordings_dir), lambda: runtime._rec_identity.preset),
+                   "keep_on_top": __import__("manux.platform.topmost", fromlist=["reassert"]).reassert,
                },
                hotkeys=hotkeys.GlobalHotkeys({}), hotkey_defaults=hotkeys.DEFAULTS,
                normalize_combo=hotkeys.normalize, combo_label=hotkeys.label, make_tray=QtTray)

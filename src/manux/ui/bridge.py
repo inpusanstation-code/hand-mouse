@@ -1003,8 +1003,15 @@ class Bridge(QObject):
 
     @Property("QVariantList", notify=stateChanged)
     def virtualBox(self):
-        """[x0, y0, x1, y1] on the camera image, 0..1: the area that stands for the whole monitor."""
-        return [float(self.settings.get(k)) for k in self.BOX_KEYS]
+        """[x0, y0, x1, y1] on the camera image, 0..1: the area that stands for the whole monitor, kept BOX_EDGE inside
+        the image (what the virtual hand feature uses too: features.virtual_hand.shapes.safe_box)."""
+        return self._safe_box([float(self.settings.get(k)) for k in self.BOX_KEYS])
+
+    BOX_EDGE = .1     # same as features.virtual_hand.shapes.EDGE (ui may not import features)
+
+    @classmethod
+    def _safe_box(cls, box):
+        return [round(min(1 - cls.BOX_EDGE, max(cls.BOX_EDGE, float(v))), 4) for v in box]
 
     @Property(bool, notify=stateChanged)
     def boxEditing(self):
@@ -1018,7 +1025,8 @@ class Bridge(QObject):
     @Slot(float, float, float, float, result=bool)
     def setVirtualBox(self, x0, y0, x1, y1):
         """From a drag on the preview, either direction. A box under 10% of the image either way is refused."""
-        box = [round(min(1.0, max(0.0, v)), 4) for v in (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))]
+        # pulled BOX_EDGE inside the image: at the image edge half the hand is out of the picture and gets lost
+        box = self._safe_box([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)])
         self._box_editing = False
         if box[2] - box[0] < .1 or box[3] - box[1] < .1:
             self.stateChanged.emit()
@@ -1097,6 +1105,16 @@ class Bridge(QObject):
     @Property(bool, notify=stateChanged)
     def handCrop(self):
         return self.hand_crop
+
+    @Slot(bool)
+    def setBodyAssist(self, enabled):
+        if bool(enabled) != self.bodyAssist:
+            self._set("tracking.body_assist", bool(enabled))     # the camera thread follows the setting
+            self.stateChanged.emit()
+
+    @Property(bool, notify=stateChanged)
+    def bodyAssist(self):
+        return bool(self.settings.get("tracking.body_assist"))
 
     # ------------------------------------------------------------------ finger tracker HUD
     @Slot(bool)
@@ -1551,8 +1569,19 @@ class Bridge(QObject):
         self._custom_request("start", name=str(name))
 
     @Slot()
-    def approveCustomPose(self):
-        self._custom_request("approve")
+    @Slot(str, str)
+    @Slot(str, str, float)
+    def approveCustomPose(self, action="", keys="", hold=-1.0):
+        """저장: the reviewed gesture, its command and its hold time (seconds; negative = the chosen one) together."""
+        values = {"action": str(action or ""), "keys": str(keys or "")}
+        if hold is not None and float(hold) >= 0:
+            values["hold"] = float(hold)
+        self._custom_request("approve", **values)
+
+    @Slot(str, float)
+    def setCustomPoseHold(self, slot, seconds):
+        """How long a registered gesture must be held before it fires (seconds, decimals)."""
+        self._custom_request("hold", slot=str(slot), seconds=float(seconds))
 
     @Slot()
     def cancelCustomPose(self):
@@ -2821,6 +2850,26 @@ class Bridge(QObject):
     def details(self):
         return self.state[4]
 
+    def _keep_hand_on_top(self) -> None:
+        """4 times a second while the virtual hand is drawn: put its window back if Windows hid it ("show desktop").
+        The platform call comes in as a service (ui does not import platform)."""
+        keep = self.services.get("keep_on_top")
+        if keep is None or not self._virtual_hand:
+            return
+        now = time.perf_counter()
+        if now < getattr(self, "_on_top_next", 0.0):
+            return
+        self._on_top_next = now + .25
+        if getattr(self, "_hand_window", None) is None:
+            from PySide6.QtCore import QObject
+            self._hand_window = self.window.findChild(QObject, "virtualHandOverlay") if self.window is not None else None
+        win = self._hand_window
+        if win is not None and win.property("visible"):
+            try:
+                keep(int(win.winId()))
+            except (RuntimeError, AttributeError, TypeError):
+                self._hand_window = None
+
     @Property("QVariantMap", notify=virtualHandChanged)
     def virtualHand(self):
         """{pts: 42 logical px around the palm, click: [x, y] or None, aim, grip, lost, palm: physical px, scale}."""
@@ -2841,6 +2890,16 @@ class Bridge(QObject):
     @Property(str, notify=previewChanged)
     def previewUrl(self):
         return f"image://vision/{self.sequence}" if self.sequence else ""
+
+    @Property("QVariantList", notify=previewChanged)
+    def previewBody(self):
+        v = self._preview_view
+        return [list(p) for p in v.body] if v.image is not None and getattr(v, "body", None) else []
+
+    @Property("QVariantList", notify=previewChanged)
+    def previewBodyRoi(self):
+        v = self._preview_view
+        return list(v.body_roi) if v.image is not None and getattr(v, "body_roi", None) else []
 
     @Property("QVariantList", notify=previewChanged)
     def previewLandmarks(self):
@@ -3028,6 +3087,7 @@ class Bridge(QObject):
     # ------------------------------------------------------------------ frame rendering (UI thread)
     def poll(self) -> None:
         self._poll_custom_poses()
+        self._keep_hand_on_top()
         advanced = getattr(self.runtime, "advanced_result", (0, True, ""))
         if advanced[0] != getattr(self, "_advanced_revision", 0):
             self._advanced_revision = advanced[0]

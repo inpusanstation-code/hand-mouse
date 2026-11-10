@@ -31,6 +31,18 @@ def _pixels(lm: Landmarks, width: int, height: int) -> Optional[List[Tuple[float
     return pts if math.dist(pts[0], pts[9]) >= 1.0 else None
 
 
+EDGE = .1      # the box stays this far inside the camera image (palm centre past it: the hand leaves the picture)
+
+
+def safe_box(box) -> Tuple[float, float, float, float]:
+    """The box pulled EDGE inside the camera image. 2026-11-10 '멀리가지도 않았는데 손을 인식을 못함': a box drawn to
+    0.98 of the image put the palm centre at the edge to reach the monitor's edge, and half the hand out of the picture.
+    Recordings: the hand was lost after 68 of 1000 frames with the palm centre in the outer 10% (top / bottom; 26-46 at
+    the sides) against 11 in the middle. ui.bridge keeps the same EDGE for the box it shows and saves."""
+    x0, y0, x1, y1 = (min(1 - EDGE, max(EDGE, float(v))) for v in box)
+    return x0, y0, x1, y1
+
+
 def valid_box(box) -> bool:
     try:
         x0, y0, x1, y1 = (float(v) for v in box)
@@ -76,9 +88,9 @@ class BoxMapper:
     reaches every edge). Steadied by a One Euro filter. While `hold` is true the point stays where it aimed: where the
     palm was AIM_BACK s before, if that is within AIM_BACK_MAX (the tilt of closing fingers, not a real move).
 
-    No jumps (2026-11-10 replay of 40 min of recordings, cursor steps >= 60 px): releasing a hold, letting go of a fist
-    or finding the hand again used to land on the live position in one frame (hold end 10.9/min, fist 7.9/min, regained
-    2.2/min); now the point eases there over EASE s. The aim-back went back any distance (8.9/min); now only tilt-sized.
+    Finding the hand again after a gap eases in over EASE s (it used to land across the screen in one frame, 2.2/min in a
+    40 min replay). Releasing a hold does not ease any more (hand-mouse branch behaviour, restored 2026-11-10): the filter
+    restarts at the held point. The aim-back went back any distance (8.9/min); now only tilt-sized.
     """
 
     MIN_CUTOFF, BETA, SPEED_SCALE = .4, .012, 1000.0
@@ -119,8 +131,14 @@ class BoxMapper:
                 if earlier and math.dist(earlier[-1], self.pos) <= self.AIM_BACK_MAX:
                     self.pos = earlier[-1]
             return self.pos
-        if self.pos is not None and (self.held or gap):
-            self._start_ease((nx, ny), now)
+        if self.pos is not None and gap:
+            self._start_ease((nx, ny), now)       # the hand found again after a gap: ease in (no jump across the screen)
+        elif self.held:
+            # 2026-11-10 restored from the hand-mouse virtual-hand branch: no 0.2 s ease after a click / fist hold (it read
+            # as 'stops, then suddenly fast'); the filter restarts at the held point and follows the hand at its own speed
+            self._filter.reset(self.pos)
+            self._filter.t = now
+            self._ease_from = None
         self.held = False
         fx, fy = self._filter((nx, ny), now)
         fx = nx if abs(fx - nx) < 1e-3 else fx       # the filter only nears a clamped edge: the box edge is the monitor edge
@@ -156,7 +174,9 @@ class ShapePinch:
     def reset(self) -> None:
         self.closed, self._n = False, 0
 
-    def step(self, lm: Landmarks, width: int, height: int, frames: Optional[int] = None) -> Optional[str]:
+    def step(self, lm: Landmarks, width: int, height: int, frames: Optional[int] = None,
+             shape_ok: bool = True) -> Optional[str]:
+        """`shape_ok`: the whole hand is the person's pinch shape (perception.pinch_shape); False keeps it open."""
         pt = _pixels(lm, width, height)
         if pt is None:
             return None
@@ -164,7 +184,7 @@ class ShapePinch:
         tip, other = TIPS[self.finger], TIPS[self.other]
         self.ratio = math.dist(pt[THUMB_TIP], pt[tip]) / size
         if not self.closed:
-            if (self.ratio < self.CLOSE and math.dist(pt[0], pt[tip]) / size > self.FINGER_OUT
+            if (shape_ok and self.ratio < self.CLOSE and math.dist(pt[0], pt[tip]) / size > self.FINGER_OUT
                     and self.ratio < math.dist(pt[THUMB_TIP], pt[other]) / size):
                 self._n += 1
                 if self._n >= (frames or self.FRAMES):
@@ -180,10 +200,17 @@ class ShapePinch:
 
 
 class ShapeTriple:
-    """Thumb, index and middle tips together (right click), both fingers out from the wrist."""
+    """Thumb, index and middle tips together (right click), both fingers out from the wrist, and the ring and little
+    fingers out too.
 
-    CLOSE, OPEN, FRAMES = .22, .30, 2
+    2026-11-10 (right clicks for no reason): the three tips also meet in a relaxed, curled hand. On the recordings (none
+    of them a right click) 250 such closes had the ring / little fingertip at a median 1.10 / 1.01 hand sizes from the
+    wrist; the person's pinch-shaped hands 1.58 / 1.47. Requiring RING_OUT (little finger 0.9 of it) kept 28% of them;
+    3 frames instead of 2 and no right click around a fist (the feature) remove more."""
+
+    CLOSE, OPEN, FRAMES = .22, .30, 3
     FINGER_OUT = .8
+    RING_OUT = 1.2
 
     def __init__(self) -> None:
         self.closed = False
@@ -192,14 +219,27 @@ class ShapeTriple:
     def reset(self) -> None:
         self.closed, self._n = False, 0
 
-    def step(self, lm: Landmarks, width: int, height: int) -> Optional[str]:
+    @classmethod
+    def others_out(cls, pt, world: Optional[Landmarks]) -> bool:
+        """Ring and little fingertips away from the wrist (hand-size units; 3D world joints when given)."""
+        if world is not None and len(world) == 21:
+            size3 = math.dist(world[0], world[9])
+            if size3 > 1e-6:
+                return (math.dist(world[0], world[16]) / size3 >= cls.RING_OUT
+                        and math.dist(world[0], world[20]) / size3 >= .9 * cls.RING_OUT)
+        size = math.dist(pt[0], pt[9])
+        return math.dist(pt[0], pt[16]) / size >= cls.RING_OUT and math.dist(pt[0], pt[20]) / size >= .9 * cls.RING_OUT
+
+    def step(self, lm: Landmarks, width: int, height: int, world: Optional[Landmarks] = None,
+             allowed: bool = True) -> Optional[str]:
         pt = _pixels(lm, width, height)
         if pt is None:
             return None
         size = math.dist(pt[0], pt[9])
         far = max(math.dist(pt[THUMB_TIP], pt[8]), math.dist(pt[THUMB_TIP], pt[12])) / size
         if not self.closed:
-            out = min(math.dist(pt[0], pt[8]), math.dist(pt[0], pt[12])) / size > self.FINGER_OUT
+            out = (allowed and min(math.dist(pt[0], pt[8]), math.dist(pt[0], pt[12])) / size > self.FINGER_OUT
+                   and self.others_out(pt, world))
             if far < self.CLOSE and out:
                 self._n += 1
                 if self._n >= self.FRAMES:
@@ -257,11 +297,23 @@ class ShapeSwitch:
         return False
 
 
-def is_fist(lm: Landmarks) -> bool:
+FIST_CURL = .9                      # 3D: each fingertip within this share of its middle joint's distance to the wrist
+
+
+def is_fist(lm: Landmarks, world: Optional[Landmarks] = None) -> bool:
     """All four fingertips nearer the wrist than their knuckles' middle joints (curled). Same idea as the pinch
-    feature's fist, kept local so this feature does not import another one (architecture rule)."""
+    feature's fist, kept local so this feature does not import another one (architecture rule).
+
+    2026-11-10 '움직이면 멈췄다가 갑자기 따라온다': judged in the image plane, fingers pointing at the camera look short and
+    read as a fist, which holds the cursor (scrolling). With the 3D world joints and tips at most FIST_CURL of the
+    middle joint's distance: on 52.8 min of not-gesturing recordings the cursor froze 6.5 times a minute instead of
+    19.3 (with Grip's 3-frame start), while the curled fingers of thumbs-up frames still counted (90.5% vs 89.4%)."""
     if len(lm) != 21:
         return False
+    if world is not None and len(world) == 21:
+        w = world[0]
+        return all(math.dist(world[tip], w) < FIST_CURL * math.dist(world[pip], w)
+                   for pip, tip in ((6, 8), (10, 12), (14, 16), (18, 20)))
     w = lm[0]
     for pip, tip in ((6, 8), (10, 12), (14, 16), (18, 20)):
         if math.dist(lm[tip][:2], w[:2]) >= math.dist(lm[pip][:2], w[:2]):
@@ -270,9 +322,12 @@ def is_fist(lm: Landmarks) -> bool:
 
 
 class Grip:
-    """A fist holding the page, kept through a GRACE s loss of the shape (one shaky frame does not let go)."""
+    """A fist holding the page: on after FRAMES fist frames in a row; once held SETTLED s it is kept through a GRACE s
+    loss of the shape (one shaky frame does not let go). A short, maybe false fist ends at once (2026-11-10)."""
 
     GRACE = .4
+    FRAMES = 3
+    SETTLED = .3
 
     def __init__(self) -> None:
         self.reset()
@@ -281,18 +336,25 @@ class Grip:
         self.on = False
         self.started = False
         self._lost: Optional[float] = None
+        self._n = 0
+        self._since = 0.0
 
     def step(self, fist: bool, now: float) -> bool:
         self.started = False
         if fist:
             self._lost = None
-            if not self.on:
+            self._n += 1
+            if not self.on and self._n >= self.FRAMES:
                 self.on = self.started = True
-        elif self.on:
-            if self._lost is None:
-                self._lost = now
-            if now - self._lost > self.GRACE:
-                self.reset()
+                self._since = now
+        else:
+            self._n = 0
+            if self.on:
+                if self._lost is None:
+                    self._lost = now
+                grace = self.GRACE if self._lost - self._since >= self.SETTLED else 0.0
+                if grace == 0.0 or now - self._lost > grace:
+                    self.reset()
         return self.on
 
 
@@ -325,6 +387,40 @@ def hand_size_px(lm: Landmarks, width: int, height: int, world: Optional[Landmar
             return max(ratios) * palm_m
     shares = {(0, 9): 1.0, (0, 5): .95, (0, 17): .85, (5, 17): .75}
     return max(math.dist(pts[a], pts[b]) / share for (a, b), share in shares.items())
+
+
+class HandDrawer:
+    """The drawn hand: the camera picture's shape (as the hand-mouse virtual-hand branch drew it), at a steady size.
+
+    2026-11-10 reports, in order: '손을 아래로 굽히면 비정상적으로 가상손의 크기가 작아진다', then '가상손이 뒤틀려 있다'
+    twice. What was tried and measured:
+    - picture shape scaled by a 3D-estimated size (pixels per metre from palm segments): 19% of recorded frames under
+      0.7x the wanted palm size (short, noisy segments overestimate the size);
+    - the hand drawn in its own 3D frame: always palm-on, so a turned hand looked twisted (5% even mirrored);
+    - the 3D world joints seen from the camera: matched the recordings, but live, with the hand close to the camera,
+      MediaPipe's world joints often put the palm edge-on while the picture shows it face-on (knuckles in one point).
+    So the shape is the picture's own (never twisted) and only the scale is chosen: the larger of the picture's palm
+    length (wrist -> middle knuckle) and its knuckle row (index -> little knuckle) / ACROSS. Bending the hand down
+    shortens the first, turning it edge-on narrows the second; the larger stays. A slow One Euro filter keeps the size
+    from twitching.
+    """
+
+    ACROSS = .7          # knuckle row / palm length of a hand facing the camera (recordings: 2D median .71, 3D .66)
+
+    def __init__(self) -> None:
+        self._size = OneEuro(.3, .002)
+
+    def reset(self) -> None:
+        self._size.reset()
+
+    def __call__(self, lm: Landmarks, world: Optional[Landmarks], width: int, height: int,
+                 size_px: float = SIZE_PX, now: Optional[float] = None) -> Optional[List[float]]:
+        pts = _pixels(lm, width, height)
+        if pts is None:
+            return None
+        palm = max(math.dist(pts[0], pts[9]), math.dist(pts[5], pts[17]) / self.ACROSS)
+        palm = self._size((palm,), now)[0]
+        return view_points(lm, width, height, size_px=size_px, hand_px=palm)
 
 
 def view_points(lm: Landmarks, width: int, height: int, size_px: float = SIZE_PX,

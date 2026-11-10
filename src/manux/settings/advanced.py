@@ -109,6 +109,8 @@ LABELS = {
     "box_bottom": "가상 손: 박스 아래쪽", "pinch_hold": "가상 손: 이만큼 붙이고 있으면 끌기 (초)",
     "double_tap": "가상 손: 더블클릭 간격 (초)", "scroll_follows_page": "가상 손: 주먹 스크롤 방향 반대로",
     "scroll_speed": "가상 손: 주먹 브라우징 속도",
+    "draw_size": "가상 손: 화면에 그리는 손 크기", "hand_crop": "가상 손: 손 주변 확대해서 보기",
+    "pinch_shape": "가상 손: 내 핀치 손 모양일 때만 클릭", "pinch_shape_min": "가상 손: 손 모양 확신 기준",
 }
 
 # These settings belong to separate editors, or are derived by the runtime.

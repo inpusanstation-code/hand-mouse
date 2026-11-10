@@ -81,7 +81,7 @@ def test_register_a_gesture_from_the_pose_page_without_qml_errors(tmp_path):
         assert start.property("enabled")
         assert QMetaObject.invokeMethod(start, "click")
         runtime._drain_runtime_requests(); b.poll(); QTest.qWait(20)
-        assert b.customPoseSession["state"] == "prep" and b.paused
+        assert b.customPoseSession["state"] == "rest" and b.paused
         assert b.window.findChild(QQuickItem, "customPoseProgress").isVisible()
         b.cancelCustomPose(); runtime._drain_runtime_requests(); b.poll(); QTest.qWait(20)
         assert b.customPoseSession == {} and start.isVisible()
@@ -209,9 +209,13 @@ def test_a_registered_gesture_gets_a_preset_or_a_typed_win_combination_on_screen
                     hit = walk(child)
                     if hit is not None:
                         return hit
-            return walk(b.window.contentItem()) or next((w for w in [b.window.findChild(QQuickItem, name)] if w), None)
+            root = b.window.contentItem().parentItem() or b.window.contentItem()     # the list window is in the overlay
+            return walk(root) or next((w for w in [b.window.findChild(QQuickItem, name)] if w), None)
+        opener = find("customPoseListOpen")                       # 2026-11-10: registered gestures have their own window
+        assert opener is not None and opener.isVisible() and "1개" in opener.property("text")
+        assert QMetaObject.invokeMethod(opener, "click"); QTest.qWait(40)
         select = find("customPoseAction-slot1")
-        assert select is not None and select.property("currentIndex") == 0
+        assert select is not None and select.isVisible() and select.property("currentIndex") == 0
         copy = next(i for i, p in enumerate(b.customPosePresets) if p["keys"] == "ctrl+c")
         b.setCustomPoseAction("slot1", "keys.press", "ctrl+c")
         runtime._drain_runtime_requests(); b.poll(); QTest.qWait(30)
@@ -324,5 +328,56 @@ def test_first_page_order_and_calibration_moved_to_settings(tmp_path, layout):
         others = [i for i in items if str(i.property("text") or "") in ("동작 다시 배우기", "쓸 수 있는 동작")]
         assert others and all(i.mapToScene(i.position() * 0).y() > top for i in others)
     finally:
+        b.close()
+        runtime.stop()
+
+
+def test_review_picks_a_searched_command_and_only_save_registers(tmp_path):
+    from PySide6.QtCore import qInstallMessageHandler
+    from manux.desktop import build, CustomPoses
+    from types import SimpleNamespace
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "features"))
+    from test_custom_pose import ASPECT, ROCK, demonstrate
+    messages = []
+    qInstallMessageHandler(lambda mode, ctx, text: messages.append(text))
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    runtime.custom_poses = CustomPoses(tmp_path / "cp")
+    runtime.custom_poses.start("락", ASPECT)
+    demonstrate(runtime.custom_poses.session, ROCK)
+    b = Bridge(runtime, settings, tmp_path/'config', layout="studio")
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        if b.stage != "main":
+            b._set_stage("main")
+        b.poll(); QTest.qWait(60)
+        def find(name, item=None):
+            for child in (item if item is not None else b.window.contentItem()).childItems():
+                if child.objectName() == name and child.isVisible():
+                    return child
+                hit = find(name, child)
+                if hit is not None:
+                    return hit
+        picker = find("customPoseReviewAction")
+        assert picker is not None and picker.property("currentIndex") == 0 and b.customPoses == []
+        QMetaObject.invokeMethod(picker, "open"); QTest.qWait(40)
+        search, listing = find("commandPickerSearch"), find("commandPickerList")
+        everything = listing.property("count")
+        search.setProperty("text", "win+e"); QTest.qWait(20)
+        assert 0 < listing.property("count") < everything
+        QTest.keyClick(b.window, "\r"); QTest.qWait(20)                  # Enter picks the first match
+        explorer = next(i for i, p in enumerate(b.customPosePresets) if p["keys"] == "win+e")
+        assert picker.property("currentIndex") == explorer and b.customPoses == []
+        hold = find("customPoseReviewHold")
+        assert hold is not None and float(hold.property("text")) > 0                 # the chosen hold is filled in
+        hold.setProperty("text", "0.85")
+        assert QMetaObject.invokeMethod(find("customPoseApprove"), "click")
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(30)
+        assert b.customPoses[0]["keys"] == "win+e" and b.customPoseSession == {}
+        assert b.customPoses[0]["hold"] == .85                                       # the person's hold time
+        assert not [m for m in messages if ("CustomPoses" in m or "CommandPicker" in m)], messages
+    finally:
+        qInstallMessageHandler(None)
         b.close()
         runtime.stop()

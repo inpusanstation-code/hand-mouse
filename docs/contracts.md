@@ -565,7 +565,7 @@ CLI 수집기(`tools/collect_mouse.py`)도 같은 키·형식을 쓴다. 이전 
   모든 프레임의 수동 탐색과 타임라인의 품질 경고·기록 이벤트 이동은 계속 제공한다.
 - `tracking.pose_enabled`는 기본 false, `tracking.pose_every_n_frames`는 기본 5다. 켜면 녹화 중에만
   공식 Pose Lite 모델로 상체 6점(왼/오 어깨·팔꿈치·손목)을 추가 추적한다. 같은 런타임 스레드에서
-  처리하고 프레임을 쌓지 않는다. pose는 시각화용이며 TCN 특징에 넣지 않는다. 모델 부재·오류는
+  처리하고 프레임을 쌓지 않는다. 몸·머리 뼈대(`tracking.body_assist`)는 Pose Full을 쓰며 그 점은 녹화에 넣지 않는다. pose는 시각화용이며 TCN 특징에 넣지 않는다. 모델 부재·오류는
   손 추적·녹화를 막지 않고 상태로 보인다. 재생의 최근 pose 유지는 최대 0.3초이며 시각을 표시한다.
 - 시뮬레이터는 현재 app 조립 함수·Engine·TCN·바인딩으로 녹화를 재생한다. 출력은
   practice/null만 주입하며 Windows sink를 만들지 않는다. 프레임 확률과 실제 tap/begin
