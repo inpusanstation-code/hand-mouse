@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ".." as Current
 import "../theme" as Theme
+import "../components" as Comp
 
 ApplicationWindow {
     id: window
@@ -343,6 +344,12 @@ ApplicationWindow {
                                 visible: dashboard.movementStyle === "virtual"
                                 text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
                                 onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
+                            }
+                            Comp.CustomPoses {
+                                objectName: "mainCustomPoses"
+                                Layout.fillWidth: true
+                                controller: dashboard
+                                idle: !dashboard.recActive
                             }
                             ActionButton {
                                 Layout.fillWidth: true

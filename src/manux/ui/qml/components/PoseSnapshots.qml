@@ -14,7 +14,6 @@ ScrollView {
         width: page.availableWidth; spacing: Theme.Studio.gap
         Copy { text: "포즈 표본 스튜디오"; font.pixelSize: Theme.Studio.title; font.bold: true }
         Copy { Layout.fillWidth: true; text: "자세를 선택하고 카메라에 보여주세요. 표본을 모아 빠른 포즈 미리보기 모델을 만듭니다. TCN 제어 모델과는 별개입니다."; color: Theme.Studio.muted }
-        CustomPoses { Layout.fillWidth: true; controller: page.controller; idle: page.idle }
         Rectangle {
             Layout.fillWidth: true; implicitHeight: poseGuide.implicitHeight + Theme.Studio.gap * 2
             color: Theme.Studio.mintWash; radius: Theme.Studio.radius

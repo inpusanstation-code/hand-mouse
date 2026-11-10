@@ -68,18 +68,12 @@ def test_register_a_gesture_from_the_pose_page_without_qml_errors(tmp_path):
     b = Bridge(runtime, settings, tmp_path/'config', services={"training_center": service}, layout="studio")
     try:
         b.control_hand = "Right"; b.finishSplash()
-        assert QMetaObject.invokeMethod(b.window.findChild(QObject, "openLearningCenter"), "click")
-        popup = b.window.findChild(QObject, "studioDataManagement")
-        for _ in range(80):
-            QTest.qWait(30)
-            if not b.studio.busy and not b.training_busy:
-                break
-        start = None
-        for index in range(6):
-            popup.setProperty("pageIndex", index); QTest.qWait(30)
-            start = b.window.findChild(QQuickItem, "customPoseStart")
-            if start is not None and start.isVisible():
-                break
+        if b.stage != "main":
+            b._set_stage("main")
+        QTest.qWait(40)
+        section = b.window.findChild(QQuickItem, "mainCustomPoses")         # on the first page (2026-11-10 request)
+        assert section is not None and section.isVisible()
+        start = b.window.findChild(QQuickItem, "customPoseStart")
         assert start is not None and start.isVisible()
         assert not start.property("enabled")                         # no name yet
         b.window.findChild(QQuickItem, "customPoseName").setProperty("text", "락 사인")
@@ -204,10 +198,9 @@ def test_a_registered_gesture_gets_a_preset_or_a_typed_win_combination_on_screen
     b = Bridge(runtime, settings, tmp_path/'config', services={"training_center": service}, layout="studio")
     try:
         b.control_hand = "Right"; b.finishSplash()
-        b.poll()
-        assert QMetaObject.invokeMethod(b.window.findChild(QObject, "openLearningCenter"), "click")
-        popup = b.window.findChild(QObject, "studioDataManagement")
-        popup.setProperty("pageIndex", 5); QTest.qWait(60)
+        if b.stage != "main":
+            b._set_stage("main")
+        b.poll(); QTest.qWait(60)
         def find(name):
             def walk(item):
                 for child in item.childItems():
@@ -238,5 +231,27 @@ def test_a_registered_gesture_gets_a_preset_or_a_typed_win_combination_on_screen
         assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Cannot assign", "Binding loop"))], messages
     finally:
         qInstallMessageHandler(None)
+        b.close()
+        runtime.stop()
+
+
+
+@pytest.mark.parametrize("layout", ["standard", "studio"])
+def test_new_gesture_registration_is_on_the_first_page_in_both_layouts(tmp_path, layout):
+    from manux.desktop import build, CustomPoses
+    from types import SimpleNamespace
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    runtime.custom_poses = CustomPoses(tmp_path / "cp")
+    b = Bridge(runtime, settings, tmp_path/'config', layout=layout)
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        if b.stage != "main":
+            b._set_stage("main")
+        b.window.setWidth(1140); b.window.setHeight(760); QTest.qWait(60)
+        section = b.window.findChild(QQuickItem, "mainCustomPoses")
+        assert section is not None and section.isVisible() and section.property("width") > 150
+        assert b.window.findChild(QQuickItem, "customPoseStart").isVisible()
+    finally:
         b.close()
         runtime.stop()

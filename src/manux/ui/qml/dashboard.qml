@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "components" as Comp
 
 ApplicationWindow {
     id: window
@@ -220,13 +221,6 @@ ApplicationWindow {
                         options: [["palm", "손바닥 (기본)"], ["index", "검지 포인터 (시험)"], ["virtual", "가상 손 (시험)"]]
                         current: dashboard.movementStyle
                         onPicked: function (value) { dashboard.setMovementStyle(value) }
-                    }
-                    ActionButton {
-                        objectName: "drawVirtualBox"
-                        Layout.fillWidth: true
-                        visible: dashboard.movementStyle === "virtual"
-                        text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
-                        onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
                     }
                     ActionButton {
                         Layout.fillWidth: true
@@ -724,6 +718,19 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             TextLabel { Layout.fillWidth: true; text: dashboard.calibrationHint; wrapMode: Text.Wrap }
                             ActionButton { text: "취소"; onClicked: dashboard.cancelPointerCalibration() }
+                        }
+                        ActionButton {
+                            objectName: "drawVirtualBox"
+                            Layout.fillWidth: true
+                            visible: dashboard.movementStyle === "virtual"
+                            text: dashboard.boxEditing ? "그리는 중 · 미리보기에서 끌어 그리세요 · 누르면 취소" : "손 움직일 영역 다시 그리기 (가상 손)"
+                            onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
+                        }
+                        Comp.CustomPoses {
+                            objectName: "mainCustomPoses"
+                            Layout.fillWidth: true
+                            controller: dashboard
+                            idle: !dashboard.recActive
                         }
                         RowLayout {
                             visible: !dashboard.pointerOnly && !dashboard.calibratingPointer

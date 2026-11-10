@@ -20,18 +20,19 @@ Rectangle {
         id: col
         anchors { left: parent.left; right: parent.right; top: parent.top; margins: Theme.Studio.gap }
         spacing: 6
-        Copy { text: "내 동작 바로 등록"; font.bold: true; font.pixelSize: Theme.Studio.body + 2 }
+        Copy { Layout.fillWidth: true; text: "새 동작 바로 등록"; font.bold: true; font.pixelSize: Theme.Studio.body + 2 }
         Copy {
             Layout.fillWidth: true; color: Theme.Studio.muted; font.pixelSize: Theme.Studio.small
-            text: "새 손 모양을 5번 보여 주면 바로 쓸 수 있습니다(학습 없음). 그다음 실행할 명령을 고르세요. 명령을 고르기 전에는 아무 일도 하지 않습니다. 쓸 자세 그대로 보여 주세요. 등록하는 동안 마우스는 움직이지 않습니다."
+            text: "새 손 모양을 5번 보여 주면 바로 쓸 수 있습니다(학습 없음). 그다음 실행할 명령이나 키를 고르세요. 쓸 자세 그대로 보여 주세요. 등록하는 동안 마우스는 움직이지 않습니다."
         }
 
         // ---- 1. name and start
-        RowLayout {
-            Layout.fillWidth: true; visible: !box.running && !box.reviewing
+        ColumnLayout {                                       // stacked: fits the narrow side column of the main page
+            Layout.fillWidth: true; visible: !box.running && !box.reviewing; spacing: 4
             StudioField { id: poseName; objectName: "customPoseName"; Layout.fillWidth: true; placeholderText: "동작 이름 (예: 락 사인)"; maximumLength: 30 }
             StudioButton {
-                objectName: "customPoseStart"; text: "등록 시작"; primary: true
+                Layout.fillWidth: true
+                objectName: "customPoseStart"; text: "새 동작 등록 시작"; primary: true
                 enabled: box.idle && poseName.text.trim().length > 0 && box.controller.customPoses.length < 8
                 onClicked: box.controller.startCustomPose(poseName.text)
             }
@@ -70,7 +71,8 @@ Rectangle {
                 color: box.reviewing && box.session.report && box.session.report.reliable ? Theme.Studio.mintDark : "#B54708"
             }
             RowLayout {
-                StudioButton { objectName: "customPoseApprove"; text: "저장"; primary: true; onClicked: box.controller.approveCustomPose() }
+                Layout.fillWidth: true
+                StudioButton { objectName: "customPoseApprove"; Layout.fillWidth: true; text: "저장"; primary: true; onClicked: box.controller.approveCustomPose() }
                 StudioButton { text: "버리기"; onClicked: box.controller.cancelCustomPose() }
             }
         }
