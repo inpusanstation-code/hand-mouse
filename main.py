@@ -474,6 +474,9 @@ def run_dashboard(args, perf, engine, camera, tracker, mouse, settings, keys, pe
             ok, frame = camera.read()
             loop_t0 = time.perf_counter()
             if not ok or frame is None:
+                # no picture (camera unplugged mid-drag): let go like "no hand", or the button stays down
+                if not paused:
+                    mouse.hand_lost(engine.config)
                 time.sleep(0.03)
                 continue
 
@@ -699,7 +702,7 @@ def main() -> int:
           "tracking {min_tracking_confidence}, detect width {detect_max_width}".format(**tracker_cfg))
     mouse = MouseController(dry_run=args.dry_run)
     mouse.window_probe = window_center_at       # page scrolling keeps the cursor in the middle of its window
-    mouse.scroll_target_finder = ScrollTargetFinder(lambda: engine.config)    # ...of the scroll region under the cursor
+    mouse.scroll_target_finder = ScrollTargetFinder(get_config=lambda: engine.config)    # ...of the scroll region under the cursor
     mouse.scroll_target_finder.start()
     settings = SettingsPanel(engine)
     keys = KeyPoller()

@@ -22,6 +22,8 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -474,6 +476,11 @@ def describe_anchor_joints(joints: Sequence[int]) -> str:
     return f"관절 {len(j)}곳의 가운데"
 
 
+# written by the calibration into a profile and read by the mouse controller, but not a setting of gestures.json:
+# limited to DEFAULT_CONFIG's keys, a profile lost it on loading
+PROFILE_ONLY_KEYS = {"calibrated_hand_size"}
+
+
 class GestureEngine:
     """
     Processes 21 hand landmarks to detect pinch gestures with hysteresis
@@ -586,19 +593,27 @@ class GestureEngine:
         """Load configuration from JSON file and merge with defaults."""
         target = Path(path) if path is not None else self.config_path
         cfg = copy.deepcopy(DEFAULT_CONFIG)
+        self._config_unreadable: Optional[Path] = None
         if target.exists():
             try:
-                with open(target, "r", encoding="utf-8") as f:
+                # utf-8-sig: Notepad's "UTF-8 with BOM" is read too. ValueError covers a JSON typo and a file saved in
+                # another encoding (cp949), which used to stop the app at startup.
+                with open(target, "r", encoding="utf-8-sig") as f:
                     loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    raise ValueError("not a JSON object")
                 self._deep_merge(cfg, loaded)
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, ValueError) as exc:
+                # the defaults are used; the next save must not silently replace the tuned file (see save_config)
+                self._config_unreadable = target
+                print(f"[config] {target} could not be read ({exc}); using the built-in defaults. "
+                      "The file is kept as a .bak-unreadable copy if settings are saved.")
         self._profile_base: Dict[str, Any] = {}
         self._profile_applied: Dict[str, Any] = {}
         self.profile_name: Optional[str] = None
         try:
             name = profiles.get_active(target.parent)
-            overlay = profiles.load_profile(target.parent, name, set(DEFAULT_CONFIG)) if name else None
+            overlay = profiles.load_profile(target.parent, name, set(DEFAULT_CONFIG) | PROFILE_ONLY_KEYS) if name else None
         except ValueError:
             name, overlay = None, None
         if name and overlay is not None:
@@ -637,8 +652,18 @@ class GestureEngine:
                     out.pop(key, None)
                 else:
                     out[key] = base
-        with open(target, "w", encoding="utf-8") as f:
+        if getattr(self, "_config_unreadable", None) == target and target.exists():
+            # this file failed to load, so `out` is the defaults: keep what the user had before writing over it
+            try:
+                shutil.copy2(target, target.with_name(f"{target.name}.bak-unreadable-{time.strftime('%Y%m%d-%H%M%S')}"))
+            except OSError:
+                pass
+            self._config_unreadable = None
+        # written whole or not at all (the runtime thread and the settings window both save this file)
+        tmp = target.with_name(target.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, target)
         return target
 
     @staticmethod

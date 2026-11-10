@@ -147,6 +147,14 @@ class InferencePipeline:
             ok, frame = camera.read()
             t0 = time.perf_counter()
             if not ok or frame is None:
+                # No picture (camera unplugged, the phone app closed): treat it as "no hand". Before, a drag in
+                # progress kept the mouse button down, and even Pause could not release it, as that check is below.
+                paused = self._paused
+                if paused and not self._was_paused:
+                    mouse.release_all()
+                elif not paused:
+                    mouse.hand_lost(engine.config)
+                self._was_paused = paused
                 time.sleep(0.03)
                 continue
 

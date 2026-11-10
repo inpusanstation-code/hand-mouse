@@ -992,6 +992,8 @@ class MouseController:
             # 35x would turn into a zigzag is dropped.
             if self._path is None:
                 self._path = PathSmoother(config)
+            else:       # a reloaded config, another profile or the settings sliders reach it (was: fixed at first use)
+                self._path.config.update({k: float(config[k]) for k in self._path.config if k in config})
             dx, dy = self._path.step(now, dx, dy)
         elif self._path is not None:
             self._path.reset()
@@ -1975,6 +1977,10 @@ class MouseController:
         """Safely release any held mouse buttons / keys and reset relative anchors."""
         self.close_switcher(confirm=True)
         self._mouse_up()
+        # a scroll that was going on ends here, without a coast: its history used to survive a pause and launched
+        # inertia (about 10 wheel notches) on the first frame after resuming
+        self._end_scroll(launch=False)
+        self._stop_scroll_inertia()
         self._hold_dragging = False
         self._toggle_dragging = False
         self.anchor_hand_pos = None

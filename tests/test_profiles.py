@@ -98,3 +98,20 @@ def test_saving_the_config_does_not_copy_the_profile_into_the_base_file(tmp_path
     e.config["pinch_threshold"] = 0.02                            # the user changed a profile-owned key
     e.save_config()
     assert json.loads(cfg.read_text(encoding="utf-8"))["pinch_threshold"] == 0.02
+
+
+def test_a_config_file_notepad_saved_is_read_and_an_unreadable_one_is_kept(tmp_path):
+    """UTF-8 with BOM loaded as the defaults without a word, and the next save wrote the defaults over the tuned file;
+    a file in another encoding stopped the app at startup (2026-11-10)."""
+    import json
+    from src.gesture_engine import GestureEngine
+    path = tmp_path / "gestures.json"
+    path.write_text(json.dumps({"fist_dpi_multiplier": 35.0}), encoding="utf-8-sig")
+    assert GestureEngine(config_path=path).config["fist_dpi_multiplier"] == 35.0
+    path.write_bytes('{"camera_note": "집 PC"}'.encode("cp949"))
+    engine = GestureEngine(config_path=path)                 # no crash: the defaults
+    engine.save_config()
+    kept = list(tmp_path.glob("gestures.json.bak-unreadable-*"))
+    assert len(kept) == 1 and kept[0].read_bytes() == '{"camera_note": "집 PC"}'.encode("cp949")
+    assert json.loads(path.read_text(encoding="utf-8"))      # the new file is whole
+    assert not list(tmp_path.glob("*.tmp"))
