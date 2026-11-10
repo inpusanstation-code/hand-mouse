@@ -52,3 +52,48 @@ def test_common_tabs_keep_header_and_named_model_actions(tmp_path,monkeypatch,la
     finally:
         b.close()
         if layout=="studio":runtime.stop()
+
+
+def test_register_a_gesture_from_the_pose_page_without_qml_errors(tmp_path):
+    from PySide6.QtCore import qInstallMessageHandler
+    from manux.desktop import build, CustomPoses
+    from types import SimpleNamespace
+    messages = []
+    qInstallMessageHandler(lambda mode, ctx, text: messages.append(text))
+    settings = Settings(schema())
+    runtime = build(settings, SimpleNamespace(close=lambda: None), windows=False)
+    runtime.custom_poses = CustomPoses(tmp_path / "custom_poses")
+    service = TrainingCenterService(tmp_path/'config', tmp_path/'data', tmp_path/'recordings', specs=training_specs())
+    service.configure("synthetic")
+    b = Bridge(runtime, settings, tmp_path/'config', services={"training_center": service}, layout="studio")
+    try:
+        b.control_hand = "Right"; b.finishSplash()
+        assert QMetaObject.invokeMethod(b.window.findChild(QObject, "openLearningCenter"), "click")
+        popup = b.window.findChild(QObject, "studioDataManagement")
+        for _ in range(80):
+            QTest.qWait(30)
+            if not b.studio.busy and not b.training_busy:
+                break
+        start = None
+        for index in range(6):
+            popup.setProperty("pageIndex", index); QTest.qWait(30)
+            start = b.window.findChild(QQuickItem, "customPoseStart")
+            if start is not None and start.isVisible():
+                break
+        assert start is not None and start.isVisible()
+        assert not start.property("enabled")                         # no name yet
+        b.window.findChild(QQuickItem, "customPoseName").setProperty("text", "락 사인")
+        QTest.qWait(10)
+        assert start.property("enabled")
+        assert QMetaObject.invokeMethod(start, "click")
+        runtime._drain_runtime_requests(); b.poll(); QTest.qWait(20)
+        assert b.customPoseSession["state"] == "prep" and b.paused
+        assert b.window.findChild(QQuickItem, "customPoseProgress").isVisible()
+        b.cancelCustomPose(); runtime._drain_runtime_requests(); b.poll(); QTest.qWait(20)
+        assert b.customPoseSession == {} and start.isVisible()
+        assert b.customPoseCommandLabels[0].startswith("명령 없음") and len(b.customPoseCommandIds) == len(b.customPoseCommandLabels)
+        assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Cannot assign", "Binding loop"))], messages
+    finally:
+        qInstallMessageHandler(None)
+        b.close()
+        runtime.stop()

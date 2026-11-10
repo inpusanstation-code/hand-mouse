@@ -25,6 +25,7 @@
   입력을 만드는 feature·TCN 정책·OS 출력 상태를 변경하지 않는다. UI는 같은 프레임의 복사본에만
   그린다. 제어 꺼짐과 녹화 중 Windows 입력 차단은 그대로 유지한다.
 - `RuntimeRequest`의 `preview_model`은 미검증 후보를 강제 shadow로 로드한다.
+- `RuntimeRequest`의 `custom_pose`(2026-11-10 추가): `path`는 `start`·`approve`·`cancel`·`bind`·`remove`, `values`는 `name` / `slot`·`action`. 시연 중(`start`~`approve`/`cancel`/실패)에는 `SetBusy("enrolling")`으로 OS 입력이 꺼진다. 등록 동작은 `custom_pose.slot1`~`slot8`(tap)이며 기본 바인딩이 없다(D-004). 연결할 수 있는 명령은 tap 액션 중 `features/custom_pose.COMMANDS`뿐이다.
   `tcn_toggle`의 `on`/`off`는 프레임 경계에서 출력·판정 상태를 해제하고 전역 TCN을
   켜거나 끈다. 동작별 저장 정책은 덮어쓰지 않으며 모델 교체 뒤에도 전역 선택을 유지한다.
   원본의 N 단축키는 `next_monitor` 요청으로 출력 계층의 모니터 전환을 호출한다.

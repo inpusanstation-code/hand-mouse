@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import copy
+import json
+import os
 import queue
 import sys
 import threading
@@ -20,7 +22,7 @@ import time
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from manux.actions.bindings import Binding
@@ -167,6 +169,137 @@ class ReplayInput:
         return None
 
 
+class CustomPoses:
+    """Registered gestures (perception/pose_memory.py) on disk and in the running engine. Runtime thread only.
+
+    <data>/custom_poses/memory.json  prototypes (no pictures), bindings.json  slot gesture -> action,
+    demos/<session>.json  the approved demonstrations' joints (user_confirmed), for later training.
+    """
+
+    def __init__(self, folder: Path, known_samples: Callable[[], Sequence[Mapping[str, Any]]] = lambda: ()) -> None:
+        from manux.perception.pose_memory import PoseMemory
+        self.folder = Path(folder)
+        self.known_samples = known_samples
+        self.memory = PoseMemory()
+        self.bindings: Dict[str, Optional[str]] = {}
+        self.session = None
+        self.message = ""
+        self.revision = 0
+        self._live = None              # memory + known poses, what the feature runs on (rebuilt on change)
+        try:
+            if (self.folder / "memory.json").is_file():
+                self.memory = PoseMemory.load(self.folder / "memory.json")
+            if (self.folder / "bindings.json").is_file():
+                raw = json.loads((self.folder / "bindings.json").read_text(encoding="utf-8"))
+                self.bindings = {str(k): (str(v) if v else None) for k, v in dict(raw).items()}
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.message = f"등록한 동작을 읽지 못했습니다: {error}"
+
+    # ------------------------------------------------------------------ engine
+    def attach(self, engine) -> None:
+        """Give the feature the memory (after any pipeline rebuild) and route the slots the person bound."""
+        from manux.actions.bindings import resolve_bindings
+        from manux.features import custom_pose
+        if self._live is None:
+            self._live = self._known_memory() if self.memory.registered() else self.memory
+        for feature in engine.features:
+            if feature.id == custom_pose.ID and feature.memory is not self._live:
+                feature.set_memory(self._live)
+        wanted = {g: self.bindings.get(g) for g in custom_pose.GESTURES}
+        current = engine.router.bindings
+        if any((current[g].action if g in current else None) != a for g, a in wanted.items()):
+            bindings, _ = resolve_bindings(current, wanted, gesture_phases=custom_pose.GESTURE_PHASES)
+            engine.router.set_bindings(bindings)
+
+    # ------------------------------------------------------------------ requests
+    def _known_memory(self):
+        """The memory plus the poses the app already knows (Pose Studio samples), which a new gesture must beat."""
+        import numpy as np
+        from manux.perception.pose_memory import pose_features
+        trial = self.memory.copy()
+        groups: Dict[str, list] = {}
+        for s in self.known_samples() or ():
+            lm, world, label = s.get("rawLandmarks"), s.get("rawWorld"), s.get("groundTruthAction")
+            if not label or not lm or not world or len(lm) != 21 or len(world) != 21 or label in trial.classes:
+                continue
+            groups.setdefault(str(label), []).append({"t": 0.0, "lm": [(p["x"], p["y"], p["z"]) for p in lm],
+                                                      "world": [(p["x"], p["y"], p["z"]) for p in world]})
+        for label, frames in groups.items():
+            poses = np.concatenate([pose_features([f], 720 / 1280) for f in frames])
+            if len(poses):
+                trial.add_known(label, poses, k=min(4, len(poses)))
+        return trial
+
+    def step(self, t: float, lm, world) -> bool:
+        """Feed a running registration. True when it just failed (too short, hand not seen): the session is dropped
+        and `message` says why, so the caller gives the input back."""
+        session = self.session
+        if session is None or not session.active:
+            return False
+        session.update(t, lm, world)
+        if session.state == "failed":
+            self.message, self.session = session.message, None
+            return True
+        return False
+
+    def start(self, name: str, aspect: float) -> None:
+        from manux.perception.pose_registration import RegistrationSession
+        self.session = RegistrationSession(name, self._known_memory(), aspect)
+        self.message = ""
+
+    def approve(self) -> None:
+        from manux.features.custom_pose import gesture_of
+        result = self.session.approve()
+        entry = self.session.memory.classes[result["label"]]
+        self.memory.classes[entry.label] = entry               # known Pose Studio classes stay out of the saved memory
+        self.folder.mkdir(parents=True, exist_ok=True)
+        demos = self.folder / "demos"
+        demos.mkdir(exist_ok=True)
+        (demos / f"{self.session.session}.json").write_text(json.dumps(self.session.demo_frames()), encoding="utf-8")
+        self.memory.save(self.folder / "memory.json")
+        self.bindings.setdefault(gesture_of(result["slot"]), None)
+        self._save_bindings()
+        self.message = f"'{entry.label}' 등록됨 · 실행할 명령을 고르세요"
+        self.session = None
+        self._live = None
+
+    def cancel(self) -> None:
+        if self.session is not None:
+            self.session.cancel()
+        self.session = None
+
+    def bind(self, slot: str, action: Optional[str]) -> None:
+        from manux.features.custom_pose import COMMANDS, gesture_of
+        if action and action not in COMMANDS:
+            raise ValueError("이 동작에 연결할 수 없는 명령입니다")
+        self.bindings[gesture_of(slot)] = action or None
+        self._save_bindings()
+
+    def remove(self, slot: str) -> None:
+        from manux.features.custom_pose import gesture_of
+        for entry in list(self.memory.registered()):
+            if entry.extra.get("slot") == slot:
+                self.memory.remove_class(entry.label)
+        self.bindings.pop(gesture_of(slot), None)
+        self.memory.save(self.folder / "memory.json")
+        self._save_bindings()
+        self._live = None
+
+    def _save_bindings(self) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        tmp = self.folder / "bindings.json.tmp"
+        tmp.write_text(json.dumps(self.bindings, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.folder / "bindings.json")
+
+    def view(self) -> Dict[str, Any]:
+        from manux.features.custom_pose import gesture_of
+        rows = [{"slot": e.extra.get("slot", ""), "name": e.label, "demos": e.demos,
+                 "action": self.bindings.get(gesture_of(e.extra.get("slot", ""))) or ""}
+                for e in self.memory.registered()]
+        return {"poses": sorted(rows, key=lambda r: r["slot"]), "session": self.session.view() if self.session else None,
+                "message": self.message, "revision": self.revision}
+
+
 class DesktopRuntime:
     """Runs the input -> engine loop on its own thread and keeps the newest ViewFrame."""
 
@@ -199,6 +332,7 @@ class DesktopRuntime:
         self._configured_filters = tuple(engine.filters)
         self.spatial_feature: Optional[SpatialPoseFeature] = None
         self.spatial_guard: Optional[SpatialPoseGuard] = None
+        self.custom_poses: Optional[CustomPoses] = None   # registered gestures (set by main)
         engine.settings_for = self.settings_for
         # tracking test (S6): owned by this thread; the UI asks with start/close and reads ViewFrame.tracking
         self.log_dir: Optional[Path] = None
@@ -657,6 +791,8 @@ class DesktopRuntime:
 
     def step(self) -> None:
         self._drain_runtime_requests()
+        if self.custom_poses is not None:
+            self.custom_poses.attach(self.engine)      # also after any pipeline rebuild
         self._tracking_requests()
         self.reload_model()
         self._sync_control_model()
@@ -689,6 +825,10 @@ class DesktopRuntime:
         if practice_sink is not None and practice_sink.config is not None:
             practice_sink.update_config(replace(getattr(sink, "config", None) or practice_sink.config,
                                                 frame_aspect=frame.aspect))
+        if self.custom_poses is not None and self.custom_poses.step(
+                frame.t, hand.landmarks if hand else None, hand.world if hand else None):
+            from manux.engine.commands import SetBusy
+            self.engine.commands.put(SetBusy("enrolling", False))     # failed: give the input back
         snap = self.engine.step(frame, hand)
         pointer_setup = self._pointer_setup_frame(frame, hand, pitch, snap.stage, sink)
         rule_preview = None
@@ -831,6 +971,8 @@ class DesktopRuntime:
                     self.engine.replace_pipeline(self.engine.features, filters, self.engine.router, self.engine.gesture_sources)
                 except (ValueError, OSError, KeyError):
                     self.model_status = "보조 차단 모델을 읽지 못했습니다 · 기존 판정 유지"
+            if command.kind == "custom_pose" and self.custom_poses is not None:
+                self._custom_pose_request(command)
             if command.kind == "next_monitor":
                 sink = self.engine.sinks.get(OutputTarget.WINDOWS)
                 if not self.engine.state.busy and self._rec_want[0] == "off" and hasattr(sink, "next_monitor"):
@@ -864,6 +1006,32 @@ class DesktopRuntime:
                 self._model_token = None
                 if not self.reload_model(force=True):
                     self.model_store, self._model_token, self._attempted_model_token = previous
+
+    def _custom_pose_request(self, command):
+        """start / approve / cancel / bind / remove a registered gesture. No OS input while demonstrating."""
+        from manux.engine.commands import SetBusy
+        cp, op, values = self.custom_poses, command.path, dict(command.values)
+        try:
+            if op == "start":
+                cp.start(str(values.get("name", "")), float(values.get("aspect", 720 / 1280)))
+                self.engine.commands.put(SetBusy("enrolling", True))
+            elif op == "approve":
+                cp.approve()
+                self.engine.commands.put(SetBusy("enrolling", False))
+            elif op == "cancel":
+                cp.cancel()
+                self.engine.commands.put(SetBusy("enrolling", False))
+            elif op == "bind":
+                cp.bind(str(values.get("slot", "")), str(values.get("action", "")) or None)
+            elif op == "remove":
+                cp.remove(str(values.get("slot", "")))
+            cp.attach(self.engine)
+        except (ValueError, OSError) as error:
+            cp.message = str(error)
+            if op in ("start", "approve"):
+                cp.cancel()
+                self.engine.commands.put(SetBusy("enrolling", False))
+        cp.revision += 1
 
     def _apply_sensitivity(self, command):
         from manux.settings.sensitivity import prepare
@@ -978,7 +1146,7 @@ def build(settings: Settings, source, *, windows: bool = True, tcn_model=None, t
         status += " · " + describe(direct.predictor)["actual"]
     elif tcn_model is not None:
         eligible = {gid for module, _ in _FEATURES for gid in module.DEFAULT_BINDINGS
-                    if module.GESTURE_PHASES[gid] & {"tap", "begin"}}
+                    if module.GESTURE_PHASES[gid] & {"tap", "begin"} and module.ID != "custom_pose"}
         gate = tcn_gate.create_gate(Path(tcn_model), settings.section("tcn_gate"), eligible=eligible)
         filters = (gate.gate,) if gate.gate is not None else ()
         status = "TCN 확인기" if filters else f"TCN 확인기 꺼짐 · {gate.text}"
@@ -1188,6 +1356,7 @@ def main(argv=None) -> int:
     tc.simulation_config = {"simulation_mode": args.tcn_mode,
                             "simulation_model": str(args.tcn_model) if args.tcn_model else None}
     studio = make_pose_studio(paths.data_dir, runtime.set_spatial_model)
+    runtime.custom_poses = CustomPoses(paths.data_dir / "custom_poses", known_samples=studio.load_all_samples)
     from manux.perception.palm_axes import PalmAxesCalibration, valid_axes, palm_point
     return run(runtime, settings, paths, tray=not args.no_tray, screenshot=args.screenshot, layout=args.ui,
                services={

@@ -84,8 +84,15 @@
 
 원본 상태(그 폴더 문서): "검증 성공 시 교체"는 실데이터로 통과한 적이 없다. 미등록 동작 거부 FRR 0.44 / FAR 0.053(배수 1.5). 한 사람·한 카메라.
 
+## 즉시 동작 등록 (3단계 1번, 완료)
+- 원본 `online/pose_memory.py`·`registration.py` → `perception/pose_memory.py`·`perception/pose_registration.py`(`ml` 계층은 `core`만 import할 수 있어 `perception`에 둠, numpy만), 기능 `features/custom_pose`(칸 8개, 기본 바인딩 없음), 저장·엔진 연결 `desktop.CustomPoses`(`<data>/custom_poses/memory.json`, `bindings.json`, `demos/`), 화면은 학습 센터 › Pose Studio 맨 위 "내 동작 바로 등록".
+- 흐름: 이름 → 등록 시작(제어 꺼짐, 시연 중 OS 입력 없음) → 준비 1.5초 · 자세 2초 · 쉬기 1초 × 5(손이 안 보이면 시간 멈춤) → 결과(다른 시연만으로 몇 번 알아봤는지, 쉬는 자세에서 잡히는지, 헷갈리는 자세) → 저장/버리기 → 명령 고르기(고르기 전에는 아무 일도 안 함).
+- 새 동작은 Pose Studio에 저장된 표본의 자세들(알려진 자세)과 경쟁한다. 원본은 안내 녹화의 자세를 썼다. Pose Studio 표본이 없으면 등록 동작끼리만 경쟁하므로 다른 손 모양을 잘못 잡을 수 있다.
+- 원본과 다른 점: 등록 동작이 잡히는 동안 커서를 멈추지 않는다(기능끼리 서로 멈출 수 없음). 원본의 신경망 임베딩 쪽(`memory.py` PrototypeMemory)은 옮기지 않았다(원본 문서: 새 동작 인식이 약해 자세 공간으로 바꿈).
+- 고친 것: 등록 실패(시연이 짧거나 손이 안 보임) 때 입력이 꺼진 채 남지 않게 `CustomPoses.step`이 세션을 닫고 이유를 남긴다.
+- 시험: `tests/unit/features/test_custom_pose.py` 9개(등록·승인·바인딩·재시작 후 유지·실제 엔진에서 `nav.back` 실행·실패 처리), `tests/unit/ui/test_unified_center.py` 1개(화면에서 등록 시작·취소, QML 오류 없음). 합성 손이며 실제 카메라로 등록해 보지 않았다.
+
 ## 아직 안 한 것 (3단계 남은 일)
-1. 즉시 동작 등록(`pose_memory` + `registration`) → Pose Studio 흐름에 붙이기.
 2. `ml/store.py` 되돌리기.
 3. 평소 사용 후보 수집(`segmenter`, `collector`) → MANUX 녹화 형식.
 4. 사용 중 재학습(torch 부분) → worker 작업 종류.

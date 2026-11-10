@@ -486,6 +486,7 @@ class Bridge(QObject):
     trainingStarted = Signal()
     settingsRequested = Signal()
     studioChanged = Signal()
+    customPoseChanged = Signal()
 
     def __init__(self, runtime, settings: store.Settings, config_dir: Path, *,
                  services: Optional[Dict[str, Callable]] = None, hotkeys=None, hotkey_defaults=None,
@@ -543,6 +544,7 @@ class Bridge(QObject):
         self.live_gesture = ""
         self.contact_text = ""
         self.mlp_badge_text = ""
+        self._custom_view = {"poses": [], "session": None, "message": "", "revision": -1}
         self.metrics = ("", -1, False)
         self.reception = ("paused", "입력 꺼짐")
         self.motion_on = False
@@ -1443,6 +1445,64 @@ class Bridge(QObject):
     @Slot()
     def stopTraining(self):
         self.training_job.stop()
+
+    # ------------------------------------------------------------------ registered gestures (custom_pose)
+    CUSTOM_COMMANDS = ("", "nav.back", "nav.forward", "tab.prev", "tab.next", "window.task_switcher",
+                       "window.show_desktop", "window.close", "mouse.left_click", "mouse.right_click")
+
+    @Property("QVariantList", notify=customPoseChanged)
+    def customPoses(self):
+        return list(self._custom_view.get("poses") or [])
+
+    @Property("QVariantMap", notify=customPoseChanged)
+    def customPoseSession(self):
+        return dict(self._custom_view.get("session") or {})
+
+    @Property(str, notify=customPoseChanged)
+    def customPoseMessage(self):
+        return str(self._custom_view.get("message") or "")
+
+    @Property("QStringList", constant=True)
+    def customPoseCommandIds(self):
+        return list(self.CUSTOM_COMMANDS)
+
+    @Property("QStringList", constant=True)
+    def customPoseCommandLabels(self):
+        return ["명령 없음 (아무것도 안 함)"] + [{"window.close": "창 닫기"}.get(a, ACTION_TEXT.get(a, a))
+                                             for a in self.CUSTOM_COMMANDS[1:]]
+
+    def _custom_request(self, op, **values):
+        return self.runtime.request(RuntimeRequest("custom_pose", op, values))
+
+    @Slot(str)
+    def startCustomPose(self, name):
+        self._pause()                         # the hand is demonstrating, not controlling
+        self._custom_request("start", name=str(name))
+
+    @Slot()
+    def approveCustomPose(self):
+        self._custom_request("approve")
+
+    @Slot()
+    def cancelCustomPose(self):
+        self._custom_request("cancel")
+
+    @Slot(str, str)
+    def setCustomPoseAction(self, slot, action):
+        self._custom_request("bind", slot=str(slot), action=str(action))
+
+    @Slot(str)
+    def removeCustomPose(self, slot):
+        self._custom_request("remove", slot=str(slot))
+
+    def _poll_custom_poses(self) -> None:
+        cp = getattr(self.runtime, "custom_poses", None)
+        if cp is None:
+            return
+        view = cp.view()
+        if view != self._custom_view:
+            self._custom_view = view
+            self.customPoseChanged.emit()
 
     @Slot()
     def emergency_stop(self):
@@ -2811,6 +2871,7 @@ class Bridge(QObject):
 
     # ------------------------------------------------------------------ frame rendering (UI thread)
     def poll(self) -> None:
+        self._poll_custom_poses()
         advanced = getattr(self.runtime, "advanced_result", (0, True, ""))
         if advanced[0] != getattr(self, "_advanced_revision", 0):
             self._advanced_revision = advanced[0]
