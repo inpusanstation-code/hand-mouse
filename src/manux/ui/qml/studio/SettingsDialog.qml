@@ -9,6 +9,7 @@ Dialog {
     signal dataRequested()
     signal advancedRequested()
     property var settingRows: []
+    readonly property var tabGroups: ["pinch", "cursor", "click"]   // one tab per function, then 표시 · 데이터
     property var draft: ({})
     property var edits: ({})
     function reload() {
@@ -41,16 +42,17 @@ Dialog {
             id: tabs
             objectName: "sensitivityTabs"
             Layout.fillWidth: true
-            TabButton { text: "동작 민감도"; objectName: "pinchSensitivityTab" }
-            TabButton { text: "커서 민감도"; objectName: "cursorSensitivityTab" }
+            TabButton { text: "스크롤 · 창 전환"; objectName: "pinchSensitivityTab" }
+            TabButton { text: "커서"; objectName: "cursorSensitivityTab" }
+            TabButton { text: "클릭 · 드래그"; objectName: "clickSensitivityTab" }
             TabButton { text: "표시 · 데이터" }
         }
         Label {
             Layout.fillWidth: true
-            visible: tabs.currentIndex < 2
-            text: tabs.currentIndex === 0
-                ? "손바닥 모드의 핀치·클릭 감도입니다. 수치를 직접 입력할 수도 있습니다."
-                : "느린 이동과 빠른 이동 감도를 따로 조절합니다. 주먹·드래그 배율은 손바닥 모드에 적용됩니다."
+            visible: tabs.currentIndex < 3
+            text: ["엄지·검지로 잡아 스크롤하는 핀치와 엄지·새끼 창 전환의 감도입니다. 수치를 직접 입력할 수도 있습니다.",
+                   "느린 이동과 빠른 이동 감도를 따로 조절합니다. 주먹 판정은 손바닥 모드에 적용됩니다.",
+                   "좌클릭(엄지·중지)·우클릭(엄지·약지)의 감도와 드래그를 시작하는 방식입니다."][tabs.currentIndex]
             wrapMode: Text.Wrap
             color: "#526575"
         }
@@ -69,8 +71,7 @@ Dialog {
                     delegate: ColumnLayout {
                         required property var modelData
                         Layout.fillWidth: true
-                        visible: (tabs.currentIndex === 0 && modelData.group === "pinch")
-                                 || (tabs.currentIndex === 1 && modelData.group === "cursor")
+                        visible: modelData.group === settings.tabGroups[tabs.currentIndex]
                         spacing: 2
                         Label { text: modelData.label; font.bold: true; color: "#112331" }
                         ComboBox {
@@ -123,7 +124,7 @@ Dialog {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
-                    visible: tabs.currentIndex === 2
+                    visible: tabs.currentIndex === 3
                     CheckBox {
                         text: "커서 옆 손가락 표시"
                         checked: settings.controller.fingerOverlay
@@ -154,10 +155,10 @@ Dialog {
             Layout.fillWidth: true
             Button {
                 text: "현재 탭 기본값"
-                visible: tabs.currentIndex < 2
+                visible: tabs.currentIndex < 3
                 enabled: !settings.controller.sensitivityPending
                 onClicked: {
-                    let group = tabs.currentIndex === 0 ? "pinch" : "cursor"
+                    let group = settings.tabGroups[tabs.currentIndex]
                     for (let row of settings.settingRows)
                         if (row.group === group && row.editable) settings.changeValue(row.key, row.defaultValue)
                 }

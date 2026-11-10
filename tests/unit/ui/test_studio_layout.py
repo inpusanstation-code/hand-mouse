@@ -414,3 +414,25 @@ def test_small_learning_center_can_scroll_to_all_six_tabs_and_player_controls(st
     play_bottom = play.mapToScene(QPointF(0, play.height())).y()
     assert viewport_top <= play_top and play_bottom <= viewport_top + detail.height()
     assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Error:", "Cannot assign", "Binding loop"))], messages
+
+
+def test_click_and_drag_tab_shows_the_drag_choice_and_applies_it(studio):
+    from PySide6.QtCore import Q_ARG
+    from manux.settings.store import load
+    bridge, service, runtime, messages = studio
+    bridge.command(111)
+    QTest.qWait(60)
+    tabs = visual_child(bridge.window.contentItem(), "sensitivityTabs")
+    tabs.setProperty("currentIndex", 2)
+    QTest.qWait(30)
+    choice = visual_child(bridge.window.contentItem(), "sensitivity-choice-pinch.drag_on_move")
+    assert choice.isVisible() and choice.property("count") == 2 and choice.property("currentIndex") == 0
+    assert not visual_child(bridge.window.contentItem(), "sensitivity-slider-cursor.smoothing").isVisible()
+    choice.setProperty("currentIndex", 1)
+    QMetaObject.invokeMethod(choice, "activated", Q_ARG(int, 1))
+    QMetaObject.invokeMethod(visual_child(bridge.window.contentItem(), "applySensitivity"), "clicked")
+    runtime._drain_runtime_requests()
+    bridge.poll()
+    assert load(schema(), bridge.config_dir).get("pinch.drag_on_move") is True
+    assert runtime.settings_for("pinch")["drag_on_move"] is True
+    assert not [m for m in messages if any(s in m for s in ("ReferenceError", "TypeError", "Error:", "Cannot assign", "Binding loop"))], messages

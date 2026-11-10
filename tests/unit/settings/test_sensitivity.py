@@ -68,3 +68,24 @@ def test_vertical_input_is_a_validated_choice_in_both_editors(mode):
         with pytest.raises(ValueError, match="프로필"):
             validate(settings, edits)
         settings.apply_profile({})
+
+
+def test_simple_settings_are_grouped_by_function_with_a_plain_drag_choice():
+    settings = Settings(schema())
+    by_key = {r["key"]: r for r in rows(settings)}
+    assert {r["group"] for r in by_key.values()} == {"pinch", "cursor", "click"}
+    assert by_key["pinch.click_threshold"]["group"] == "click"
+    assert by_key["pinch.pinch_threshold"]["group"] == "pinch"
+    drag = by_key["pinch.drag_on_move"]
+    assert drag["kind"] == "choice" and drag["group"] == "click"
+    assert drag["choices"] == [False, True] and drag["value"] is False and len(drag["choiceLabels"]) == 2
+    assert by_key["cursor.drag_after_click_guard"]["defaultValue"] == 0.0
+
+
+def test_drag_choice_accepts_only_its_own_values():
+    settings = Settings(schema())
+    assert prepare(settings, {"pinch.drag_on_move": True}) == {"pinch.drag_on_move": True}
+    for bad in ("true", 1, None):
+        with pytest.raises(ValueError):
+            prepare(settings, {"pinch.drag_on_move": bad})
+    assert prepare(settings, {"cursor.drag_after_click_guard": .52}) == {"cursor.drag_after_click_guard": .52}
