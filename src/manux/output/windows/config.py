@@ -39,6 +39,11 @@ class WindowsOutputConfig:
     # double-click assist: the cursor holds still after a left click so a second click lands on the same pixel
     double_click_window: float = 0.45
     double_click_move_tolerance: float = 0.03
+    # A drag that starts within this many seconds of a left click, on the same spot, would reach Windows as a
+    # double-click (the press lands inside the double-click time and distance). The button waits until the hand
+    # moves 8 px or this time has passed since the click (testing-mlp d1713f2 used 0.52). 0 = off: the press is
+    # immediate, so the drag grabs exactly where it began.
+    drag_after_click_guard: float = 0.0
     # grab scroll (touchscreen style) and inertia
     scroll_gain: float = 36000.0             # wheel units per frame width of hand motion
     scroll_deadzone: float = 0.01

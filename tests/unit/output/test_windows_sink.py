@@ -1,6 +1,7 @@
 """WindowsOutputSink over the fake backend: every action, phase pairs, safety, never raising."""
 from __future__ import annotations
 
+import dataclasses
 import ctypes
 
 import pytest
@@ -292,3 +293,36 @@ def test_holding_reports_a_drag_or_an_active_scroll():
     assert s.holding()
     s.release_all("test")
     assert not s.holding()
+
+
+# ------------------------------------------------------------------ drag right after a click (testing-mlp d1713f2)
+def test_drag_after_click_guard_is_off_by_default_and_presses_at_once():
+    assert REL.drag_after_click_guard == 0.0
+    s = sink()
+    s.apply(cmd("mouse.move", "hold", (.5, .5), 0.0))
+    s.apply(cmd("mouse.left_click", "tap", (.5, .5), 0.03))
+    s.apply(cmd("mouse.drag", "begin", (.5, .5), 0.1))
+    assert s.backend.buttons_down == {"left"}
+
+
+def test_drag_after_click_guard_waits_for_movement_then_releases_cleanly():
+    s = sink(dataclasses.replace(REL, drag_after_click_guard=.52))
+    s.apply(cmd("mouse.move", "hold", (.5, .5), 0.0))
+    s.apply(cmd("mouse.left_click", "tap", (.5, .5), 0.03))
+    s.apply(cmd("mouse.drag", "begin", (.5, .5), 0.1))
+    assert s.dragging and s.backend.buttons_down == set()       # would have been a double-click
+    s.apply(cmd("mouse.drag", "hold", (.5, .5), 0.2))
+    assert s.backend.buttons_down == set()
+    s.apply(cmd("mouse.drag", "hold", (.5, .5), 0.6))            # guard time over: press even without moving
+    assert s.backend.buttons_down == {"left"}
+    s.apply(cmd("mouse.drag", "end", (.5, .5), 0.7))
+    assert s.backend.buttons_down == set() and not s.dragging
+
+
+def test_a_deferred_drag_that_never_pressed_releases_nothing():
+    s = sink(dataclasses.replace(REL, drag_after_click_guard=.52))
+    s.apply(cmd("mouse.left_click", "tap", (.5, .5), 0.0))
+    s.apply(cmd("mouse.drag", "begin", (.5, .5), 0.05))
+    s.apply(cmd("mouse.drag", "end", (.5, .5), 0.1))
+    assert s.backend.buttons_down == set() and not s.dragging
+    assert s.backend.clicks() == ["left"]

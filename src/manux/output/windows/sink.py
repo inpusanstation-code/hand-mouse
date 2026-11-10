@@ -99,6 +99,8 @@ class WindowsOutputSink:
         self._glide_wake = threading.Event()
         self._trail: deque = deque(maxlen=64)  # (clock time, position) of recent cursor sends, for click rollback
         self.glide_sends = 0                  # cursor positions sent by the glide thread (diagnostics)
+        self._last_left_click: Optional[Tuple[float, Tuple[int, int]]] = None  # (cmd.t, position) for the drag guard
+        self._drag_deferred: Optional[Tuple[float, Tuple[int, int]]] = None   # (click t, start) while the press waits
 
     # ------------------------------------------------------------------ public API
     def apply(self, cmd: ActionCommand) -> OutputResult:
@@ -140,6 +142,7 @@ class WindowsOutputSink:
                 except Exception as exc:  # noqa: BLE001
                     self.errors.append(f"release_all({reason}): {exc}")
             self.dragging = False
+            self._drag_deferred = None
             self._stop_glide()
             self.cursor.reset()
             self._move_gesture = None
@@ -379,7 +382,19 @@ class WindowsOutputSink:
     def _end_drag(self) -> None:
         if self.dragging:
             self.dragging = False
-            self.buttons.release("left")
+            deferred, self._drag_deferred = self._drag_deferred, None
+            if deferred is None:          # a deferred press never went down: nothing to release
+                self.buttons.release("left")
+
+    def _press_when_clear(self, now: float) -> None:
+        """Press the deferred drag button once the hand moved away from the click or the guard time is over."""
+        if self._drag_deferred is None:
+            return
+        click_t, start = self._drag_deferred
+        if (math.dist(self.cursor.pos, start) >= 8.0
+                or now - click_t >= float(self.config.drag_after_click_guard)):
+            self._drag_deferred = None
+            self.buttons.press("left")
 
     def _double_click_hold(self, cmd: ActionCommand) -> bool:
         """True while the cursor should stay still after a left click (Windows wants both clicks within ~4 px)."""
@@ -428,6 +443,7 @@ class WindowsOutputSink:
         result = self._click(cmd, "left")
         self._dbl_until = cmd.t + max(0.0, self.config.double_click_window)
         self._dbl_hand = None if self._uses_palm(cmd) else cmd.point
+        self._last_left_click = (cmd.t, self.cursor.pos)
         return result
 
     def _do_mouse_right_click(self, cmd: ActionCommand) -> OutputResult:
@@ -441,7 +457,14 @@ class WindowsOutputSink:
                 self._move(cmd, self._gain(cmd))
             self._settle()
             self._rollback()
-            self.buttons.press("left")
+            guard = float(self.config.drag_after_click_guard)
+            last = self._last_left_click
+            self._drag_deferred = None
+            if (guard > 0 and last is not None and cmd.t - last[0] < guard
+                    and math.dist(self.cursor.pos, last[1]) < 12.0):
+                self._drag_deferred = (last[0], self.cursor.pos)    # would be a double-click: wait for movement
+            else:
+                self.buttons.press("left")
             self.dragging = True
             return OK
         if cmd.phase == "hold":
@@ -449,6 +472,7 @@ class WindowsOutputSink:
                 return BLOCKED
             if cmd.point is not None:
                 self._move(cmd, self._gain(cmd))
+            self._press_when_clear(cmd.t)
             return OK
         # end
         if self.dragging:
