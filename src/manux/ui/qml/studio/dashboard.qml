@@ -333,9 +333,9 @@ ApplicationWindow {
                             TextLabel { text: "포인터"; font.pixelSize: 20; font.bold: true }
                             Segmented {
                                 enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                options: [["index", "검지 포인터"], ["palm", "손바닥 (Dan)"]]
-                                current: dashboard.pointerOnly ? "index" : "palm"
-                                onPicked: function (value) { dashboard.setPointerPreset(value === "index") }
+                                options: [["index", "검지 포인터"], ["palm", "손바닥 (Dan)"], ["virtual", "가상 손 (시험)"]]
+                                current: dashboard.movementStyle
+                                onPicked: function (value) { dashboard.setMovementStyle(value) }
                             }
                             ActionButton {
                                 Layout.fillWidth: true

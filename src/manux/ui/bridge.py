@@ -523,6 +523,7 @@ class Bridge(QObject):
         saved = self.preferences.value("controlHand", "", type=str) or settings.get("tracking.control_hand")
         self.control_hand = saved if saved in ("Left", "Right") else ""
         self.use_index_pointer = self.preferences.value("indexPointer", False, type=bool)
+        self.virtual_hand = self.preferences.value("virtualHand", False, type=bool) and not self.use_index_pointer
         self.click_style = settings.get("pointer.click_style") if settings.get("pointer.click_style") in CLICK_STYLES else "pinch"
         self.pointer_anchor = settings.get("pointer.anchor") if settings.get("pointer.anchor") in ("index", "palm") else "index"
         self.hand_crop = bool(settings.get("tracking.hand_crop"))
@@ -634,7 +635,7 @@ class Bridge(QObject):
         if self.layout == "studio":
             self._tcn_enabled = self.preferences.value("tcnEnabled", True, type=bool)
             self.runtime.request(RuntimeRequest("tcn_toggle", "on" if self._tcn_enabled else "off"))
-        self._send(SetBaseMode("pointer" if self.use_index_pointer else "pinch"))
+        self._send(SetBaseMode(self._base_mode()))
         self._send(SetStage(Stage.SPLASH))
         # Qt
         QQuickStyle.setStyle("Basic")
@@ -954,8 +955,44 @@ class Bridge(QObject):
         self._pause()
         self.use_index_pointer = bool(index_pointer)
         self.preferences.setValue("indexPointer", self.use_index_pointer)
-        self._send(SetBaseMode("pointer" if self.use_index_pointer else "pinch"))
+        self._send(SetBaseMode(self._base_mode()))
         self.stateChanged.emit()
+
+    def _base_mode(self) -> str:
+        return "virtual_hand" if self.virtual_hand else ("pointer" if self.use_index_pointer else "pinch")
+
+    @Property(str, notify=stateChanged)
+    def movementStyle(self):
+        """palm | index | virtual (the "이동 방식" picker)."""
+        return "virtual" if self.virtual_hand else ("index" if self.use_index_pointer else "palm")
+
+    @Slot(str)
+    def setMovementStyle(self, style):
+        if style not in ("palm", "index", "virtual") or style == self.movementStyle:
+            return
+        if style == "virtual":
+            self.cancelPalmCalibration()
+            if self.stage_name != "main":
+                return
+            self._pause()
+            self.use_index_pointer = False
+            self.virtual_hand = True
+            self.preferences.setValue("indexPointer", False)
+            self.preferences.setValue("virtualHand", True)
+            self._send(SetBaseMode(self._base_mode()))
+            self.stateChanged.emit()
+            return
+        if self.virtual_hand:
+            if self.stage_name != "main":
+                return
+            self.virtual_hand = False
+            self.preferences.setValue("virtualHand", False)
+            if (style == "index") == self.use_index_pointer:      # setPointerPreset would see no change
+                self._pause()
+                self._send(SetBaseMode(self._base_mode()))
+                self.stateChanged.emit()
+                return
+        self.setPointerPreset(style == "index")
 
     @Slot()
     def togglePointerPreset(self):

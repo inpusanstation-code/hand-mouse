@@ -88,6 +88,11 @@ class PracticeSink:
                 else:
                     self.cursor.step(cmd.point, cmd.t, gain)
                 self.precision = gain < 1.0
+            elif self.cursor and cmd.action == "mouse.place" and cmd.point is not None:
+                m = self.cursor.absolute_monitor            # the virtual hand's box: 0..1 of the monitor
+                nx, ny = (min(1.0, max(0.0, float(v))) for v in cmd.point)
+                self.cursor.warp(int(round(m.left + nx * (m.width - 1))), int(round(m.top + ny * (m.height - 1))))
+                self.precision = False
             if cmd.phase == "begin":
                 self._held[cmd.action] = cmd
             elif cmd.phase == "end":

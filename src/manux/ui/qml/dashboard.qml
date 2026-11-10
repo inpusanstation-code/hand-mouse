@@ -217,9 +217,9 @@ ApplicationWindow {
                     SectionLabel { text: "이동 방식" }
                     Segmented {
                         enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                        options: [["palm", "손바닥 (기본)"], ["index", "검지 포인터 (시험)"]]
-                        current: dashboard.pointerOnly ? "index" : "palm"
-                        onPicked: function (value) { dashboard.setPointerPreset(value === "index") }
+                        options: [["palm", "손바닥 (기본)"], ["index", "검지 포인터 (시험)"], ["virtual", "가상 손 (시험)"]]
+                        current: dashboard.movementStyle
+                        onPicked: function (value) { dashboard.setMovementStyle(value) }
                     }
                     ActionButton {
                         Layout.fillWidth: true

@@ -35,7 +35,7 @@ EXTRA_SETTINGS = (
 )
 
 GROUPS = {"pinch": "손바닥 · 핀치", "pointer": "검지 · 트리거", "motion": "모션",
-          "cursor": "커서 · 스크롤", "control": "제어 켜기 · 끄기", "app": "안전"}
+          "cursor": "커서 · 스크롤", "control": "제어 켜기 · 끄기", "app": "안전", "virtual_hand": "가상 손"}
 LABELS = {
     "vertical_input": "상하 이동 방식",
     "movement_mode": "이동 좌표 방식", "active_margin": "절대좌표 가장자리 여백",
@@ -104,6 +104,9 @@ LABELS = {
     "max_gap": "V 인식 최대 프레임 간격 (초)", "mlp_confidence": "V 모양 모델 최소 신뢰도",
     "extended_ratio": "V 검지·중지 펴짐 기준", "folded_ratio": "V 약지·새끼 접힘 기준",
     "thumb_tuck": "V 엄지 접힘 기준",
+    "box_left": "가상 손: 박스 왼쪽 (카메라 화면 비율)", "box_top": "가상 손: 박스 위쪽", "box_right": "가상 손: 박스 오른쪽",
+    "box_bottom": "가상 손: 박스 아래쪽", "pinch_hold": "가상 손: 이만큼 붙이고 있으면 끌기 (초)",
+    "double_tap": "가상 손: 더블클릭 간격 (초)", "scroll_follows_page": "가상 손: 주먹 스크롤 방향 반대로",
 }
 
 # These settings belong to separate editors, or are derived by the runtime.

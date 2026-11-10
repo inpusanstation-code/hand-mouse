@@ -477,3 +477,26 @@ def test_emergency_stop_turns_control_off_stops_learning_and_never_turns_on(brid
     b.emergency_stop()
     assert b.paused and stopped == [True]
     assert all(c == SetControl(False) for c in drained(runtime) if isinstance(c, SetControl))
+
+
+# ------------------------------------------------------------------ movement style: palm / index / virtual hand
+def test_movement_style_picker_switches_to_the_virtual_hand_mode_and_back(bridge):
+    b, rt = bridge
+    b.control_hand = "Right"
+    b.finishSplash()
+    if b.stage != "main":
+        b._set_stage("main")
+    drained(rt)
+    assert b.movementStyle == "palm"
+    b.setMovementStyle("virtual")
+    assert b.movementStyle == "virtual" and b.paused
+    assert SetBaseMode("virtual_hand") in drained(rt)
+    assert b.preferences.value("virtualHand", False, type=bool) is True
+    b.setMovementStyle("index")
+    assert b.movementStyle == "index" and SetBaseMode("pointer") in drained(rt)
+    b.setMovementStyle("virtual")
+    drained(rt)
+    b.setMovementStyle("palm")
+    assert b.movementStyle == "palm" and SetBaseMode("pinch") in drained(rt)
+    b.setMovementStyle("nonsense")
+    assert b.movementStyle == "palm" and not drained(rt)

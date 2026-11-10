@@ -430,6 +430,21 @@ class WindowsOutputSink:
         self._move(cmd, gain)
         return OK
 
+    def _do_mouse_place(self, cmd: ActionCommand) -> OutputResult:
+        """Put the cursor at a point of the monitor (0..1 each way), as the virtual hand's box says. No gain, no
+        smoothing (the feature filters); the glide still carries it between camera frames, and clicks settle it."""
+        if cmd.point is None:
+            return _error("mouse.place needs a point")
+        if self.scroll.active:
+            return BLOCKED
+        m = self.cursor.absolute_monitor
+        nx, ny = (min(1.0, max(0.0, float(v))) for v in cmd.point)
+        x, y = int(round(m.left + nx * (m.width - 1))), int(round(m.top + ny * (m.height - 1)))
+        self.cursor.warp(x, y)
+        self._move_gesture, self._move_t = cmd.gesture, cmd.t
+        self._place(x, y)
+        return OK
+
     def _click(self, cmd: ActionCommand, button: str) -> OutputResult:
         self._settle()
         self._rollback()

@@ -19,7 +19,7 @@ from manux.data.recording import read, replay
 from manux.engine.commands import SetBusy, SetStage
 from manux.engine.pipeline import Engine, EngineConfig
 from manux.engine.snapshot import Snapshot
-from manux.features import control, motion, pinch, pointer, tcn_gate
+from manux.features import control, motion, pinch, pointer, tcn_gate, virtual_hand
 from manux.features.tcn import TcnFeature, SETTINGS as TCN_SETTINGS
 from manux.ml.card import ModelError
 from manux.ml.predictor import LoadedModel, load_model
@@ -41,6 +41,7 @@ _FEATURES = (
     (pointer, pointer.PointerFeature),
     (pinch, pinch.PinchFeature),
     (motion, motion.MotionFeature),
+    (virtual_hand, virtual_hand.VirtualHandFeature),
 )
 _SETTING_TYPES = {bool: "bool", int: "int", float: "float", str: "str"}
 
@@ -120,8 +121,8 @@ def training_specs():
     """Gesture/phase metadata for the external trainer; actions stay in bindings."""
     result = {}
     for module, _ in _FEATURES:
-        if module.ID == control.ID:
-            continue  # V control has its own timed rule + optional MLP contract, not direct TCN decisions.
+        if module.ID in (control.ID, virtual_hand.ID):
+            continue  # V control has its own timed rule + optional MLP contract; the virtual hand judges shapes only.
         mode = module.ID
         for gid, phases in module.GESTURE_PHASES.items():
             if phases == frozenset({"tap"}):

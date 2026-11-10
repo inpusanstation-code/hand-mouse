@@ -253,6 +253,7 @@ v0.4 확인기는 모델 정보 파일의 클래스 → 동작 ID 대응표를 �
 | 액션 ID | phase | params | v0.3 이름 |
 | --- | --- | --- | --- |
 | `mouse.move` | hold | `gain` | `move_cursor` |
+| `mouse.place` | hold | — | — (2026-11-10 추가: `point`는 현재 모니터의 0..1 위치. 가상 손 박스가 정한다. 배율·평활 없음) |
 | `mouse.left_click` | tap | — | `left_click` |
 | `mouse.right_click` | tap | — | `right_click` |
 | `mouse.drag` | begin / hold / end | `gain` | `drag_hold`, `drag_toggle` |
