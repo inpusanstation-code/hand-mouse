@@ -46,3 +46,48 @@
 ## 확인하지 못한 것
 - 실제 웹캠·실제 Windows 입력으로 `drag_on_move`와 클릭 직후 보호를 써 보지 않았다. 시험은 합성 손과 가짜 백엔드다.
 - 메인 화면 상태 줄은 단위 시험이 없다(QML이 오류 없이 뜨는 것은 기존 화면 시험으로 확인).
+
+---
+
+# virtual-hand-20261110 병합 (3단계, 2026-11-10)
+
+출처는 `virtual-hand-20261110` 폴더(hand-mouse v0.3 구조, git 없음, 1단계에서 hand-mouse-1109를 흡수한 상태)다. 구조가 달라 파일째 합치지 않고 기능 단위로 MANUX 계층에 맞춰 다시 썼다.
+
+## 옮긴 것
+
+| 기능 | 원본 | 여기 | 기본값 | 시험 |
+|---|---|---|---|---|
+| 먼 손 좌우 판정이 뒤집혀도 같은 손 유지 | `src/hand_selection.py` `HandFollower` | `tracking/selection.py` `HandFollower`, `tracking/tracker.py`, `TrackResult.followed` | 켜짐(`tracking.hand_follow`, 원본과 같음) | `tests/unit/tracking/test_tracking.py` 4개 |
+| Pause 키 긴급 정지 | `src/hotkeys.py` `VK_PAUSE`, `qt_dashboard.emergency_stop` | `platform/hotkeys.py`(Pause만 단독 키 허용), `ui/bridge.py` `emergency_stop`, 단축키 목록 "긴급 정지" | Pause | `tests/unit/ui/test_bridge.py` 2개 |
+| 가상 손 모드(판정) | `src/virtual_hand.py`, `qt_runtime.py` 가상 손 부분 | `features/virtual_hand/`(새 모드 `virtual_hand`), 액션 `mouse.place`, 설정 › 이동 방식 › "가상 손 (시험)", 고급 설정 › "가상 손" | 꺼짐(이동 방식에서 고름) | `tests/unit/features/test_virtual_hand.py` 14개, 브리지 1개 |
+
+- HandFollower 위험(원본 문서 그대로): 다른 손이 같은 자리에 들어오면 최대 3초 이어받을 수 있다. 원본도 단위 시험만 했다.
+- 긴급 정지는 켜는 일이 없다(두 번 눌러도 안전). 실행 중인 학습 worker를 멈춘다. 실제 키 입력으로는 확인하지 못했다.
+- 가상 손: 박스 = 모니터, 엄지+검지 짧게 = 좌클릭, 0.7초 안에 다시 = 더블클릭(같은 점), 0.45초 이상 = 끌기, 엄지+검지+중지 = 우클릭, 주먹 좌우 = 스크롤(0.5배), 엄지 접고 네 손가락 위로 0.5초 = 창 전환.
+  - 원본과 다른 점: (1) 클릭이 손바닥 커서 자리에서 난다. 원본은 화면에 그린 손의 엄지·검지 사이에서 눌렀는데, 그 위치를 출력에 넘길 자리가 의도 계약에 없다(사용자 결정: 판정부터, 손 그림·클릭 위치 오프셋은 다음 단계). (2) 주먹 판정을 규칙 엔진에서 받던 것을 손 모양(`shapes.is_fist`)으로 직접 본다(기능끼리 import 금지). (3) 클릭 기록·F 표시·TCN 클릭 확인기는 옮기지 않았다.
+  - 계약 변경: `docs/contracts.md` §7에 `mouse.place`(hold, `point` = 현재 모니터의 0..1) 추가.
+  - 박스는 고급 설정 숫자로만 바꾼다. 카메라 화면에 직접 그리는 편집기는 아직 없다.
+
+## 온라인 학습: MANUX와 겹치는 부분 (사용자 결정: 겹치는 것은 MANUX 쪽으로)
+
+| 원본 `src/online/` | 하는 일 | MANUX에 이미 있는 것 | 처리 |
+|---|---|---|---|
+| `versions.py` | 후보·실사용·직전 모델, 검사 후 교체, 되돌리기 | `ml/store.py`(불변 버전 + active 포인터), `tools/promote_tcn.py`(별도 평가 후 설치) | MANUX 것 사용. **되돌리기(직전 active로)만 추가 필요** |
+| `app_job.py` | 학습 프로세스 시작·진행 읽기 | `data/worker_job.py`, `tools/app_worker.py` | MANUX worker에 작업 종류 추가 |
+| `safety.py` `OnlineGate` | 모델이 k프레임 확인한 클릭만 통과 | `features/tcn_gate`(의도 필터) | MANUX 것 사용 |
+| `splits.py` | 세션 단위 분할 | 학습 도구의 시도 단위 분할(AGENTS 규칙) | MANUX 것 사용 |
+| `import_guided.py`, `samples.py` | 녹화 → 표본, 표본 저장소(npz) | `data/recording.py`, `data/recorder.py`(jsonl.gz) | 새 저장 형식을 만들지 않고 MANUX 녹화 형식에 라벨을 붙여 저장 |
+| `commands.py` | 등록 동작 → 명령, 안전장치 | 바인딩·라우터(D-004), 직접 TCN의 중립 재무장 | MANUX 것 사용 |
+| `pose_memory.py`, `registration.py` | **몇 번 보여 주면 바로 새 동작 등록**(torch 없음) | Pose Studio(포즈 표본 + MLP 학습, 기본 꺼짐) | 새로 옮김: Pose Studio 수집 흐름 위에 "즉시 등록"으로 |
+| `segmenter.py`, `collector.py` | 평소 사용 중 동작 후보 자르기·저장 | 없음 | 새로 옮김 |
+| `models.py`, `trainer.py`, `replay.py`, `memory.py`, `live.py`, `baseline.py`, `dataset.py`, `update_job.py` | torch 임베딩·재생 메모리·사용 중 재학습 | `tools/train_tcn.py`(일괄 학습) | 새로 옮김: worker 안에서만(torch는 앱 프로세스 금지) |
+
+원본 상태(그 폴더 문서): "검증 성공 시 교체"는 실데이터로 통과한 적이 없다. 미등록 동작 거부 FRR 0.44 / FAR 0.053(배수 1.5). 한 사람·한 카메라.
+
+## 아직 안 한 것 (3단계 남은 일)
+1. 즉시 동작 등록(`pose_memory` + `registration`) → Pose Studio 흐름에 붙이기.
+2. `ml/store.py` 되돌리기.
+3. 평소 사용 후보 수집(`segmenter`, `collector`) → MANUX 녹화 형식.
+4. 사용 중 재학습(torch 부분) → worker 작업 종류.
+5. 가상 손의 화면 손 그림과 손가락 사이 클릭(계약 변경 제안 필요).
+6. 녹화 파일(`recordings/`)은 저장소 밖 + `tools/hub.py`로 공유(AGENTS 규칙), virtual-hand의 `config/gestures.json` 값은 PC별 조정값이라 옮기지 않음.
