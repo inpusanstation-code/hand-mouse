@@ -45,10 +45,30 @@ def test_follower_refuses_a_hand_elsewhere_or_of_another_size():
     assert following().select([hand_at("Right", size=.01)], "Right", True, .1) is None
 
 
-def test_follower_refuses_two_hands_even_when_one_is_close():
+def test_follower_takes_the_one_hand_in_place_when_the_other_is_elsewhere():
+    """2026-11-11: with two detections it used to give up, and the virtual hand vanished."""
     follower = following()
-    assert follower.select([hand_at("Right"), hand_at("Right", x=.8)], "Right", True, .1) is None
+    near = hand_at("Right", x=.51)
+    kept = follower.select([near, hand_at("Right", x=.8)], "Right", True, .1)
+    assert follower.followed and kept.landmarks is near.landmarks and kept.handedness == "Left"
+
+
+def test_follower_refuses_two_hands_when_both_could_be_it():
+    follower = following()
+    assert follower.select([hand_at("Right", x=.49), hand_at("Right", x=.52)], "Right", True, .1) is None
     assert not follower.followed
+
+
+def test_the_same_hand_found_twice_counts_once():
+    """2026-11-11 failure logs: 'Left,Left' (206 frames) and 'Right,Right' (93) dropped the control hand."""
+    from src.hand_selection import merge_duplicates
+    best, twin = hand_at("Left", score=.99), hand_at("Left", x=.505, score=.81)
+    assert merge_duplicates([twin, best]) == [best]
+    assert selected_detection(merge_duplicates([twin, best]), "Right", True) is best
+    other = hand_at("Left", x=.8)
+    assert len(merge_duplicates([best, other])) == 2              # two real hands stay two
+    follower = HandFollower()
+    assert follower.select([best, twin], "Right", True, 0.0) is best   # no history needed for a duplicate
 
 
 def test_follower_stops_after_a_long_gap():

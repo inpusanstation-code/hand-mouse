@@ -14,6 +14,37 @@ def selected_detection(detections, side, mirrored):
     return matches[0] if len(matches) == 1 else None
 
 
+SAME_HAND_OVERLAP = .6   # share of the smaller box covered by the other: the same hand found twice
+
+
+def _box(detection):
+    xs = [p.x for p in detection.landmarks]
+    ys = [p.y for p in detection.landmarks]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def merge_duplicates(detections):
+    """MediaPipe sometimes returns one hand twice (2026-11-11 failure logs: 'Left,Left' 206 and 'Right,Right' 93 frames out
+    of 5248, each time dropping the control hand because two candidates matched). Of two boxes that mostly cover each other
+    the higher score stays. Two real hands do not overlap that much."""
+    if len(detections) < 2:
+        return list(detections)
+    kept = []
+    for d in sorted(detections, key=lambda d: -float(getattr(d, "score", 0.0) or 0.0)):
+        ax0, ay0, ax1, ay1 = _box(d)
+        a_area = max(1e-9, (ax1 - ax0) * (ay1 - ay0))
+        same = False
+        for k in kept:
+            bx0, by0, bx1, by1 = _box(k)
+            inter = max(0.0, min(ax1, bx1) - max(ax0, bx0)) * max(0.0, min(ay1, by1) - max(ay0, by0))
+            if inter / min(a_area, max(1e-9, (bx1 - bx0) * (by1 - by0))) >= SAME_HAND_OVERLAP:
+                same = True
+                break
+        if not same:
+            kept.append(d)
+    return kept
+
+
 def _center_and_size(detection):
     """Centre of the landmark box and its longer side, in normalized frame units."""
     xs = [p.x for p in detection.landmarks]
@@ -47,29 +78,37 @@ class HandFollower:
     def _remember(self, center, size, now):
         self._center, self._size, self._seen_at = center, size, now
 
+    def _same_hand(self, center, size):
+        if size <= 0 or not 1 / self.max_size_change <= size / self._size <= self.max_size_change:
+            return False
+        limit = max(self.reach * self._size, self.min_reach)
+        return abs(center[0] - self._center[0]) <= limit and abs(center[1] - self._center[1]) <= limit
+
     def select(self, detections, side, mirrored, now):
         if side != self._side:
             self.reset()
             self._side = side
         self.followed = False
+        detections = merge_duplicates(detections)
         chosen = selected_detection(detections, side, mirrored)
         if chosen is not None:
             self._remember(*_center_and_size(chosen), now)
             self._confirmed_at = now
             return chosen
-        if not side or len(detections) != 1 or self._center is None:
+        if not side or not detections or self._center is None:
             return None
         if now - self._seen_at > self.max_gap or now - self._confirmed_at > self.max_unconfirmed:
             return None
-        center, size = _center_and_size(detections[0])
-        if size <= 0 or not 1 / self.max_size_change <= size / self._size <= self.max_size_change:
+        # the one detection in about the same place and of about the same size (2026-11-11: with two detections it used
+        # to give up even when only one of them could be the followed hand)
+        near = [(d, *_center_and_size(d)) for d in detections]
+        near = [(d, c, s) for d, c, s in near if self._same_hand(c, s)]
+        if len(near) != 1:
             return None
-        limit = max(self.reach * self._size, self.min_reach)
-        if abs(center[0] - self._center[0]) > limit or abs(center[1] - self._center[1]) > limit:
-            return None
+        found, center, size = near[0]
         self._remember(center, size, now)
         self.followed = True
-        hand = copy.copy(detections[0])
+        hand = copy.copy(found)
         hand.handedness = {"Left": "Right", "Right": "Left"}[side] if mirrored else side
         return hand
 

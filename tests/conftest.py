@@ -53,3 +53,17 @@ def _own_binding_files(tmp_path, monkeypatch):
     gc.sync_custom_motions({})
     yield
     gc.sync_custom_motions({})
+
+
+@pytest.fixture(autouse=True)
+def _no_taught_shapes(tmp_path, monkeypatch):
+    """Shapes the user taught (models/posture_teach.json) must not change what the rule tests see."""
+    import src.posture_teach as posture_teach
+    monkeypatch.setattr(posture_teach, "MODEL_PATH", tmp_path / "no_posture_teach.json")
+    monkeypatch.setattr(posture_teach, "CANDIDATE_PATH", tmp_path / "posture_teach.candidate.json")
+    monkeypatch.setattr(posture_teach, "EXAMPLES_DIR", tmp_path / "posture_examples")
+    posture_teach.reset_cache()
+    # ... and the shapes the user named (config/custom_postures.json) stay out of the posture lists
+    import src.custom_postures as custom_postures
+    monkeypatch.setattr(custom_postures, "PATH", tmp_path / "custom_postures.json")
+    custom_postures.register()

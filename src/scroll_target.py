@@ -217,6 +217,9 @@ class ScrollTargetFinder:
             import uiautomation as auto
 
             ctx = auto.UIAutomationInitializerInThread()
+            from src.uia import create_client
+
+            create_client()  # one thread at a time: the first run on a PC writes comtypes' wrapper module
         except Exception as exc:  # uiautomation/comtypes missing: the window fallback is used instead
             print(f"[scroll target] disabled: {exc}", file=sys.stderr)
             self.available = False

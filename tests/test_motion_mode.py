@@ -123,7 +123,8 @@ def test_ambiguous_thumb_slow_vertical_short_or_closed_strokes_send_nothing():
         mm, t = entered()
         settle = [frames[0]] * 12                       # the hand rests where the stroke starts (no tracking jump)
         ev, _ = run(mm, settle + frames, t0=t)
-        assert not [e for e in ev if e.kind == "swipe"], name
+        sideways = [e for e in ev if e.kind == "swipe" and e.action != "window_down"]
+        assert not sideways, name                       # a downward stroke is its own command (Win+Down), not a sideways swipe
 
 
 def test_a_thumb_halfway_keeps_the_last_decision_and_with_none_yet_sends_nothing():
@@ -212,8 +213,8 @@ def test_the_command_mapping_can_be_changed_but_only_to_known_commands():
     ev, t = run(mm, [hand(cx=0.4)] * 40, t0=t)
     ev, t = run(mm, swipe_frames(0.4, 0.7), t0=t)
     assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]     # the unknown command was refused
-    assert set(ACTION_KEYS) == {"back", "forward", "tab_prev", "tab_next", "close_window"}
-    mm2 = MotionMode({"motion_actions": {"nav": {"left": "close_window"}}})        # Alt+F4 only through the two-step question
+    assert set(ACTION_KEYS) == {"back", "forward", "tab_prev", "tab_next", "close_window", "window_down"}
+    mm2 = MotionMode({"motion_actions": {"nav": {"left": "close_window"}}})        # Alt+F4 never from a sideways swipe
     assert mm2._actions["nav"]["left"] == "back"
 
 
@@ -323,7 +324,8 @@ def test_a_swipe_needs_all_four_fingers_fully_extended():
     for name, kw in cases.items():
         mm, t = entered()
         ev, _ = run(mm, [hand(cx=0.3)] * 12 + stroke_with(kw), t0=t)
-        assert not [e for e in ev if e.kind == "swipe"], name
+        sideways = [e for e in ev if e.kind == "swipe" and e.action != "window_down"]
+        assert not sideways, name                       # a downward stroke is its own command (Win+Down), not a sideways swipe
         assert mm.last_miss is not None and ("bent" in mm.last_miss["why"] or "not_open" in mm.last_miss["why"]
                                               or "ends_closed" in mm.last_miss["why"]), name
     mm, t = entered()
@@ -399,32 +401,27 @@ def test_a_fist_whose_thumb_lies_on_the_index_is_not_the_entry_pose():
     assert m.entry_pose({**base, "thumb_tuck": 1.3, "thumb_len": 0.8}) is True       # thumbs-up
 
 
-# ---------------------------------------------------------------------- closing the window (Alt+F4), two steps
+# ---------------------------------------------------------------------- bringing the window down (Win+Down)
 def down_frames(y_from=0.35, y_to=0.65, n=10, thumb="out", fingers="open", cx=0.5):
     return [hand(cx=cx, cy=y_from + (y_to - y_from) * i / (n - 1), thumb=thumb, fingers=fingers) for i in range(n)]
 
 
-def test_one_downward_swipe_only_asks_and_a_second_one_closes_the_window():
+def test_each_downward_swipe_brings_the_window_down_without_a_question():
     mm, t = entered()
     ev, t = run(mm, down_frames(), t0=t)
-    assert [e.kind for e in ev] == ["close_ask"] and mm.close_pending(t) > 2.0       # nothing is sent yet
+    assert [(e.kind, e.action) for e in ev] == [("swipe", "window_down")] and mm.close_pending(t) == 0
     ev, t = run(mm, [hand(cy=0.35)] * 25, t0=t)                                      # the hand comes back up and rests
     ev, t = run(mm, down_frames(), t0=t)
-    assert [(e.kind, e.action) for e in ev] == [("swipe", "close_window")]
-    ev, t = run(mm, [hand(cy=0.35)] * 25 + down_frames(), t0=t)                      # asked again from scratch, not closed
-    assert [e.kind for e in ev] == ["close_ask"]
+    assert [(e.kind, e.action) for e in ev] == [("swipe", "window_down")]
+    assert ACTION_KEYS["window_down"] == ("win", "down")
 
 
-def test_the_close_question_runs_out_and_is_cancelled_by_leaving_motion_mode():
-    mm, t = entered()
-    ev, t = run(mm, down_frames(), t0=t)
-    ev, t = run(mm, [hand(cy=0.35)] * 100, t0=t)                                     # more than 3 s later
-    assert mm.close_pending(t) == 0
-    ev, t = run(mm, down_frames(), t0=t)
-    assert [e.kind for e in ev] == ["close_ask"]                                     # a new question, no closing
-    mm.update(t, None, request="off")
-    assert mm.close_pending(t) == 0
-
+def test_the_downward_swipe_is_bound_to_win_down():
+    from src.action_bindings import DEFAULT_GESTURE_BINDINGS
+    from src.gesture_catalog import MOTION_TARGETS
+    b = DEFAULT_GESTURE_BINDINGS["swipe_down"]
+    assert (b["action_type"], b["action_value"]) == ("hotkey", "win+down")
+    assert MOTION_TARGETS["window_down"] == "swipe_down" and "close_window" not in MOTION_TARGETS
 
 def test_slow_lowering_sideways_or_bent_hands_do_not_ask():
     for frames in (down_frames(n=40),                                                # slow

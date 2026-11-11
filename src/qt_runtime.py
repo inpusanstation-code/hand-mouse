@@ -20,6 +20,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -38,21 +39,27 @@ from src.recorder import SessionRecorder
 from src.gesture_gate import DEFAULT_MODEL as GATE_MODEL, GestureGate, load_predictor
 from src.click_check import ClickCheck
 from src.click_log import ClickLog
+from src import use_gate
+from src.use_log import UseLog, read_events as read_use_events, shadow_verdict
+from src.online.use_import import CLICK_ACTIONS, click_base, click_key, click_name, learnable as use_import_learnable
 from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
 from src.crop_recorder import CropRecorder, crops_path
 from src.roi_tracker import RoiTracker, hand_box
-from src.hand_selection import HandFollower, selected_detection
+from src.hand_selection import HandFollower, _center_and_size, merge_duplicates, selected_detection
 from src.virtual_hand import hand_px
+from src.virtual_hand import Responder as VhResponder, response as vh_response
 from src.virtual_hand import (ACTION_NAMES as HAND_ACTION_NAMES, BoxMapper, DEFAULT_BOX, Grip, HandSize, PINCH_HOLD, Ratchet, ShapePinch, ShapeSwitch, ShapeTriple, ViewSmoother, triple_point,
                               click_offset, holds_still, pinch_point, VIRTUAL_OFF_ACTIONS, virtual_guides,
                               palm_centre, valid_box, view as virtual_hand_view)
 from src.online.collector import OnlineCollector
 from src.finger_overlay import overlay_frame, preview_hand
-from src.pose_probe import PoseProbe, hand_posture
+from src.pose_probe import PoseProbe, hand_posture, hand_shot, relabelled
 from src.macro import cancel_all as cancel_macros
 from src.sequence import SequenceDetector, SequenceStore
 from src.path_gesture import PathDetector, PathStore
+from src.point_mode import FileTargetProbe, PointMode, shape as point_shape
+from src import hand_direction as hand_dir
 from src.draw_mode import DrawMode, ShapeStore, ensure_bindings as ensure_draw_bindings
 
 VH_ANCHOR_FOLLOW = .15   # share of the way the drawn hand's anchor follows its thumb-index point each frame (manux)
@@ -68,6 +75,15 @@ from src.pointer_workspace import FINGERTIPS
 from src.tracking_test import TrackingTest, result_line
 
 ONE_SHOT = ("left_click", "right_click", "drag_toggle", "alt_tab", "show_desktop", "task_switcher")
+USE_ACTIONS = ONE_SHOT + ("scroll_grab", "drag_hold")     # written to the use log when they start (src/use_log.py)
+POINT_QUIET = 1.5        # s after pointing mode (src/point_mode.py) before the V sign may switch the control
+RETRY_SECONDS = 8.0      # a taught gesture its checking model keeps refusing: tries this close together count as one wish
+RETRY_PASS = 3           # ... and the third one goes through
+WAITING_USES = 4         # uses on a new day that start a round for a gesture whose checking model waits for one (verifier.MIN_HELD)
+USE_LABELS = {"right_click": "thumb_ring", "left_click": "thumb_middle", "scroll_grab": "thumb_index",
+              "task_switcher": "thumb_pinky", "show_desktop": "palm_side"}
+USE_LABELS_VIRTUAL = {"left_click": "thumb_index", "drag_hold": "thumb_index", "right_click": "thumb_index_middle",
+                      "scroll_grab": "fist"}              # the virtual hand's shapes (src/virtual_hand.py)
 
 
 def _online_gate_class():
@@ -86,7 +102,8 @@ CLICK_CHECK_THRESHOLD = .3   # TCN thumb_index peak over a press needed for a cl
 # ("virtual_click_check": true in config/gestures.json turns it on).
 CLICK_NAMES = {"left": "좌클릭", "double": "더블클릭", "drag": "끌기", "right": "우클릭"}
 PASSIVE_ACTIONS = frozenset({"none", "move_cursor", "pointer_wait"})   # the engine is doing nothing a hand shape would undo
-VH_LOST_KEEP = .4     # seconds the drawn hand stays (faded) after the camera loses the hand
+VH_LOST_KEEP = .6     # seconds the drawn hand stays (faded) after the camera loses the hand (2026-11-11: .4 left 29 of
+                      # 76 losses in the failure logs showing no hand; .6 covers 5 more)
 
 
 @dataclass(frozen=True)
@@ -120,6 +137,9 @@ class UiState:
     rec_plan: Optional[Dict[str, Any]] = None
     rec_paused: bool = False
     rec_discard: int = 0                # +1 per press of "녹화 취소 (버리기)"
+    point_mode: bool = True             # pointing mode (src/point_mode.py), switched in the settings window
+    point_settings: Optional[Dict[str, Any]] = None   # its details (src/point_mode.SETTINGS); None = defaults
+    signal_text: bool = True            # the name of the signal written beside the drawn hand (settings window)
 
 
 @dataclass
@@ -154,11 +174,16 @@ class Snapshot:
     virtual_hand: Optional[Dict[str, Any]] = None  # the hand drawn at the cursor (src/virtual_hand.py), None = no hand
     preview_hand: Optional[Dict[str, Any]] = None  # skeleton drawn over the preview by src/HandSkeleton.qml (src/finger_overlay.py)
     finger: Optional[Dict[str, Any]] = None        # fingertips drawn next to the cursor by src/FingerTracker.qml
+    point: Optional[Dict[str, Any]] = None         # pointing mode: kind, dwell progress 0..1, on a file (src/point_mode.py)
     pose_probe: Optional[Dict[str, Any]] = None    # [손 모양 보여주기] countdown / holding / result (src/pose_probe.py)
+    pose_probe_shot: Optional[Tuple[Any, ...]] = None  # (number, BGR hand picture, the look's pictures in order) of that result
     draw: Optional[Dict[str, Any]] = None          # drawing mode: pen, stroke, last recognised shape (src/draw_mode.py)
     hand_lost: bool = False               # no hand for `hand_lost_alert` seconds: the screen shows it big
     arm_lost: bool = False                # Pose has not seen the arm for `arm_lost_alert` seconds (only when Pose runs)
     admin_blocked: bool = False           # an admin window (Task Manager) is in front and this app is not admin: input is dropped
+    learn_request: Tuple[int, str] = (0, "")  # (+1 per request, use log folder): start a learning round from the use log
+    learn_note: str = ""                  # the main screen's line: taught gestures' uses being collected / learned
+    learn_items: List[Dict[str, Any]] = field(default_factory=list)   # the same, one card per gesture
 
 
 def tracking_view(test: TrackingTest, cursor) -> Dict[str, Any]:
@@ -202,6 +227,7 @@ class QtRuntime:
         self._online_gesture = ""
         self._online_gesture_until = 0.0
         self._virtual_hand: Optional[Dict[str, Any]] = None
+        self.vh_responder = VhResponder()              # fast / smooth filters by what the hand is doing
         self.box_mapper = BoxMapper()
         self.view_smoother = ViewSmoother()
         self.hand_size = HandSize()      # the drawn hand's scale, steady when the hand turns
@@ -214,11 +240,45 @@ class QtRuntime:
         self.shape_right = ShapeTriple()               # thumb + index + middle together = right click, from the hand shape only
         self._pinch_triple = False                     # this thumb + index press became the three-finger right click
         self.click_check: Optional[ClickCheck] = None  # the TCN's second look at thumb + index clicks (loaded on first use)
+        self.use_log: Optional[UseLog] = None          # joints around every command + the TCN's shadow verdict (logs/use_events)
+        self._watchers: Dict[str, GestureGate] = {}    # "tcn" / "online": the models only watching (copies that block nothing)
+        self._watch_loading: set = set()
+        self._watch_stale: set = set()
+        self._use_watchers: Dict[str, GestureGate] = {}   # this frame's watchers: the real checker for its kind, else the copy
+        self._use_real_kind = ""                       # which kind the switched-on intent checker is ("" = off)
+        self._use_gate: Dict[str, Dict[str, Any]] = {} # commands a watching model may stop (src/use_gate.py)
+        self._use_deciding = False
+        self._use_blocking: Optional[str] = None
+        self.use_blocked = 0
+        self._use_round_t = 0.0                        # last time a learning round was asked for
+        self._use_round_events = 0
+        self._use_round_marks = 0
+        self._use_pending: Dict[str, int] = {}         # taught gesture -> its uses no learning round has taken yet
+        self._use_names: Dict[str, str] = {}
+        self._use_status: Dict[str, Dict[str, Any]] = {}   # taught gesture -> what the last round found (verifiers/status.json)
+        self._use_retries: Dict[str, List[float]] = {} # taught gesture -> when its checking model said no lately
+        self._use_forced: Optional[str] = None         # the gesture just let through on its third try
+        self._click_kind = ""                          # "double" on the frame of a double click's second tap (use_import.click_key)
+        self._learn_note = ""                          # the main screen's line about collecting / learning
+        self._learn_items: List[Dict[str, Any]] = []   # the same as cards: key, name, state, n, need, text, hint
+        self._use_rounds = 0
+        self._learn_request = 0                        # +1 = the UI thread should start a learning round from the use log
+        self._use_t = 0.0
+        self._use_prev_action = "none"
         self.click_log: Optional[ClickLog] = None      # everyday virtual hand clicks + F "not a click" marks (logs/virtual_clicks)
         self._triple_open_t = -1e9                     # when the three fingers last came apart
         self.shape_switch = ShapeSwitch()              # thumb folded, four fingers up = task switcher, from the hand shape only
+        self.point = PointMode()                       # finger-gun: index tip moves the cursor, resting on a file clicks it
+        self._point_seen = -1e9                        # when pointing mode was last on (the V sign waits after it)
+        self._inspect: Tuple[str, float] = ("", 0.0)   # control off: the last signal the hand made, and until when it is shown
+        self._inspect_detector: Optional[CompositeGestureDetector] = None
+        self.point_probe = FileTargetProbe()           # is a file / folder under the cursor (UI Automation, own thread)
+        self._point_view: Optional[Dict[str, Any]] = None
         self.grip = Grip()                             # what the virtual hand holds: a file (drag) or the page (scroll)
         self.ratchet = Ratchet()                       # a fist scrolls one way: bringing the hand back is not a scroll
+        self._fist_y: Optional[float] = None           # where the page is held: follows the palm only while the hand is a fist
+        self._palm_trail: List[Tuple[float, float, float]] = []   # (time, palm x, palm y) of the last moments: how fast the hand travels
+        self._pinch_moving = False                     # this thumb + index pinch closed while the hand was travelling
         self._pinch_since: Optional[float] = None      # thumb + index closed since (shape pinch)
         self._pinch_drag = False
         self._pinch_double = False                     # this press is a double click's second click
@@ -237,6 +297,8 @@ class QtRuntime:
         # True: the hand skeleton and cursor anchor are drawn by QML over the preview instead of into the camera frame
         self.qml_skeleton = True
         self.pose_probe = PoseProbe()      # "this hand shape" for the AI binding helper (src/llm_binding.py)
+        from src import custom_postures
+        custom_postures.register()         # the hand shapes the user named join the posture lists
         self.draw_store = ShapeStore()
         self.seq_store = SequenceStore()       # gesture sequences: shapes in order run a command (src/sequence.py)
         self.path_store = PathStore()          # shape-drawing gestures: e.g. a fist drawing a circle (src/path_gesture.py)
@@ -341,6 +403,7 @@ class QtRuntime:
 
     def stop(self) -> None:
         self._stop.set()
+        self.point_probe.shutdown()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
 
@@ -381,6 +444,11 @@ class QtRuntime:
                     self.online.close()
                 except Exception:
                     pass
+            if self.use_log is not None:
+                try:
+                    self.use_log.close()
+                except Exception:
+                    pass
             try:
                 self._stop_recording(time.perf_counter())   # quitting mid-recording still leaves a complete file
             except Exception:
@@ -402,6 +470,7 @@ class QtRuntime:
     def _record_negative_candidate(self, now: float, source: str, note: str = "") -> None:
         g_stat = self.gate.status_summary() if self.gate is not None else {}
         recent_act = getattr(self, "_recent_action", "") if now < getattr(self, "_recent_until", 0.0) + 2.0 else None
+        self._use_mark(now, source)
         self.failures.record_negative_candidate(
             now,
             source=source,
@@ -470,6 +539,8 @@ class QtRuntime:
                 self.pose_probe.start(now)
             elif kind == "pose_probe_cancel":
                 self.pose_probe.cancel()
+            elif kind == "pose_teach_save":
+                self._pose_teach_save(cmd[1])
             elif kind == "gesture_delete":
                 self._gesture_delete(cmd[1])
             elif kind == "online_reload":
@@ -594,7 +665,10 @@ class QtRuntime:
             self._det_path = "skipped"
         all_detections = list(detections)
         # every hand MediaPipe returned this frame, before the control-hand filter below
-        self._raw_hands = [[d.handedness, round(float(d.score), 2)] for d in all_detections]
+        # (+ box centre x, y and longer side: 2026-11-11, to tell a flipped reading of the control hand from the other hand)
+        self._raw_hands = [[d.handedness, round(float(d.score), 2),
+                            *[round(v, 3) for v in (lambda c, s: (c[0], c[1], s))(*_center_and_size(d))]]
+                           for d in all_detections]
 
         if ui.stage != "main":
             if not self.paused:
@@ -607,7 +681,7 @@ class QtRuntime:
                 if self._hand_follower.followed:
                     self._det_path += "+follow"
             else:
-                chosen = selected_detection(detections, ui.control_hand, camera.config.mirror)
+                chosen = selected_detection(merge_duplicates(detections), ui.control_hand, camera.config.mirror)
             detections = [chosen] if chosen is not None else []
             if detections:
                 self._hand_seen_t = t0
@@ -629,7 +703,8 @@ class QtRuntime:
                       math.degrees(math.atan2(-(lm0[4].y - lm0[0].y) * k, lm0[4].x - lm0[0].x)))
             self.pose_probe.log_dir = self.log_dir / "pose_probe"
             self.pose_probe.step(t0, posture, (palm[0], palm[1] * k), size, angles,
-                                 [[round(p.x, 4), round(p.y, 4), round(getattr(p, "z", 0.0), 4)] for p in lm0])
+                                 [[round(p.x, 4), round(p.y, 4), round(getattr(p, "z", 0.0), 4)] for p in lm0],
+                                 shot=hand_shot(frame, lm0))     # the picture shown with the result (memory only)
         if sequences:
             if detections:
                 fired = self.sequences.step(t0, posture, sequences)
@@ -701,9 +776,13 @@ class QtRuntime:
                 self._say("팔꿈치 위치를 찾았어요: 위아래·좌우를 팔꿈치 기준으로 펴서 움직여요", 3.0)
         else:
             self.elbow.observe(t0, None, mouse.frame_aspect)
+        if getattr(self, "_vh_mode", None) is None:
+            self._vh_respond(t0, False)       # how closely the drawn hand follows (virtual_hand.RESPONSE); the box branch decides per frame
         gate = self._gate_for(ui) if not ui.use_index_pointer and ui.stage == "main" else None
         if gate is not None:
             gate.step(t0, detections[0] if detections else None, frame.shape[0] / max(1, frame.shape[1]))
+        self._use_frame(t0, detections, frame.shape[0] / max(1, frame.shape[1]), gate,
+                        ui.stage == "main" and not guided_recording and self.test is None)
         self._rule_action = "none"
         self._engine_raw = None     # what the rule engine itself said this frame (guided capture overwrites result.action)
         toggle_hold = (not palm_calibrating) and self._toggle_sign(t0, ui, detections)
@@ -733,6 +812,27 @@ class QtRuntime:
                        and not palm_calibrating and ui.stage == "main" and not guided_recording)
         if draw_active:
             self._draw_step(t0, ui, detections, fw, fh)
+        # pointing mode (src/point_mode.py): no entry step, the finger-gun hand itself is the mode (settings can switch it off)
+        point_active = False
+        self._point_view = None
+        if (getattr(ui, "point_mode", True) and not index_mode and not motion_active and not draw_active and not toggle_hold
+                and not close_hold and not palm_calibrating and not guided_recording and ui.stage == "main"
+                and not self.paused and not ui.calibrating):
+            self.point.configure(getattr(ui, "point_settings", None))
+            self.point_probe.area_px = int(self.point.settings["area_px"])
+            point_active = self.point.step(t0, detections[0].landmarks if detections else None, mouse.frame_aspect)
+            if point_active:
+                self._point_seen = t0
+            if self.point.started:
+                mouse.close_switcher(confirm=False)
+                mouse.release_all()                        # a drag or a held click does not carry into pointing
+                engine.reset()
+                self.shape_pinch.reset()
+                self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
+                self._say("포인팅 모드: 검지 끝으로 가리키고 파일·폴더 위에서 1초 멈추면 "
+                          + ("더블클릭" if self.point.kind == "double" else "우클릭"), 2.0)
+        elif self.point.active:
+            self.point.reset()
         tracking_only = self.test is not None
         contacts: Tuple[int, ...] = ()
         tip_xy = None
@@ -774,6 +874,7 @@ class QtRuntime:
                 if not frame_out.click_armed:
                     parts.append("클릭 대기: 엄지를 떼세요")
                 self._say("  ·  ".join(parts), .5)
+                self._use_action(t0, action, "", source="pointer")
                 if action in ("left_click", "right_click"):
                     self._recent_action, self._recent_until = action, time.perf_counter() + .5
             x, y = frame_out.preview_point
@@ -787,6 +888,8 @@ class QtRuntime:
                 color = (189, 229, 70) if number == 1 or number in contacts else (245, 245, 245)
                 cv2.circle(frame, (px, py), 10, (49, 35, 17), -1, cv2.LINE_AA)
                 cv2.putText(frame, str(number), (px - 5, py + 5), cv2.FONT_HERSHEY_SIMPLEX, .46, color, 1, cv2.LINE_AA)
+        elif detections and point_active:
+            result = self._point_step(t0, detections[0], ui)
         elif detections and not index_mode and not motion_active and not draw_active and not close_hold and not toggle_hold \
                 and not palm_calibrating:
             glab = None
@@ -855,6 +958,7 @@ class QtRuntime:
             screen_point = None       # box mode: where the palm (the drawn hand) is on the monitor
             cursor_point = None       # where the OS cursor goes: the palm, or the drawn pinch point while a click finger is in
             vh = None
+            fist_released = False     # this frame a fist's hold on the page ended
             apply_cfg = engine.config
             if getattr(ui, "virtual_hand", False) and valid_box(ui.virtual_box) and not guided_recording:
                 if result.action in VIRTUAL_OFF_ACTIONS:
@@ -863,6 +967,7 @@ class QtRuntime:
                                                     gesture=result.active_gesture))
                 switching = bool(mouse.switcher_open)    # the task switcher: no page scroll, no drag; the box still places the cursor
                 grip = self.grip.step("fist" if result.active_gesture == "fist" and not command_hold and not switching else None, t0)
+                fist_released, self._was_grip = (getattr(self, "_was_grip", None) == "scroll" and grip is None), grip
                 check = self._click_check(engine.config)
                 if check is not None:
                     check.step(t0, hand, frame.shape[0] / max(1, frame.shape[1]))
@@ -877,13 +982,30 @@ class QtRuntime:
                     # while the three are together, and a moment after (the middle leaving looks like a thumb + index pinch)
                     settling = self.shape_right.closed or t0 - self._triple_open_t < .3
                     pinch_evt = None if settling and not self.shape_pinch.closed else self.shape_pinch.step(
-                        hand.landmarks, frame.shape[1], frame.shape[0], frames=1 if quick else None)
+                        hand.landmarks, frame.shape[1], frame.shape[0], frames=1 if quick else None,
+                        dragging=self._pinch_drag, now=t0)       # a drag lets go only when the fingers clearly part
                 else:
                     self.shape_pinch.reset()
                     self.shape_right.reset()
                     right_evt = None
                     self._pinch_triple = False
                     self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
+                # how fast the palm is travelling (frame widths a second, over the last 0.2 s)
+                pc = palm_centre(hand.landmarks)
+                self._palm_trail.append((t0, pc[0], pc[1] * frame.shape[0] / max(1, frame.shape[1])))
+                self._palm_trail = [p for p in self._palm_trail if t0 - p[0] <= .2]
+                first = self._palm_trail[0]
+                palm_speed = (math.hypot(self._palm_trail[-1][1] - first[1], self._palm_trail[-1][2] - first[2]) / (t0 - first[0])
+                              if len(self._palm_trail) >= 3 and t0 - first[0] > 1e-3 else 0.0)
+                if pinch_evt == "down":
+                    # 2026-11-11 ("가상손이 … 뚝뚝 끊기는 경우가 잦다"): the fingers meeting holds the cursor (the click's aim).
+                    # Of 198 logged thumb + index pinches 31 closed while the palm was travelling at 0.15 frame widths a
+                    # second or more (a hand on its way, its fingers brushing): each stopped the cursor for a quarter to
+                    # half a second and 10 of them clicked. A pinch that closes on a travelling hand holds nothing and
+                    # is no click; held on, it still becomes a drag.
+                    limit = float(engine.config.get("virtual_pinch_moving_speed", .15))
+                    self._pinch_moving = limit > 0 and palm_speed >= limit and not (
+                        self._last_tap is not None and t0 - self._last_tap[0] <= DOUBLE_TAP)
                 second = None          # a second tap soon after a click: the double click's second click, at the same point
                 if pinch_evt == "down":
                     self._pinch_since, self._pinch_drag, self._pinch_rejected = t0, False, False
@@ -892,6 +1014,7 @@ class QtRuntime:
                         second, self._pinch_since = last[1], None      # no drag and no click on opening from this press
                         self._pinch_double = True
                     self._last_tap = None
+                self._click_kind = "double" if second is not None else ""   # which kind of left click this frame's would be
                 was_drag = self._pinch_drag
                 if (self.shape_pinch.closed and self._pinch_since is not None and t0 - self._pinch_since >= PINCH_HOLD
                         and not switching and not self._pinch_triple and not self.shape_right.closed
@@ -899,15 +1022,23 @@ class QtRuntime:
                     self._pinch_drag = True                # held closed: it is a drag, not a click
                 dragging = self.shape_pinch.closed and self._pinch_drag
                 tap = pinch_evt == "up" and not self._pinch_drag and not self._pinch_double and not self._pinch_triple \
-                    and not self._pinch_rejected and self._checked(check, t0)
+                    and not self._pinch_rejected and not self._pinch_moving and self._checked(check, t0)
                 drop = pinch_evt == "up" and self._pinch_drag     # the button comes up between the fingers, not at the palm
                 press_t = self._pinch_since                    # when the fingers met (for the click log)
                 if pinch_evt == "up" or (not self.shape_pinch.closed and not self.shape_right.closed):
                     self._pinch_since, self._pinch_drag, self._pinch_double = None, False, False
                     self._pinch_triple = False
                     self._pinch_rejected = False
-                aiming = (self.shape_pinch.closed and not dragging) or tap or self.shape_right.closed
+                    self._pinch_moving = False
+                aiming = (self.shape_pinch.closed and not dragging and not self._pinch_moving) or tap or self.shape_right.closed
+                # fast while the hand only moves, smooth while it makes a command (setting "auto", virtual_hand.Responder)
+                vh_mode = self._vh_respond(t0, bool(
+                    grip is not None or command_hold or switching or dragging or self.shape_pinch.closed
+                    or self.shape_right.closed or self.shape_switch.holding or self.composite_detector.commanding()))
+                # (keep: only a grip that was meant leaves the cursor where it is when it ends; after a few stray fist
+                # frames the cursor goes back to the hand, so the box and the monitor stay lined up)
                 nx, ny = self.box_mapper.target(hand.landmarks, ui.virtual_box, now=t0, aim=grip is None,
+                                                keep=grip == "scroll" and self.grip.solid,
                                                 hold=command_hold or grip == "scroll" or aiming
                                                 or (grip is None and holds_still(early, result.action, result.active_gesture)))
                 if (tap or second is not None) and result.action in PASSIVE_ACTIONS:
@@ -936,9 +1067,17 @@ class QtRuntime:
                     # a fist holds the page: hand down = browse down (the pinch scroll goes the other way, like a touch screen)
                     if self.grip.started:
                         self.ratchet.reset()
+                        self._fist_y = None
                     # sideways is easier than up and down: fist right = browse down, left = up (fed to the scroll as up/down)
                     cx, cy = palm_centre(hand.landmarks)
-                    result.action, result.cursor_point = "scroll_grab", (0.5, self.ratchet.step(cx, t0))
+                    # 2026-11-11 report ("스크롤하다가 손을 펴면 … 의도하지 않은 추가 스크롤"): the grip outlasts the fist by
+                    # Grip.GRACE (a flickering fist must not drop the page), and for those 0.4 s the opening hand kept
+                    # scrolling - 19 logged releases: 12-14 frames each, the palm moving up to 8 % of the frame. The page
+                    # now follows the hand only while it IS a fist; with the fist gone it stands where it was (so the
+                    # release also has no speed to coast on).
+                    if result.active_gesture == "fist" or self._fist_y is None:
+                        self._fist_y = self.ratchet.step(cx, t0)
+                    result.action, result.cursor_point = "scroll_grab", (0.5, self._fist_y)
                     flip = not engine.config.get("virtual_fist_scroll_follows_page", False)
                     apply_cfg = {**engine.config, "scroll_invert": bool(engine.config.get("scroll_invert", False)) != flip,
                                  "scroll_gain": float(engine.config.get("scroll_gain", 36000.0))
@@ -949,6 +1088,7 @@ class QtRuntime:
                                       size=self.hand_size(hand.landmarks, frame.shape[1], frame.shape[0], t0))
                 if vh is not None:
                     vh["pts"] = self.view_smoother(vh["pts"], t0)
+                    vh["glide"] = vh_response(vh_mode)["glide"]   # the window's glide between camera frames follows the mode too
                     vh["grip"] = grip is not None          # a fist holds the page: the drawn hand turns amber (manux)
                     if grip is not None:
                         vh["click"] = None
@@ -980,6 +1120,7 @@ class QtRuntime:
                 if switching:
                     apply_cfg = {**apply_cfg, "switcher_external_cursor": True}
             if not self.paused and not guided_recording:      # guided recording: rules judge, the mouse stays still
+                self._use_enforce(t0, result, screen_point is not None)
                 if cursor_point is not None:
                     # the hand does the clicking: the cursor goes to the pinch point first (at once when the fingers meet)
                     if cursor_point != tuple(mouse.last_screen_pos):
@@ -991,9 +1132,11 @@ class QtRuntime:
                     t0, hand.landmarks, result.active_gesture, draw_pinched, mouse.frame_aspect
                 )
                 if comp_hit is not None:
+                    self._log_composite_fire(comp_hit)
                     reg = get_action_registry()
                     fg = mouse.foreground_info() if not mouse.dry_run else {}
                     resolved = reg.resolve_effective_action(comp_hit["key"], fg)
+                    self._use_names[comp_hit["key"]] = str(comp_hit.get("name") or comp_hit["key"])
                     ok, badge = self._run_resolved(reg, resolved)
                     if ok:
                         self._say(f"복합 동작 [{comp_hit['name']}] → {badge}", 1.5)
@@ -1023,6 +1166,9 @@ class QtRuntime:
                         self._recent_action, self._recent_until = result.action, time.perf_counter() + 0.8
                         result.action = "none"
                 mouse.apply(result, apply_cfg)
+                if fist_released:
+                    mouse._stop_scroll_inertia()           # a fist that let go leaves the page where it is: no coasting on
+                self._use_action(t0, result.action, result.active_gesture, virtual=screen_point is not None)
                 if result.action in ONE_SHOT:
                     self._recent_action, self._recent_until = result.action, time.perf_counter() + .8
             guides = pinch_guides(result.distances, engine.config, draw_pinched,
@@ -1045,6 +1191,9 @@ class QtRuntime:
                     guides = virtual_guides(guides)         # only the pinches that work here are drawn on the screen hand
                 vh["guides"] = [[f, s] for f, s in guides]
                 vh["action"] = HAND_ACTION_NAMES.get(label, "")
+                vh["text"] = bool(getattr(ui, "signal_text", True))
+                if self.paused:
+                    vh["note"] = self._inspect_note(t0, hand, result, draw_pinched)
                 if screen_point is not None and self._vh_anchor is not None:
                     vh["anchor"] = [round(v, 1) for v in self._vh_anchor]   # drawn on the cursor (the window centre)
                     vh["click"] = list(vh["anchor"])
@@ -1070,6 +1219,21 @@ class QtRuntime:
                 self._say(f"FLING! ~{mouse.last_fling_distance:.0f}px", .8)
         elif not index_mode:
             result = engine.process(None)
+
+        if detections and not index_mode and self._virtual_hand is None and self._vh_last is not None:
+            # A hand is seen but the controls are off for it (a V or close sign held, motion or draw mode, palm calibration):
+            # the window used to be hidden for those frames (2026-11-11: "the virtual hand keeps vanishing"). Draw the
+            # hand as it is now, faded, where it was.
+            lm = detections[0].landmarks
+            fw, fh = frame.shape[1], frame.shape[0]
+            vh = virtual_hand_view(lm, fw, fh, (), "none", size=self.hand_size(lm, fw, fh, t0))
+            if vh is not None:
+                vh["pts"] = self.view_smoother(vh["pts"], t0)
+                for key in ("screen", "anchor", "switcher"):
+                    if key in self._vh_last:
+                        vh[key] = self._vh_last[key]
+                vh["lost"] = True
+                self._virtual_hand = self._vh_last = vh
 
         if roi is not None:
             cv2.rectangle(frame, roi[:2], roi[2:], (189, 229, 70), 2, cv2.LINE_AA)
@@ -1121,9 +1285,15 @@ class QtRuntime:
             virtual_hand=self._virtual_hand,
             preview_hand=self._preview_hand,
             pose_probe=self._pose_probe_view(t0),
+            pose_probe_shot=((self.pose_probe.shot_seq, self.pose_probe.shot, self.pose_probe.clip)
+                             if self.pose_probe.shot_seq else None),
             draw=self.draw.view(t0) if self.draw.active or self.draw.last is not None else None,
             finger=self._finger,
+            point=self._point_view,
             admin_blocked=self._admin_window_in_front(t0),
+            learn_request=(self._learn_request, str(self.log_dir / "use_events")),
+            learn_note=self._learn_note,
+            learn_items=list(self._learn_items),
             hand_lost=(t0 - self._hand_seen_t) > float(self.engine.config.get("hand_lost_alert", 0.35)),
             arm_lost=bool(self.pose is not None and not ui.use_index_pointer
                           and (self._arm is None or t0 - self._arm_t > float(self.engine.config.get("arm_lost_alert", 0.8)))),
@@ -1210,10 +1380,14 @@ class QtRuntime:
             # the keys would land in this app itself, where a letter can be a shortcut (Q quits)
             self._online_gesture, self._online_gesture_until = f"{label}: 앱 창에는 명령을 보내지 않아요", t0 + 1.5
             return
+        if not self._use_allows(label, t0):
+            return
         registry = get_action_registry()
         resolved = registry.resolve_effective_action(binding_key(label), self.mouse.foreground_info() if not self.mouse.dry_run else {})
         ok, badge = registry.execute_resolved_action(resolved, dry_run=self.mouse.dry_run, mouse_controller=self.mouse)
-        self._online_gesture = f"{label} → {command_text(value)}" if ok else f"{label}: {badge}"
+        if ok:
+            self._use_event("registered", label, t0)
+        self._online_gesture =f"{label} → {command_text(value)}" if ok else f"{label}: {badge}"
         self._online_gesture_until = t0 + 1.5
         self._say(f"새 동작 실행: {label} → {badge}", 1.5)
 
@@ -1283,6 +1457,10 @@ class QtRuntime:
     def _online_reload(self) -> None:
         """A new production model (or a rollback): the guesses come from it from now on. Without torch or a model: the rule engine's."""
         self._online_model_version += 1          # the gate reloads too, and holds actions for a moment (OnlineGate)
+        self._watchers.pop("online", None)       # the watching copy too; what the old file had earned is decided again
+        self._watch_loading.discard("online")
+        if self.use_log is not None:
+            self._use_decide(recount=True)
         if self.online is None:
             return
         try:
@@ -1296,6 +1474,44 @@ class QtRuntime:
     def take_correction(self):
         """A saved "last moments" sample waiting for the person's answer, or None. UI thread."""
         return self.online.take_manual() if self.online is not None else None
+
+    def _point_step(self, t0: float, hand, ui) -> GestureResult:
+        """One frame of pointing mode: the index tip moves the cursor; resting on a file / folder for PointMode.DWELL
+        double-clicks (thumb + index) or right-clicks (thumb + index and middle together) it."""
+        mouse = self.mouse
+        tip = hand.landmarks[GestureEngine.INDEX_TIP]
+        if self.point.kind == "right":         # two fingers together: the point between their tips
+            other = hand.landmarks[GestureEngine.MIDDLE_TIP]
+            tip = SimpleNamespace(x=(tip.x + other.x) / 2, y=(tip.y + other.y) / 2)
+        result = GestureResult(action="move_cursor", active_gesture="point", cursor_point=(tip.x, tip.y), is_moving=True)
+        mouse.apply(result, self.engine.config, index_tip=(tip.x, tip.y),
+                    index_sensitivity=ui.sensitivity / 100 * float(self.point.settings.get("speed", 1.0)),
+                    pointer_source="index")
+        cur = (float(mouse.last_screen_pos[0]), float(mouse.last_screen_pos[1]))
+        self.point_probe.ask(*cur)
+        # the file / folder at or around the fingertip (2026-11-11: the wait is on the item, the tip may tremble)
+        item = self.point_probe.target(*cur)
+        on_file = True if item is not None else self.point_probe.answer(*cur)
+        fire = self.point.dwell(t0, cur, on_file, item=item)
+        centre = None
+        if item is not None:
+            left, top, right, bottom = item[1]
+            centre = (int((left + right) / 2), int((top + bottom) / 2))
+        if fire:
+            if centre is not None and not mouse.dry_run:
+                mouse._move_os_cursor(*centre, immediate=True)     # the click lands on the item, not where the tip shook to
+            mouse.point_click(fire)
+            done = "double_click" if fire == "double" else "right_click"
+            self._recent_action, self._recent_until = done, time.perf_counter() + .8
+            self._say(("더블클릭" if fire == "double" else "우클릭") + (f": {self.point_probe.name}" if self.point_probe.name else ""), 1.2)
+            self._use_action(t0, done, "point", source="point")
+        if self._vh_last is not None:
+            self._vh_last = {**self._vh_last, "screen": [int(cur[0]), int(cur[1])]}   # the faded hand follows the cursor
+        self._preview_hand = preview_hand(hand.landmarks, (), None, True)
+        self._point_view = {"kind": self.point.kind, "progress": round(self.point.progress, 3),
+                            "on_file": bool(on_file), "screen": list(centre) if centre is not None else [int(cur[0]), int(cur[1])],
+                            "name": item[0] if item is not None else ""}     # the ring sits on the item being waited on
+        return result
 
     def _motion_blocked(self, t0: float) -> bool:
         """A pinch, scroll or drag is going on or has just ended: the entry pose does not count then."""
@@ -1324,6 +1540,14 @@ class QtRuntime:
                 if g._index_pinched or g._secondary_since or (t0 - last) < quiet:
                     blocked = True
             blocked = blocked or bool(self.mouse.is_dragging or self.mouse.scroll_coasting)
+            # 2026-11-11 report ("포인팅 모드 더블클릭 되는 순간 비활성화 … V 동작 간섭"): the pointing hand is one finger away
+            # from a V - the middle finger comes out for the right-click shape, or as the hand relaxes after the click -
+            # and 0.6 s of that switched the control off (logs/failures 135722, 140004: the pointing shape, then a V).
+            # While pointing mode is on, and for POINT_QUIET after it, the V sign does not count.
+            if getattr(ui, "point_mode", True) and point_shape(detections[0].landmarks, self.mouse.frame_aspect, self.point.tilt, self.point.right):
+                self._point_seen = t0              # (the shape itself, also before the mode has started or after it ended)
+            blocked = blocked or self.point.active or (t0 - self._point_seen) < POINT_QUIET
+        self.toggle_sign.aspect = self.mouse.frame_aspect
         was_holding = self.toggle_sign.holding(t0)
         v_model_ok = bool(
             self.gate is not None
@@ -1496,8 +1720,410 @@ class QtRuntime:
         kind = self.click_log.mark_last(now) if self.click_log is not None else None
         if kind is None:
             return False
+        self._use_mark(now, "f_key")
         self._say(f"방금 {CLICK_NAMES.get(kind, kind)}은 '클릭 아님'으로 기록했어요", 1.5)
         return True
+
+    # ------------------------------------------------------------------ use log: joints around every command (src/use_log.py)
+    def _use_frame(self, t0: float, detections, aspect: float, gate: Optional[GestureGate], active: bool) -> None:
+        """Every frame, before anything acts on it. The TCN watches (the real checker when it is on, otherwise a copy that
+        blocks nothing) and its probabilities go into the log's frames. A failure here switches the log off, never the mouse."""
+        self._use_t = t0
+        self._click_kind = ""
+        self._use_watchers = {}
+        self._use_real_kind = ""
+        config = self.engine.config
+        if not active or not config.get("use_event_log", True) or getattr(self, "_use_failed", False):
+            return
+        try:
+            if self.use_log is None:
+                self.use_log = UseLog(self.log_dir / "use_events", pc=machine_info(str(config.get("pc_alias", "")))["pc"],
+                                      camera=str(config.get("camera_note", "")),
+                                      max_mb=float(config.get("use_event_log_max_mb", 300.0)))
+                self._use_round_t = t0
+                self._use_decide(recount=True)
+            hand = detections[0] if detections else None
+            if hand is None:
+                self._use_prev_action = "none"
+            if gate is not None:
+                self._use_real_kind = "online" if isinstance(gate, _online_gate_class()) else "tcn"
+            watchers: Dict[str, GestureGate] = {}
+            for kind in use_gate.KINDS:
+                if kind == self._use_real_kind:
+                    watchers[kind] = gate
+                    self._watch_stale.add(kind)      # the copy missed these frames: it starts over when it watches again
+                elif config.get("use_event_shadow", True):
+                    copy = self._watcher(kind)
+                    if copy is not None:
+                        if kind in self._watch_stale:
+                            copy.reset()
+                            self._watch_stale.discard(kind)
+                        copy.step(t0, hand, aspect)
+                        watchers[kind] = copy
+            self._use_watchers = watchers
+            tcn = watchers.get("tcn")
+            self.use_log.frame(t0, hand, None if tcn is None else tcn.last)
+            self._use_auto(t0)
+        except Exception as exc:
+            self._use_failed = True
+            self._say(f"사용 기록을 껐어요: {exc}", 5.0)
+
+    def _model_version(self, kind: str, label: str = "") -> str:
+        """Which model file a verdict came from: a verdict of another file says nothing about the one in use. For a taught
+        gesture the verdict is its own checking model's (src/online/verifier.py), so that file's time is part of it."""
+        path = GATE_MODEL if kind == "tcn" else (self._online_root or ONLINE_DEFAULT_ROOT) / "versions" / "production.pt"
+        try:
+            version = f"{kind}:{int(path.stat().st_mtime)}"
+        except OSError:
+            return ""
+        verifier = getattr(self._watchers.get(kind), "verifiers", {}).get(label) if label else None
+        return f"{version}+v{int(verifier.created)}" if verifier is not None else version
+
+    def _hand_dir(self) -> str:
+        """Which way the hand points now (the last half second of the use log's frames), "" when unknown."""
+        log = self.use_log
+        if log is None:
+            return ""
+        try:
+            frames = list(log._frames)[-15:]
+        except Exception:
+            return ""
+        return hand_dir.of_frames(frames)
+
+    def _verifier(self, key: str):
+        """(the watching model learned from this person, the taught gesture's checking model in it), or (None, None)."""
+        watcher = self._use_watchers.get("online")
+        verifier = getattr(watcher, "verifiers", {}).get(key) if watcher is not None else None
+        return (watcher, verifier) if verifier is not None else (None, None)
+
+    def _watcher(self, kind: str) -> Optional[GestureGate]:
+        """The watching copy of a checker ("tcn" = the trained model, "online" = the model learned from this person), loaded in a
+        thread on first use. None until then, or when it cannot load (no model, no onnxruntime / torch)."""
+        if kind not in self._watchers and kind not in self._watch_loading and not self.dry_run:
+            if kind == "online" and not (self.engine.config.get("online_learning_enabled", False) and self._model_version(kind)):
+                return None
+            self._watch_loading.add(kind)
+
+            def load() -> None:
+                try:
+                    if kind == "online":
+                        from src.online.safety import OnlineGate
+                        made: GestureGate = OnlineGate(self._online_root or ONLINE_DEFAULT_ROOT, self.engine.config)
+                    else:
+                        predict, info = load_predictor(GATE_MODEL)
+                        made = GestureGate(predict, info, self.engine.config)
+                    self._watchers[kind] = made
+                except Exception:
+                    pass                           # the log still keeps the joints
+                # a failed load stays in _watch_loading: it is not tried again every frame (a model swap clears it)
+
+            threading.Thread(target=load, name=f"watcher-{kind}-load", daemon=True).start()
+        return self._watchers.get(kind)
+
+    @staticmethod
+    def _use_label(action: str, gesture: str, virtual: bool) -> str:
+        """The model label of the hand gesture behind a rule action ("" = the models know none for it)."""
+        if virtual:
+            return USE_LABELS_VIRTUAL.get(action, "")
+        if action == "drag_hold":
+            return "thumb_index_middle" if gesture == "thumb_index_middle_pinch" else "thumb_middle"
+        return USE_LABELS.get(action, "")
+
+    def _use_enforce(self, t0: float, result, virtual: bool) -> None:
+        """Step 2: a command that a watching model has earned the right to stop (src/use_gate.py) is dropped when that model does
+        not see its gesture as it starts: exactly the verdict the log counted. Nothing else is touched."""
+        action = result.action
+        if action not in USE_ACTIONS:
+            self._use_blocking = None
+            return
+        if self._use_blocking == action:
+            result.action = "none"                 # the grab that was stopped at its start stays stopped until it ends
+            return
+        self._use_blocking = None
+        if action == self._use_prev_action:
+            return
+        label = self._use_label(action, result.active_gesture, virtual)
+        # a left / right click with its own checking model (learned from this person's clicks, src/online/verifier.py): that
+        # model decides, the way a taught gesture's does - the third try within a few seconds goes through
+        click = self._click_model(click_key("rule", action, label, self._click_kind))
+        if click and self._verifier(click)[1] is not None and self.engine.config.get("click_verifier_enforce", True):
+            if not self._use_allows(click, t0, setting="click_verifier_enforce"):
+                result.action = "none"
+                self._use_blocking = action
+            return
+        if not self._use_gate:
+            return
+        rule = self._use_gate.get(use_gate.gate_key(action, label))
+        if not rule:
+            return
+        kind = rule.get("model", "")
+        watcher = self._use_watchers.get(kind)
+        if watcher is None or rule.get("version") != self._model_version(kind):
+            return                                 # that model is not watching now, or is not the file that earned it
+        try:
+            verdict = shadow_verdict(watcher, label, t0)
+        except Exception:
+            return
+        if verdict is not None and verdict.get("would_pass") is False:
+            result.action = "none"
+            self._use_blocking = action
+            self.use_blocked += 1
+            self._say(f"{HAND_ACTION_NAMES.get(action) or action}: 의도한 동작으로 보이지 않아 실행하지 않았어요", 1.0)
+
+    def _use_action(self, t0: float, action: str, gesture: str, virtual: bool = False, source: str = "rule") -> None:
+        """A rule (or index pointer) action this frame: logged when it starts, not on every frame of a grab."""
+        prev, self._use_prev_action = self._use_prev_action, action
+        if action == prev or action not in USE_ACTIONS:
+            return
+        label = self._use_label(action, gesture, virtual) if source == "rule" else ""
+        extra = {"click_kind": self._click_kind} if source == "rule" and action == "left_click" else {}
+        self._use_event(source, action, t0, label=label, gesture=gesture, virtual=virtual, **extra)
+
+    def _click_model(self, key: str) -> str:
+        """The checking model that answers for a click: its kind's own (the second tap of a double click) once the app has
+        trained one, else the plain click's (src/online/verifier.py pools a kind with too few uses into it)."""
+        if key and self._verifier(key)[1] is None:
+            return click_base(key)
+        return key
+
+    def _use_event(self, source: str, key: str, t0: Optional[float] = None, label: str = "", **extra) -> None:
+        log = self.use_log
+        if log is None or self.paused or getattr(self, "_use_failed", False):
+            return
+        try:
+            now = self._use_t if t0 is None else t0
+            taught = use_import_learnable(source, key)
+            if taught:                             # which way the hand pointed: its own category (src/hand_direction.py)
+                extra = {**extra, "dir": self._hand_dir()}
+            split_key = hand_dir.split(key, extra.get("dir", "")) if taught else key
+            verdicts: Dict[str, Any] = {}
+            for kind, watcher in self._use_watchers.items():
+                verdict = shadow_verdict(watcher, label or split_key, now)
+                if verdict is not None:
+                    verdict["model"] = self._model_version(kind, label or split_key)
+                    verdicts[kind] = verdict
+            enforced = self._use_gate.get(use_gate.gate_key(key, label or key), {}).get("model", "")
+            click = click_key(source, key, label, str(extra.get("click_kind") or ""))   # which click, which mode, which kind
+            checked, setting = ((self._click_model(click), "click_verifier_enforce") if click
+                                else (split_key, "taught_verifier_enforce"))
+            if self._verifier(checked)[1] is not None and self.engine.config.get(setting, True):
+                enforced = "online"                # its own checking model decides: this run says nothing about that model
+                extra = {**extra, "forced": self._use_forced == checked}
+                self._use_forced = None
+            log.event(source, key, now, label=label, shadow=verdicts.get("tcn"),
+                      extra={**extra, "shadow_online": verdicts.get("online"), "gate_on": self._use_real_kind,
+                             "enforced": enforced, "index_pointer": bool(self.ui.use_index_pointer)})
+            if taught or click:
+                self._use_pending[click or split_key] = self._use_pending.get(click or split_key, 0) + 1
+                self._use_note()
+        except Exception as exc:
+            self._use_failed = True
+            self._say(f"사용 기록을 껐어요: {exc}", 5.0)
+
+    def _use_decide(self, recount: bool = False) -> None:
+        """Reads the log's index in a thread and sets which commands a watching model may stop. New ones are announced.
+        `recount` (at the start, and after a learning round): the taught gestures' uses no round has taken yet, from the log."""
+        if self._use_deciding:
+            return
+        self._use_deciding = True
+        folder = self.log_dir / "use_events"
+        config = self.engine.config
+        pc = machine_info(str(config.get("pc_alias", "")))["pc"]
+        models = {kind: self._model_version(kind) for kind in use_gate.KINDS}
+        root = self._online_root or ONLINE_DEFAULT_ROOT
+
+        def work() -> None:
+            try:
+                if recount and config.get("online_learning_enabled", False):
+                    from src.online.use_import import pending_counts
+                    from src.online.verifier import read_status
+                    composites = get_action_registry().composite_gestures      # a deleted gesture's old uses do not count
+                    self._use_pending = {k: n for k, n in pending_counts(folder, root).items()
+                                         if not k.startswith("comp_") or hand_dir.base(k) in composites}
+                    self._use_status = read_status(root)
+                if config.get("use_gate_auto", True):
+                    decision = use_gate.decide(read_use_events(folder, frames=False), pc, models)
+                    use_gate.save(folder / "gate.json", decision)
+                    new = sorted(set(decision) - set(self._use_gate))
+                    self._use_gate = decision
+                    if new:
+                        names = ", ".join(HAND_ACTION_NAMES.get(k.split(":")[0]) or self._use_name(k.split(":")[0]) for k in new)
+                        self._say(f"이제 학습 모델이 확인해요: {names} (표시한 오작동을 절반 넘게 막았을 것으로 측정됨)", 5.0)
+                else:
+                    self._use_gate = {}
+                self._use_note()
+            except Exception:
+                pass
+            finally:
+                self._use_deciding = False
+
+        if self.dry_run:
+            work()                                 # tests: no thread to wait for
+        else:
+            threading.Thread(target=work, name="use-gate-decide", daemon=True).start()
+
+    def _vh_respond(self, t0: float, commanding: bool) -> str:
+        """Sets the virtual hand's filters for this frame: config "virtual_hand_response" = "auto" (fast while moving, smooth
+        while a command is made), "fast" or "smooth". Returns the mode in use."""
+        mode = self.vh_responder.step(self.engine.config.get("virtual_hand_response", "auto"), commanding, t0)
+        if mode != getattr(self, "_vh_mode", None):
+            self._vh_mode = mode
+            self.box_mapper.set_response(mode)
+            self.view_smoother.set_response(mode)
+        return mode
+
+    def _use_name(self, key: str) -> str:
+        """What the person calls a taught gesture (the composite's name), for the notices. A click: "좌클릭" / "우클릭"."""
+        d = hand_dir.of_key(key)
+        if d:                                      # one direction of a taught gesture: "손 펴기 유지 · ↑ 위쪽"
+            return f"{self._use_name(hand_dir.base(key))} · {hand_dir.name(d)}"
+        if key not in self._use_names and key.split(":")[0] in CLICK_ACTIONS:
+            self._use_names[key] = click_name(key)     # "좌클릭 · 가상 손 (엄지+검지) · 더블클릭의 두 번째"
+        if key not in self._use_names:
+            try:
+                reg = get_action_registry()
+                self._use_names[key] = str((reg.composite_gestures.get(key) or {}).get("name")
+                                           or reg.get_binding(key).get("name") or key)
+            except Exception:
+                self._use_names[key] = key
+        return self._use_names[key]
+
+    def _use_note(self) -> None:
+        """One line for the main screen: what the app is collecting or has learned from the taught gestures' uses."""
+        known = set(getattr(self._watchers.get("online"), "classes", ()) or ())
+        parts = []
+        items: List[Dict[str, Any]] = []         # the same, one card per gesture (2026-11-11: the line was hard to read)
+        for key, n in sorted(self._use_pending.items(), key=lambda kv: (self._is_click(kv[0]), -kv[1])):
+            if n <= 0 or len(parts) >= 2:
+                continue
+            name = self._use_name(key)
+            need = self._use_need(key)
+            again = " 다시" if key in known else ""
+            if (self._use_status.get(key) or {}).get("status") == "waiting" and key not in known:
+                continue                           # said below: it waits for another day, not for more uses today
+            # a click's model learns what is NOT a click from the ones the person marks: say how, where it is collected
+            how = " · 잘못 눌린 클릭은 5초 안에 F를 누르면 '아님'으로 배워요" if self._is_click(key) else ""
+            parts.append(f"'{name}' 사용 사례 {n}개가 모였어요 · 곧 TCN 학습을{again} 시작해요" if n >= need
+                         else f"'{name}' 사용 사례를 모으는 중 {n}/{need} · {need}번이 되면 TCN 학습을{again} 자동으로 시작해요{how}")
+            items.append({"key": key, "name": name, "state": "ready" if n >= need else "collecting", "n": n, "need": need,
+                          "text": (f"곧 TCN 학습을{again} 시작해요" if n >= need else f"{need}번이 되면 TCN 학습을{again} 자동으로 시작"),
+                          "hint": "잘못 눌린 클릭은 5초 안에 F" if self._is_click(key) else ""})
+        for key, state in self._use_status.items():
+            if key.startswith("comp_") and not hand_dir.of_key(key):
+                continue                           # made before uses were split by direction: replaced by the per-direction ones
+            if state.get("status") == "waiting" and key not in known and len(parts) < 3:
+                today = self._use_pending.get(key, 0)
+                total = int(state.get('uses', 0)) + today
+                one_day = state.get("reason") == "one_day"
+                parts.append(f"'{self._use_name(key)}' 사용 사례 {total}개 저장됨 · "
+                             + ("다른 날에도 쓰면 그날 사용으로 검사한 뒤 TCN 확인을 시작해요" if one_day
+                                else f"최근 날의 사용이 {WAITING_USES}번 모이면 검사해요"))
+                items.append({"key": key, "name": self._use_name(key), "state": "waiting", "n": total, "need": 0,
+                              "text": "다른 날에도 쓰면 검사 후 TCN 확인 시작" if one_day
+                              else f"최근 날의 사용 {WAITING_USES}번이 모이면 검사", "hint": ""})
+        learned = sorted(k for k in (getattr(self._watchers.get("online"), "verifiers", {}) or {})
+                         if not k.startswith("comp_") or hand_dir.of_key(k))      # (whole-gesture ones from before: unused now)
+        if learned:
+            does = "확인하는" if self.engine.config.get("taught_verifier_enforce", True) else "지켜보는"
+            parts.append(f"TCN이 {does} 자세: " + ", ".join(self._use_name(k) for k in learned[:4])
+                         + (f" 외 {len(learned) - 4}개" if len(learned) > 4 else ""))
+            for k in learned[:4]:
+                items.append({"key": k, "name": self._use_name(k), "state": "learned", "n": 0, "need": 0,
+                              "text": f"TCN이 {does} 중", "hint": ""})
+        self._learn_note = "   ·   ".join(parts)
+        self._learn_items = items
+
+    @staticmethod
+    def _is_click(key: str) -> bool:
+        return key.split(":")[0] in CLICK_ACTIONS and ":" in key
+
+    def _use_need(self, key: str) -> int:
+        """Uses of a gesture that start a learning round: clicks come many times a minute, so twice as many of them."""
+        need = int(self.engine.config.get("auto_learn_min_events", 20))
+        return need * 2 if self._is_click(key) else need
+
+    def _use_waiting(self, key: str) -> bool:
+        """This taught gesture's checking model is waiting for uses of another day to be tested on (src/online/verifier.py), and
+        today is such a day: a few uses are enough to ask for a round."""
+        state = self._use_status.get(key) or {}
+        return state.get("status") == "waiting" and (state.get("reason") == "few_recent"
+                                                     or state.get("newest_day") != time.strftime("%Y%m%d"))
+
+    def _use_auto(self, t0: float) -> None:
+        """A learning round is asked for (the UI thread owns the learning process: Snapshot.learn_request) when a taught gesture
+        has been used often enough, or enough commands were marked as not meant; a few seconds after the last command, so its
+        mark can still arrive. Now and then the decision above is taken again as well."""
+        config = self.engine.config
+        log = self.use_log
+        if log is None:
+            return
+        if log.last is not None and t0 - log.last["t"] < float(config.get("auto_learn_idle_seconds", 6.0)):
+            return
+        need = int(config.get("auto_learn_min_events", 20))
+        if log.events - self._use_round_events >= need:
+            self._use_round_events = log.events
+            self._use_decide()
+        ready = [k for k, n in self._use_pending.items()
+                 if n >= self._use_need(k) or (n >= WAITING_USES and self._use_waiting(k))]
+        marks = log.marks - self._use_round_marks >= int(config.get("auto_learn_min_marks", 5))
+        if not (ready or marks) or (self._use_rounds and t0 - self._use_round_t < float(config.get("auto_learn_cooldown_seconds", 600.0))):
+            return
+        root = self._online_root or ONLINE_DEFAULT_ROOT
+        if not (config.get("online_learning_enabled", False) and config.get("auto_learn", True)
+                and ((root / "encoder.json").is_file() or (root / "versions" / "production.pt").is_file())):
+            return                                 # (no base model yet: scripts/online_train_base.py comes first)
+        self._use_round_t, self._use_round_marks = t0, log.marks
+        self._use_rounds += 1
+        for key in ready:
+            self._use_pending[key] = 0             # handed to the round (counted again from the log when it ends)
+        self._learn_request += 1
+        self._use_note()
+
+    def _use_allows(self, key: str, t0: Optional[float] = None, setting: str = "taught_verifier_enforce") -> bool:
+        """A taught gesture's command: does its checking model (src/online/verifier.py) see the gesture now? Without one: yes,
+        unless a watching model earned the right to stop that command (src/use_gate.py).
+        The quick model already said yes to get here, so a no means the two disagree. A person who really means it tries again:
+        the third try within RETRY_SECONDS goes through, and is logged as a use the checking model missed (it learns from it)."""
+        now = self._use_t if t0 is None else t0
+        plain = key
+        if setting == "taught_verifier_enforce":   # a taught gesture is checked by the model of the way the hand points now
+            key = hand_dir.split(key, self._hand_dir())
+        watcher, verifier = self._verifier(key)
+        direct = verifier is not None and self.engine.config.get(setting, True)
+        if not direct:
+            rule = self._use_gate.get(use_gate.gate_key(plain, plain))
+            if not rule:
+                return True
+            kind = rule.get("model", "")
+            watcher = self._use_watchers.get(kind)
+            key = plain                            # those rules are made per gesture, not per direction
+            if watcher is None or rule.get("version") != self._model_version(kind, key):
+                return True
+        try:
+            verdict = shadow_verdict(watcher, key, now)
+        except Exception:
+            return True
+        if verdict is None or verdict.get("would_pass") is not False:
+            self._use_retries.pop(key, None)
+            return True
+        tries = [t for t in self._use_retries.get(key, []) if now - t <= RETRY_SECONDS] + [now]
+        if direct and len(tries) >= RETRY_PASS:
+            self._use_retries.pop(key, None)
+            self._use_forced = key
+            return True
+        self._use_retries[key] = tries
+        self.use_blocked += 1
+        self._say(f"{self._use_name(key)}: 의도한 동작으로 보이지 않아 실행하지 않았어요"
+                  + (f" (다시 하면 {RETRY_PASS}번째에 실행돼요)" if direct else ""), 1.5)
+        return False
+
+    def _use_mark(self, now: float, reason: str) -> None:
+        """F (or pausing right after a command): the latest command in the use log was not meant."""
+        if self.use_log is not None:
+            try:
+                self.use_log.mark_last(now, reason)
+            except Exception:
+                pass
 
     def _click_check(self, config) -> Optional[ClickCheck]:
         """The TCN's look at the virtual hand's thumb + index clicks (src/click_check.py); None when switched off."""
@@ -1892,6 +2518,45 @@ class QtRuntime:
         self.engine.reset()
         self._say("그리기 모드 켜짐 · 검지를 펴서 그리고, 손을 펴거나 쥐면 끝" if on else "그리기 모드 꺼짐", 2.0)
 
+    INSPECT_HOLD = 1.5       # s a signal's name stays on the drawn hand while the control is off
+
+    def _inspect_note(self, t0: float, hand, result, pinched) -> str:
+        """The control is OFF: what the hand's signal would do, written beside the drawn hand so a gesture can be checked
+        without anything happening (2026-11-11 request: "제어 상태가 아닌 상태에서 가상 손에서 보면서 검수할 수 있게 명령
+        신호 정보들이 다 나오도록"). Nothing is run and nothing is logged. A command that fired stays INSPECT_HOLD
+        seconds; otherwise the pointing shape or the hand shape the app sees now."""
+        from src.action_bindings import POSTURE_NAMES_KO
+        lm, aspect = hand.landmarks, self.mouse.frame_aspect
+        fired = ""
+        try:
+            name = HAND_ACTION_NAMES.get(result.action, "")
+            if name and result.action in USE_ACTIONS:
+                fired = name                                   # a click, a drag, a scroll grab, the task switcher …
+            reg = get_action_registry()
+            if self._inspect_detector is None or self._inspect_detector.registry is not reg:
+                self._inspect_detector = CompositeGestureDetector(reg)
+            hit = self._inspect_detector.step(t0, lm, result.active_gesture, pinched, aspect)
+            if hit is not None:                                # a gesture the person connected (hold / swipe / double pinch)
+                badge = str(reg.resolve_effective_action(hit["key"], {}).get("badge") or "")
+                fired = f"{hit.get('name') or hit['key']}" + (f" → {badge}" if badge else "")
+            posture = hand_posture(lm, aspect)
+            sequences = self.seq_store.active()
+            if sequences:
+                done = self.sequences.step(t0, posture, sequences)
+                if done is not None:
+                    badge = str(reg.resolve_effective_action(done, {}).get("badge") or "")
+                    fired = f"이어 하기: {self.seq_store.items.get(done, {}).get('name', done)}" + (f" → {badge}" if badge else "")
+            if fired:
+                self._inspect = (fired, t0 + self.INSPECT_HOLD)
+            if t0 < self._inspect[1]:
+                return self._inspect[0]
+            pointing = point_shape(lm, aspect, self.point.tilt, self.point.right) if getattr(self.ui, "point_mode", True) else ""
+            if pointing:
+                return "포인팅: " + ("더블클릭 모양" if pointing == "double" else "우클릭 모양")
+            return ("손 모양: " + POSTURE_NAMES_KO.get(posture, posture)) if posture else ""
+        except Exception:
+            return ""
+
     def _run_sequence(self, key: str) -> None:
         self._run_gesture_key(key, self.seq_store.items.get(key, {}).get("name", key), "이어 하기")
 
@@ -1905,10 +2570,19 @@ class QtRuntime:
 
     def _run_resolved(self, reg, resolved):
         """Run a binding; the mode switches the registry cannot reach are done here."""
+        if not self._use_allows(str(resolved.get("gesture_key", ""))):
+            return False, "의도한 동작으로 보이지 않음"
         if resolved.get("action_type") == "mouse_action" and resolved.get("action_value") == "toggle_draw":
             self._set_draw(not self.draw.active)
-            return True, "그리기 모드 " + ("켜짐" if self.draw.active else "꺼짐")
-        return reg.execute_resolved_action(resolved, dry_run=self.mouse.dry_run, mouse_controller=self.mouse)
+            out = (True, "그리기 모드 " + ("켜짐" if self.draw.active else "꺼짐"))
+        else:
+            out = reg.execute_resolved_action(resolved, dry_run=self.mouse.dry_run, mouse_controller=self.mouse)
+        if not out[0] and resolved.get("action_type") == "launch_app":
+            self._say(str(out[1]), 4.0)          # a program that could not be started is said, not swallowed
+        if out[0] and resolved.get("action_type") != "none":
+            # the binding key and the kind of command only: never what is typed or opened
+            self._use_event("binding", str(resolved.get("gesture_key", "")), action_type=str(resolved.get("action_type", "")))
+        return out
 
     def _draw_step(self, t0: float, ui, detections, fw: int, fh: int) -> None:
         box = ui.virtual_box if valid_box(ui.virtual_box) else DEFAULT_BOX
@@ -1932,6 +2606,40 @@ class QtRuntime:
         if self.draw.last is not None:
             self.draw.last["action"] = badge
         self._say(f"그림 [{judged['name']}] → {badge}", 1.5)
+
+    def _log_composite_fire(self, comp: Dict[str, Any]) -> None:
+        """The 3 s of joints before a composite gesture fired (logs/composite_fires, the last 50; joints only): to see
+        afterwards WHY a command ran - the looks shown to the camera do not show what happens in use (2026-11-11)."""
+        try:
+            import json
+            d = self.log_dir / "composite_fires"
+            d.mkdir(parents=True, exist_ok=True)
+            frames = [{"t": round(t, 3), "posture": p, "engine": g,
+                       "lm": [[round(q.x, 4), round(q.y, 4), round(getattr(q, "z", 0.0) or 0.0, 4)] for q in lm]}
+                      for t, p, g, lm in list(self.composite_detector.trace)]
+            name = time.strftime("%Y%m%d-%H%M%S") + f"-{comp['key']}.json"
+            (d / name).write_text(json.dumps({"key": comp["key"], "posture": comp.get("base_posture"),
+                                              "trigger": comp.get("trigger_type"), "frames": frames}), encoding="utf-8")
+            for old in sorted(d.glob("*.json"))[:-50]:
+                old.unlink()
+        except Exception:
+            pass
+
+    def _pose_teach_save(self, label: str) -> None:
+        """The last [보여주기] look's joints as an example of `label` (src/posture_teach.py). The result then says so."""
+        result = self.pose_probe.result or {}
+        frames = [f["lm"] for f in getattr(self.pose_probe, "_log", []) if f.get("lm")]
+        if result.get("state") != "done" or not frames or not label:
+            return
+        from types import SimpleNamespace
+        from src.posture_teach import save_example
+        aspect = self.pose_probe.aspect
+        rule = [hand_posture([SimpleNamespace(x=p[0], y=p[1], z=p[2]) for p in lm], aspect, taught=False) for lm in frames]
+        try:
+            save_example(label, frames, rule)
+        except OSError:
+            return
+        self.pose_probe.result = relabelled(result, label)
 
     def _pose_probe_view(self, t0: float):
         self.pose_probe.finish_if_due(t0)       # also when the hand is gone (too few frames -> "failed")
@@ -1971,8 +2679,11 @@ class QtRuntime:
         return hit[1]
 
     def _motion(self, t0: float, ui, detections) -> bool:
-        """Run motion mode for this frame. True while it is on (the pinch controls are then suspended)."""
-        ready = ui.stage == "main" and not self.paused and not ui.calibrating
+        """Run motion mode for this frame. True while it is on (the pinch controls are then suspended).
+        With the mouse control off it runs as a simulation (2026-11-11 request): it can be entered and its swipes are told on the
+        screen, but no key is sent and no command run."""
+        ready = ui.stage == "main" and not ui.calibrating
+        sim = self.paused
         request = ""
         if ui.motion_request != self._motion_seen:
             self._motion_seen = ui.motion_request
@@ -1993,17 +2704,23 @@ class QtRuntime:
             if custom is not None:
                 # the thumbs-up's binding was changed: run it instead of motion mode (the button still opens motion mode)
                 self.motion.update(t0, None, request="off")
+                if sim:
+                    if custom != "off":
+                        self._say(f"시뮬레이션 · 엄지 위로 → {custom.get('badge', '')} (실행 안 함)", 1.5)
+                    return False
                 self.mouse.release_all()
                 if custom != "off":
                     ok, badge = self._run_resolved(get_action_registry(), custom)
                     self._say(f"엄지 위로 → {badge}", 1.5)
                 return False
             if event.kind == "enter":
-                self.mouse.release_all()
-                self.engine.reset()
-                self.pointer.reset()
+                if not sim:
+                    self.mouse.release_all()
+                    self.engine.reset()
+                    self.pointer.reset()
                 self._motion_last = ""
-                self._say("모션 모드 켜짐: 손을 펴고 좌우로 쓸어 보세요", 3.0)
+                self._say("모션 모드 켜짐 (시뮬레이션: 키는 보내지 않아요)" if sim
+                          else "모션 모드 켜짐: 손을 펴고 좌우로 쓸어 보세요", 3.0)
             elif event.kind == "exit":
                 self._say(f"모션 모드 꺼짐 ({event.info.get('why')})", 2.0)
             elif event.kind == "close_ask":
@@ -2013,8 +2730,14 @@ class QtRuntime:
                 from src.gesture_catalog import BY_KEY, MOTION_TARGETS
                 target_key = MOTION_TARGETS.get(event.action, event.action)
                 confirmed = self._intent(target_key, t0)
-                sent = confirmed and self.mouse.send_motion_action(event.action)
-                if sent:
+                if sim:                            # what it would have sent, nothing sent
+                    self._motion_last = "시뮬레이션: " + self._motion_would(event.action, target_key, BY_KEY)
+                    sent = None
+                else:
+                    sent = confirmed and self.mouse.send_motion_action(event.action)
+                if sent is None:
+                    pass
+                elif sent:
                     if event.action in ACTION_LABELS:
                         self._motion_last = ACTION_LABELS[event.action]
                     elif target_key in BY_KEY:
@@ -2022,11 +2745,22 @@ class QtRuntime:
                     else:
                         self._motion_last = event.action
                 else:
-                    self._motion_last = "TCN 동작 확인 안 됨" if not confirmed else "닫을 수 없는 창"
-                self._say(f"모션: {self._motion_last}", 1.5)
+                    self._motion_last = "TCN 동작 확인 안 됨" if not confirmed else "실행 안 됨"
+                self._say(f"모션: {self._motion_last}" + (" (실행 안 함)" if sent is None else ""), 1.5)
             if self.failures.trigger(t0, f"motion_{event.kind}", note=json.dumps(event.info, ensure_ascii=False)):
                 pass
         return self.motion.active
+
+    def _motion_would(self, action: str, target_key: str, by_key) -> str:
+        """What a motion-mode swipe would run: the command connected to it on the action screen, else its built-in key."""
+        try:
+            resolved = get_action_registry().resolve_effective_action(target_key, {})
+            if resolved.get("action_type") not in (None, "none") and resolved.get("badge"):
+                name = by_key[target_key].name if target_key in by_key else ACTION_LABELS.get(action, action)
+                return f"{name.split(' (')[0]} → {resolved['badge']}"
+        except Exception:
+            pass
+        return ACTION_LABELS.get(action) or (by_key[target_key].name if target_key in by_key else action)
 
     def _gesture_fields(self, t0, index_mode, result, frame_out) -> Dict[str, Any]:
         """Click / drag state of this frame, so a misfired click or drag can be read back afterwards."""

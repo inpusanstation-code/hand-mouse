@@ -174,9 +174,13 @@ def test_the_shown_shape_is_the_most_frequent_posture_after_the_countdown():
     assert view["state"] == "done" and view["gesture_key"] == "thumb_ring" and view["share"] > .8
     assert run_probe(["fist"] * 40)["everyday"] is True and run_probe(["fist"] * 40)["gesture_key"] == ""
     assert run_probe(["thumb_ring"] * 3)["state"] == "failed"                      # no hand
-    # no clear shape: told as the nearest one, marked approximate (2026-11-10 rule: never just "unrecognised")
+    # no clear shape: "not in the list", never the nearest one (2026-11-11 rule; it was "approx" for a day)
     mixed = run_probe(["v_sign", "fist", "thumb_ring", ""] * 15)
-    assert mixed["state"] == "done" and mixed["approx"]
+    assert mixed["state"] == "done" and mixed["unknown"] and mixed["posture"] == "" and not mixed["approx"]
+    none = run_probe([""] * 60)
+    assert none["unknown"] and none["name"] == "목록에 없는 손 모양" and none["gesture_key"] == ""
+    # the AI is told there is no such shape and gets no stand-in gesture for it
+    assert "목록에 없는" in lb.context_block(none, "", []) and lb.with_shown([], none) == [] and lb.shown_key(none, []) == ""
 
 
 def test_a_key_combination_is_taken_once_all_keys_are_let_go_and_held_keys_at_start_are_ignored():
@@ -212,6 +216,31 @@ def test_the_shown_shape_and_key_reach_the_ai_and_a_new_shape_is_registered_on_a
     rows[0]["checked"] = True
     done = lb.apply(rows, registry)
     assert done and any(c["base_posture"] == "fist" and c["trigger_type"] == "hold" for c in registry.composite_gestures.values())
+
+
+def test_a_folder_or_a_document_is_opened_not_started_as_a_program(tmp_path, monkeypatch):
+    """2026-11-11 report: "바탕화면에 user 폴더를 열어달라는 신호명령 등록해봤는데 안된다" (the value was the Desktop folder)."""
+    import os
+    import subprocess
+    import src.action_bindings as ab
+    folder = tmp_path / "my folder"
+    folder.mkdir()
+    doc = folder / "notes.txt"
+    doc.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert ab.local_target(str(folder)) == str(folder) and ab.local_target(f'"{doc}"') == str(doc)
+    assert ab.local_target("%USERPROFILE%\\my folder" if os.name == "nt" else "$USERPROFILE/my folder") == str(folder)
+    assert ab.local_target("calc.exe") == "" and ab.local_target("chrome.exe --incognito https://www.youtube.com") == ""
+    assert ab.local_target(str(tmp_path / "missing")) == ""
+    if os.name != "nt":
+        return
+    opened, started = [], []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(p), raising=False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    reg = ab.ActionBindingRegistry(tmp_path / "b.json")
+    value = r"%USERPROFILE%\my folder"
+    ok, badge = reg.execute_resolved_action({"action_type": "launch_app", "action_value": value})
+    assert ok and opened == [str(folder)] and not started and badge == "폴더 열기: my folder"
 
 
 def test_hand_posture_from_landmarks_alone():
@@ -480,3 +509,65 @@ def test_a_row_that_cannot_be_saved_does_not_lose_the_history_of_the_rows_before
     assert [e["gesture_key"] for e in saved] == ["thumb_ring"]
     history.undo(0, reg)
     assert reg.get_binding("thumb_ring")["action_value"] == "right_click"
+
+
+# ---------------------------------------------------------------------------- changing a connection later (2026-11-11)
+def _new_hold(registry, history, posture):
+    rows = lb.check(ai({"gesture_key": lb.NEW, "new_posture": posture, "new_trigger": "hold",
+                        "action_type": "hotkey", "action_value": "f9"}), gestures(registry))["proposals"]
+    for r in rows:
+        r["checked"] = True
+    lb.apply(rows, registry, history=history)
+    return history.rows(registry)[0]
+
+
+def test_a_new_hold_starts_at_its_minimum_and_the_user_can_lengthen_it(registry, tmp_path):
+    history = lb.History(tmp_path / "ai.json")
+    entry = _new_hold(registry, history, "rock_sign")
+    key = entry["gesture_key"]
+    assert registry.composite_gestures[key]["hold_seconds"] == lb.HOLD_MIN == entry["hold_seconds"] == entry["hold_min"]
+    assert entry["editable"] and entry["hold_max"] == lb.HOLD_MAX
+    msg = history.edit(entry["index"], registry, "hotkey", "f9", 1.2)
+    assert "유지 1.2초" in msg and registry.composite_gestures[key]["hold_seconds"] == 1.2
+    # never below the minimum nor above the maximum
+    history.edit(entry["index"], registry, "hotkey", "f9", 0.1)
+    assert registry.composite_gestures[key]["hold_seconds"] == lb.HOLD_MIN
+    history.edit(entry["index"], registry, "hotkey", "f9", 9)
+    assert registry.composite_gestures[key]["hold_seconds"] == lb.HOLD_MAX
+    # saved to disk: a fresh registry (the running app reloads the file) sees it
+    assert ActionBindingRegistry(registry.path).composite_gestures[key]["hold_seconds"] == lb.HOLD_MAX
+
+
+def test_everyday_shapes_keep_a_longer_minimum(registry, tmp_path):
+    history = lb.History(tmp_path / "ai.json")
+    entry = _new_hold(registry, history, "fist")
+    assert entry["hold_min"] == lb.HOLD_MIN_EVERYDAY == registry.composite_gestures[entry["gesture_key"]]["hold_seconds"]
+    history.edit(entry["index"], registry, "hotkey", "f9", 0.4)
+    assert registry.composite_gestures[entry["gesture_key"]]["hold_seconds"] == lb.HOLD_MIN_EVERYDAY
+
+
+def test_the_command_can_be_changed_and_the_line_stays_in_force(registry, tmp_path):
+    history = lb.History(tmp_path / "ai.json")
+    entry = _new_hold(registry, history, "rock_sign")
+    key = entry["gesture_key"]
+    history.edit(entry["index"], registry, "launch_app", "notepad.exe", None)
+    b = registry.get_binding(key)
+    assert (b["action_type"], b["action_value"]) == ("launch_app", "notepad.exe")
+    row = history.rows(registry)[0]
+    assert row["current"] and row["edited"] and row["action_value"] == "notepad.exe"
+    with pytest.raises(ValueError):
+        history.edit(row["index"], registry, "hotkey", "", None)                  # empty
+    with pytest.raises(ValueError):
+        history.edit(row["index"], registry, "mouse_action", "fly_away", None)    # not a known command
+    assert registry.get_binding(key)["action_value"] == "notepad.exe"            # a refused edit changes nothing
+    # an existing gesture (no hold): only the command; undo still goes back to what was there before the AI
+    before = registry.get_binding("thumb_ring")
+    lb.apply(lb.check(ai({"action_value": "ctrl+shift+t"}), gestures(registry))["proposals"], registry, history=history)
+    row = history.rows(registry)[0]
+    assert "hold_seconds" not in row
+    with pytest.raises(ValueError):
+        history.edit(row["index"], registry, "hotkey", "f8", 1.0)                 # no hold time on this one
+    history.edit(row["index"], registry, "hotkey", "f8", None)
+    assert registry.get_binding("thumb_ring")["action_value"] == "f8"
+    history.undo(history.rows(registry)[0]["index"], registry)
+    assert registry.get_binding("thumb_ring")["action_value"] == before["action_value"]

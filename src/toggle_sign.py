@@ -28,6 +28,14 @@ DEFAULTS: Dict[str, Any] = {
     "toggle_sign_fold_ratio": 1.15,  # ring and little finger at most this
     "toggle_sign_gap": 0.3,          # and the extended ones this much above the folded ones
     "toggle_sign_quiet": 0.5,        # s after the last pinch / scroll / drag / click before a hold may start (control on; was 1.0)
+    # 2026-11-11 report: "V 마우스제어 켜기끄기는 검지중지를 위로 바짝 폈을 때 작동해야 하는데 다른 동작 중에 많이 간섭이
+    # 들어간다". The pose above also passes with half-straight fingers leaning any way. Measured (v_sign recordings, 3,343
+    # frames: straightness 1.80 at the 5th percentile, finger tilt 32 deg and hand tilt 27 deg at the 95th; the other
+    # recorded frames that passed the pose: 1.64 and 33 deg at the median) and on the 39 logged switches: 32 were at
+    # 1.83+ and 35 deg or less, 7 at 1.41-1.53 and 44-83 deg - those 7 no longer switch.
+    "toggle_sign_straight": 1.65,    # index and middle at least this stretched (the looser "up ratio" above is not enough)
+    "toggle_sign_tilt": 38.0,        # ... each pointing up, within this many degrees of straight up on the screen
+    "toggle_sign_hand_tilt": 45.0,   # ... on a hand that is upright itself (wrist -> middle knuckle)
 }
 
 
@@ -44,6 +52,22 @@ class ToggleSign:
             self.config.update({k: v for k, v in config.items() if k in DEFAULTS})
         self.reset()
 
+    aspect = 720 / 1280              # frame height / width (the runtime sets it): x and y in the same units for the tilts
+
+    def upright(self, landmarks: Sequence[Any]) -> bool:
+        """Index and middle stretched out and pointing up, on an upright hand: the V as it is shown on purpose."""
+        def xy(i: int):
+            p = landmarks[i]                 # (recordings keep the joints as [x, y, z] lists)
+            return (p.x, p.y) if hasattr(p, "x") else (p[0], p[1])
+
+        def tilt(a: int, b: int) -> float:
+            (ax, ay), (bx, by) = xy(a), xy(b)
+            vx, vy = bx - ax, (by - ay) * self.aspect
+            n = math.hypot(vx, vy) or 1e-9
+            return math.degrees(math.acos(max(-1.0, min(1.0, -vy / n))))
+        limit = self.cfg("toggle_sign_tilt")
+        return tilt(5, 8) <= limit and tilt(9, 12) <= limit and tilt(0, 9) <= self.cfg("toggle_sign_hand_tilt")
+
     def reset(self) -> None:
         self._since: Optional[float] = None
         self._anchor = (0.0, 0.0)
@@ -56,11 +80,14 @@ class ToggleSign:
 
     def pose(self, f: Dict[str, Any], *, model_confirmed: bool = False) -> bool:
         i, m, r, p = f["curl"]
+        lm = f.get("lm")
+        if min(i, m) < self.cfg("toggle_sign_straight") or lm is None or len(lm) < 21 or not self.upright(lm):
+            return False                 # not stretched straight up: not the on/off sign, whatever a model says
         up, fold = self.cfg("toggle_sign_up_ratio"), self.cfg("toggle_sign_fold_ratio")
         if i >= up and m >= up and r <= fold and p <= fold and min(i, m) - max(r, p) >= self.cfg("toggle_sign_gap"):
             return True
         if model_confirmed:
-            return i >= 1.25 and m >= 1.25 and r <= 1.32 and p <= 1.35 and (min(i, m) - max(r, p)) >= 0.18
+            return r <= 1.32 and p <= 1.35 and (min(i, m) - max(r, p)) >= 0.18
         return False
 
     def progress(self, now: float) -> float:
@@ -87,6 +114,8 @@ class ToggleSign:
         if ok:
             from src.pose_probe import fingers_down
             ok = not fingers_down(landmarks)      # an upside-down V is another sign, not the on/off V
+            # (Not split by how far apart the fingers are, though two fingers held together are their own shape elsewhere:
+            # of the 23 logged V signs that switched the control ON, 8 had the fingers together - 2026-11-11 replay.)
         self.last_pose = ok
         if not ok:
             if self._since is not None and feats is not None and not blocked:

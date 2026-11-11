@@ -19,7 +19,7 @@ from src.online.dataset import build_dataset, target_positions, window_positions
 from src.online.live import ENCODER_FILE, ENCODER_INFO
 from src.online.models import make_model
 from src.online.replay import BalancedBuffer, ReservoirBuffer
-from src.online.samples import DEFAULT_ROOT, GUIDED_SCHEDULED, SUPERVISED_SOURCES, UNKNOWN, SampleStore
+from src.online.samples import DEFAULT_ROOT, GUIDED_SCHEDULED, PSEUDO_CANDIDATE, SUPERVISED_SOURCES, UNKNOWN, SampleStore
 from src.online.trainer import OnlineLearner
 from src.online.versions import ModelManager, check_candidate
 from src.tcn_features import FEATURES
@@ -34,6 +34,7 @@ MIN_UPDATES = 60
 BATCH = 16
 REPLAY = 32
 HOLD_OUT_MIN = 4          # a label needs this many samples before one is kept aside to test it
+WEAK_STRIDE = 3           # unchecked commands from the use log: one window in three
 
 
 def initialize_production(root: Path, manager: ModelManager) -> Dict[str, Any]:
@@ -45,6 +46,11 @@ def initialize_production(root: Path, manager: ModelManager) -> Dict[str, Any]:
     return manager.load()
 
 
+def _taught(sample) -> bool:
+    """A use of a hand shape the person taught (src/online/use_import.py)."""
+    return bool((sample.extra or {}).get("taught"))
+
+
 def _model(info: Dict[str, Any], classes: int, state: Optional[Dict[str, torch.Tensor]] = None):
     model = make_model(info["kind"], classes, info["window"], info["embedding"])
     if state is not None:
@@ -54,7 +60,12 @@ def _model(info: Dict[str, Any], classes: int, state: Optional[Dict[str, torch.T
 
 def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None, emit: Callable[..., None] = lambda *a, **k: None,
                passes: int = PASSES, min_updates: int = MIN_UPDATES, buffer_size: int = BUFFER, seed: int = 0, augment: Any = None,
-               lr: float = None, encoder_lr: float = None, balanced: bool = False) -> Dict[str, Any]:
+               lr: float = None, encoder_lr: float = None, balanced: bool = False,
+               use_events: Optional[Path | str] = None, weak: bool = True) -> Dict[str, Any]:
+    """`use_events` = the use log folder (logs/use_events): its commands are imported first and learned from as well: marked ones
+    as "none", unmarked rule commands as thinned-out weak examples (`weak=False` leaves those out). Uses of a taught hand shape
+    are imported too but not learned here: src/online/verifier.py trains a checking model of its own for each (the caller,
+    scripts/online_update.py, runs it after this). See src/online/use_import.py."""
     root = Path(root)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     t0 = time.perf_counter()
@@ -65,10 +76,22 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
     window = int(info["window"])
     validation = set(info.get("validation_sessions") or [])
 
+    sources = list(SUPERVISED_SOURCES)
+    imported: Dict[str, int] = {}
+    if use_events is not None:
+        from src.online.use_import import import_events, use_sources
+        imported = import_events(store, use_events, classes)
+        sources += use_sources()
+        emit("imported", **imported)
     pruned = store.prune()                     # duplicates and hand-mostly-missing unchecked samples (spec 11)
-    supervised = [s for s in store.samples(sources=list(SUPERVISED_SOURCES)) if s.label and s.label != UNKNOWN]
+    # uses of a taught gesture never go into this model: adding a class from them made it forget old gestures in every setting
+    # tried (docs/use-log.md). Each taught gesture gets its own small checking model instead (src/online/verifier.py).
+    # (... and a click whose gesture this model has no class for is kept for its checking model only: it must not become a class)
+    supervised = [s for s in store.samples(sources=sources) if s.label and s.label != UNKNOWN and not _taught(s)
+                  and not ((s.extra or {}).get("click") and s.label not in classes)
+                  and (weak or s.label_source != PSEUDO_CANDIDATE)]
     if not supervised:
-        return {"status": "nothing", "message": "학습할 정정·확인 데이터가 없어요"}
+        return {"status": "nothing", "message": "학습할 정정·확인 데이터가 없어요", "imported": imported}
     new_labels = sorted({s.label for s in supervised} - set(classes))
     wide = classes + new_labels
 
@@ -89,7 +112,7 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
         emit("rolled_back", problems=slipped)
         return {"status": "rolled_back", "problems": slipped, "pruned": pruned,
                 "message": "지금 모델이 이전 모델보다 나빠져서 이전 모델로 되돌렸어요", "seconds": round(time.perf_counter() - t0, 1)}
-    is_user = np.array([s.label_source in SUPERVISED_SOURCES for s in data.samples])
+    is_user = np.array([s.label_source in sources for s in data.samples])
     is_held = np.array([s.sample_id in set(held) for s in data.samples])
 
     rng = np.random.default_rng(seed)
@@ -116,10 +139,13 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
         part = fill[i:i + 512]
         learner.buffer.add(data.frames[window_positions(data.starts, part, window)], data.labels[part])
     # the person's windows
-    train_ids = {s.sample_id for i, s in enumerate(data.samples) if is_user[i] and not is_held[i]}
-    new_rows = target_positions(data, train_ids)
+    weak_ids = {s.sample_id for i, s in enumerate(data.samples)
+                if is_user[i] and not is_held[i] and s.label_source == PSEUDO_CANDIDATE}
+    train_ids = {s.sample_id for i, s in enumerate(data.samples) if is_user[i] and not is_held[i]} - weak_ids
+    # nobody checked the weak examples: every WEAK_STRIDE-th window only, so they weigh less than what a person said
+    new_rows = np.concatenate([target_positions(data, train_ids), target_positions(data, weak_ids)[::WEAK_STRIDE]]).astype(np.int64)
     if not len(new_rows):
-        return {"status": "nothing", "message": "학습할 정정·확인 데이터가 없어요"}
+        return {"status": "nothing", "message": "학습할 정정·확인 데이터가 없어요", "imported": imported}
     batches = math.ceil(len(new_rows) / BATCH)
     rounds = max(passes, math.ceil(min_updates / batches))
     total, done = rounds * batches, 0
@@ -158,6 +184,7 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
                              "untested_new_classes": [label for label in new_labels if label not in tested_new], "device": device}}
     promoted = manager.submit(candidate.state_dict(), new_info, problems)
     return {"status": "promoted" if promoted else "rejected", "problems": problems, "metrics": metrics, "new_classes": new_labels,
+            "imported": imported,
             "untested_new_classes": new_info["training"]["untested_new_classes"], "updates": learner.updates, "events": learner.events,
             "seconds": round(time.perf_counter() - t0, 1)}
 

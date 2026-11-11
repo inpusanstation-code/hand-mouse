@@ -248,8 +248,8 @@ DEFAULT_GESTURE_BINDINGS: Dict[str, Dict[str, Any]] = {
     "swipe_down": {
         "gesture_key": "swipe_down",
         "track": "motion",
-        "action_type": "mouse_action",
-        "action_value": "close_window",
+        "action_type": "hotkey",
+        "action_value": "win+down",
         "enabled": True,
         "app_overrides": [],
     },
@@ -262,9 +262,15 @@ POSTURE_NAMES_KO: Dict[str, str] = {
     "thumb_middle": "엄지+중지 핀치",
     "thumb_ring": "엄지+약지 핀치",
     "thumb_pinky": "엄지+새끼 핀치",
-    "v_sign": "V 손 모양 (검지·중지 펴기)",
+    "v_sign": "V 손 모양 (검지·중지를 벌려 펴기)",
+    "two_fingers": "검지·중지 붙여 펴기",
     "v_sign_down": "거꾸로 V (검지·중지를 아래로)",
     "rock_sign": "검지·새끼 펴기 (락 사인)",
+    "index_point": "검지만 펴기 (가리키기)",
+    "l_sign": "엄지·검지 펴기 (ㄴ자)",
+    "pinky_up": "새끼만 펴기",
+    "shaka": "엄지·새끼 펴기 (전화 손 모양)",
+    "thumbs_down": "엄지 아래로",
     "thumbs_up": "엄지 위로 세우기",
     "fist": "주먹 쥐기",
     "fingers_bent": "손가락 앞으로 굽히기 (ㄱ자)",
@@ -336,6 +342,26 @@ def _shell_open(program: str, params: str = "") -> bool:
     return int(ctypes.windll.shell32.ShellExecuteW(None, "open", program, params or None, None, 1)) > 32
 
 
+def _command(value: str) -> Tuple[str, str]:
+    """(program, arguments as one string) of a command line, for ShellExecute."""
+    parts = shlex.split(os.path.expandvars(str(value or "")), posix=(os.name != "nt"))
+    cmd = [p.strip('"') for p in parts] if parts else [str(value or "")]
+    return cmd[0], subprocess.list2cmdline(cmd[1:])
+
+
+def local_target(value: str) -> str:
+    """The folder or document a launch value names ("" when it is a program, a command line or does not exist):
+    %USERPROFILE% and ~ expanded, the whole value taken as one path (a folder name may have spaces).
+    2026-11-11 report ("바탕화면에 user 폴더를 열어달라는 … 안된다"): the value was C:\\Users\\...\\Desktop, and a folder
+    started as a program fails ("access denied") - folders and documents are opened the way Explorer opens them."""
+    v = os.path.expandvars(os.path.expanduser(str(value or "").strip().strip('"')))
+    if not v:
+        return ""
+    if os.path.isdir(v) or (os.path.isfile(v) and not v.lower().endswith((".exe", ".bat", ".cmd", ".com"))):
+        return v
+    return ""
+
+
 def web_address(value: str) -> str:
     """A bare web address ("youtube.com", "www.naver.com/news") becomes https://...; programs and paths stay as they are.
     (2026-11-10: "youtube.com" was started as a program and failed.)"""
@@ -393,8 +419,24 @@ def format_action_badge(action_type: str, action_value: str, app_overrides: Opti
         yt = YOUTUBE_KEY_PRESETS.get(aval)
         base = yt["badge"] if yt else f"YouTube: {aval}"
     elif atype == "launch_app":
-        exe_name = Path(aval.split()[0].strip('"')).name if aval else "미지정"
-        base = f"프로그램 실행: {exe_name}"
+        target = local_target(aval)
+        inside = ""
+        if target and os.path.isdir(target):
+            from src import app_launch
+            if app_launch._is_program_folder(target):          # an installed program's folder starts that program
+                try:
+                    inside = app_launch._program_in(target)
+                except OSError:
+                    inside = ""
+        if inside:
+            base = f"프로그램 실행: {Path(inside).name}"
+        elif target:
+            base = ("폴더 열기: " if os.path.isdir(target) else "파일 열기: ") + (Path(target).name or target)
+        else:
+            # the program's own name, also for a quoted path with spaces ("…\\Arduino IDE.exe" was shown as "Program")
+            from src.app_launch import _split
+            program = _split(aval)[0] if aval else ""
+            base = f"프로그램 실행: {Path(program).name or aval or '미지정'}"
     elif atype == "macro":
         try:
             from src.macro import describe, parse
@@ -578,6 +620,35 @@ class ActionBindingRegistry:
         res["badge"] = format_action_badge(res.get("action_type", "mouse_action"), res.get("action_value", ""), res.get("app_overrides"))
         res["detail"] = format_action_detail(res.get("action_type", "mouse_action"), res.get("action_value", ""), res.get("app_overrides"))
         return res
+
+    def others_with_action(self, gesture_key: str, action_type: str, action_value: str) -> List[str]:
+        """Names of the OTHER switched-on gestures that run the same command (2026-11-11: palm_side -> Win+D was
+        switched off, but a composite "손 펴기 유지" bound to Win+D kept showing the desktop and the screen never
+        said so)."""
+        if not action_value or action_value == "none" or action_type == "none":
+            return []
+        try:
+            from src.gesture_catalog import BY_KEY
+        except Exception:
+            BY_KEY = {}
+        out: List[str] = []
+        for key, b in self.bindings.items():
+            if key == gesture_key or not b.get("enabled", True):
+                continue
+            if (str(b.get("action_type", "")), str(b.get("action_value", ""))) != (action_type, action_value):
+                continue
+            comp = self.composite_gestures.get(key)
+            motion = self.custom_motions.get(key)
+            if comp is not None and not comp.get("enabled", True):
+                continue
+            if comp is not None:
+                out.append(f"{comp.get('name') or key} (복합 동작)")
+            elif motion is not None:
+                out.append(f"{motion.get('name') or key} (모션)")
+            else:
+                task = BY_KEY.get(key)
+                out.append(task.name if task is not None else key)
+        return out
 
     def set_binding(
         self,
@@ -916,6 +987,9 @@ class ActionBindingRegistry:
             if not dry_run:
                 if len(keys) == 1:
                     pyautogui.press(keys[0], _pause=False)
+                elif sorted(keys) == ["d", "win"]:
+                    from src.topmost_guard import guard   # Win+D once left a window "always on top"
+                    guard(lambda: pyautogui.hotkey(*keys, _pause=False))
                 else:
                     pyautogui.hotkey(*keys, _pause=False)
             return True, badge
@@ -948,23 +1022,15 @@ class ActionBindingRegistry:
             if mouse_controller is not None and hasattr(mouse_controller, "event_log"):
                 mouse_controller.event_log.append(f"launch:{aval}")
             if not dry_run:
+                # what the value starts on this computer (src/app_launch.py: a folder, a link, a program by path or
+                # by name - "arduino", "kakaotalk" - found in the Start menu or under Program Files)
+                from src import app_launch
+                target = app_launch.resolve(aval)
                 try:
-                    if aval.lower().startswith(("http://", "https://", "ms-")):
-                        if os.name == "nt":
-                            os.startfile(aval)  # noqa: S606
-                        else:
-                            import webbrowser
-                            webbrowser.open(aval)
-                    else:
-                        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                        parts = shlex.split(aval, posix=(os.name != "nt"))
-                        cmd = [p.strip('"') for p in parts] if parts else [aval]
-                        try:
-                            subprocess.Popen(cmd, creationflags=flags, close_fds=True)
-                        except FileNotFoundError:
-                            # chrome.exe, msedge.exe, ... are not on PATH: Windows finds them through "App Paths"
-                            if os.name != "nt" or not _shell_open(cmd[0], subprocess.list2cmdline(cmd[1:])):
-                                raise
+                    if target.ok:
+                        app_launch.start(target)
+                    elif os.name != "nt" or not _shell_open(*_command(aval)):
+                        return False, f"실행 실패: {target.note}"       # (Windows' own search was the last try)
                 except Exception as exc:
                     return False, f"실행 실패: {exc}"
             return True, badge
@@ -977,7 +1043,8 @@ class ActionBindingRegistry:
                 if aval == "show_desktop":
                     mouse_controller.event_log.append("show_desktop")
                     if not dry_run:
-                        pyautogui.hotkey("win", "d", _pause=False)
+                        from src.topmost_guard import guard   # Win+D once left a window "always on top"
+                        guard(lambda: pyautogui.hotkey("win", "d", _pause=False))
                     return True, badge
                 if aval == "left_click":
                     mouse_controller.event_log.append("left_click")
@@ -1003,9 +1070,33 @@ class CompositeGestureDetector:
     """Detects registered composite gestures (Base Pinch/Posture + Swipe / Hold / Double-Pinch)."""
 
     BLANK_GRACE = .15    # s of "no shape" frames that do not end the shape being held
+    # 2026-11-11 report ("youtube 페이지를 여러 개 한꺼번에 아주 늦게 여는 문제", "옆따봉을 했는데 거꾸로 V 명령이 나오거나"):
+    # a hold fired once per unbroken run of its shape, and the shape of a hand held up for seconds flickers (another
+    # shape or none for a few frames) - every flicker was a new run, so the command ran again and again while the user
+    # waited for the browser. Now a hold that fired is spent until its shape has been gone for REARM seconds, and no
+    # OTHER hold fires within OTHER_HOLD seconds of one (the hand is still in, or leaving, the first shape).
+    REARM = 1.0
+    OTHER_HOLD = 1.5
+    TRACE = 90           # frames kept for the log of a fire (logs/composite_fires, written by the runtime)
+    # 2026-11-11 report ("손 펴기 유지가 작동도 잘 안 되는데 … 손 위치가 이동하면 안 되는 거임??"), measured on the person's
+    # use log (739 commands, 106,333 frames, 551 stretches of an open hand):
+    #  - 122 stretches were cut by a few frames read as the knife hand (손날), 19 by a taught shape, 14 by a V: another
+    #    shape for a moment ended the hold at once. Now another shape must last SHAPE_GRACE to end the one being held
+    #    (it then counts from its first frame, so it is not recognised later).
+    #  - of the 118 stretches that lasted the second, 22 (19 %) did not run because the palm was more than STILL from where
+    #    it was when the hand OPENED - also when the hand had stopped since; only 6 of them ran later (the hand came back).
+    #    Now the hold also runs when the palm has been still for the whole hold time, wherever that is (STILL_ROLLING).
+    # The hold still needs a still hand: an open hand is also the hand that moves the cursor.
+    SHAPE_GRACE = .15    # s another shape may show without ending the shape held for a "hold"
+    STILL = .06          # frame fractions the palm may be from the anchor (or move within the hold time)
+    STILL_ROLLING = True
 
     def __init__(self, registry: ActionBindingRegistry) -> None:
+        from collections import deque
         self.registry = registry
+        self._hold_spent: Dict[str, float] = {}      # hold that fired -> when its shape was last seen
+        self._last_hold_fire: Tuple[str, float] = ("", -1e9)
+        self.trace = deque(maxlen=self.TRACE)        # (t, posture, engine gesture, joints) of the last frames
         self._blank_since: Optional[float] = None
         self._active_posture: str = ""
         self._posture_since: float = 0.0
@@ -1014,6 +1105,8 @@ class CompositeGestureDetector:
         self._hold_fired_for: set = set()
         self._last_tap_time: Dict[str, float] = {}
         self._last_trigger_time: Dict[str, float] = {}
+        self._other: Tuple[str, float] = ("", 0.0)   # another shape showing while one is held: (shape, since)
+        self._path: List[Tuple[float, float, float]] = []   # the palm while the shape is held (for "still for the hold time")
 
     def reset(self) -> None:
         self._active_posture = ""
@@ -1021,15 +1114,31 @@ class CompositeGestureDetector:
         self._anchor_xy = None
         self._history.clear()
         self._hold_fired_for.clear()
+        self._other = ("", 0.0)
+        self._path.clear()
 
     @staticmethod
     def _detect_base_posture(landmarks: Sequence[Any], active_gesture: str, pinched_fingers: set) -> str:
+        """The rules' posture, replaced by a shape the user taught when that model is sure (src/posture_teach.py)."""
+        rule = CompositeGestureDetector._detect_base_posture_rules(landmarks, active_gesture, pinched_fingers)
+        from src.posture_teach import override
+        return override(landmarks, rule)
+
+    @staticmethod
+    def _detect_base_posture_rules(landmarks: Sequence[Any], active_gesture: str, pinched_fingers: set) -> str:
         """Identify the current base hand posture for composite matching."""
         # V first: the thumb holds the ring finger in a V, which the rule engine can report as a thumb + ring pinch
         if landmarks and len(landmarks) >= 21:
-            from src.pose_probe import _finger_ratios, fingers_down, is_v
-            if is_v(_finger_ratios(landmarks)):
-                return "v_sign_down" if fingers_down(landmarks) else "v_sign"
+            from src.pose_probe import _PATTERN_FINGER, pattern_posture, v_shape
+            v = v_shape(landmarks, .5625)             # V, upside-down V, or index + middle held together
+            if v:
+                return v
+            # which fingers are out (2026-11-11): the pointing hand rests the thumb on the folded middle finger, which
+            # the rule engine reports as a thumb + middle pinch. Not when the engine has the out finger itself pinched
+            shape = pattern_posture(landmarks, .5625)
+            finger = _PATTERN_FINGER.get(shape)
+            if shape and not (finger and (finger in pinched_fingers or active_gesture == f"thumb_{finger}_pinch")):
+                return shape
         if "index" in pinched_fingers and "middle" in pinched_fingers:
             return "thumb_index_middle"
         if "index" in pinched_fingers or active_gesture == "thumb_index_pinch":
@@ -1065,9 +1174,10 @@ class CompositeGestureDetector:
                 dm = math.hypot(m.x - w.x, m.y - w.y)
                 dt = math.hypot(t.x - w.x, t.y - w.y)
                 ratios.append(dt / max(1e-5, dm))
-            from src.pose_probe import fingers_down, is_v
-            if is_v(ratios):
-                return "v_sign_down" if fingers_down(landmarks) else "v_sign"
+            from src.pose_probe import v_shape
+            v = v_shape(landmarks, .5625)
+            if v:
+                return v
             if ratios[0] >= 1.55 and ratios[3] >= 1.45 and ratios[1] <= 1.25 and ratios[2] <= 1.25:
                 return "rock_sign"
             if min(ratios) >= 1.55:
@@ -1076,6 +1186,36 @@ class CompositeGestureDetector:
         except Exception:
             pass
         return ""
+
+    # An open hand that is already being held stays one while every finger is still at least OPEN_KEEP straight (it must be
+    # 1.55 to start). Measured on the person's use log, same report: of the 3,757 "no shape" frames right after an open
+    # hand, half had their least straight finger between 1.35 and 1.55 (most often the index, relaxing), and those frames
+    # ended 200 of 551 open-hand stretches before the second was up. And it stays one when the hand turns its edge to the
+    # camera (read as the knife hand, 손날: 91 more stretches) - unless a gesture is bound to the knife hand itself.
+    OPEN_KEEP = 1.35
+
+    def _open_goes_on(self, landmarks: Sequence[Any], posture: str, composites: List[Dict[str, Any]]) -> bool:
+        if self.OPEN_KEEP <= 0:
+            return False
+        if posture == "knife_hand":
+            return not any(c.get("base_posture") == "knife_hand" for c in composites)
+        if posture != "":
+            return False                               # a pinch, a fist, a V ...: the hand changed
+        try:
+            from src.pose_probe import _finger_ratios
+            return min(_finger_ratios(landmarks)) >= self.OPEN_KEEP
+        except Exception:
+            return False
+
+    MOVING_HANDS = ("", "any", "open_hand", "thumb_tucked")   # the hand that just moves the cursor: not a command by itself
+
+    def commanding(self) -> bool:
+        """The hand is showing a shape that an enabled composite gesture is bound to (as of the last step). An open hand does
+        not count although a hold can be bound to it: it is also the hand that only moves the cursor."""
+        posture = self._active_posture
+        if posture in self.MOVING_HANDS:
+            return False
+        return any(c.get("enabled", True) and c.get("base_posture") == posture for c in self.registry.composite_gestures.values())
 
     def step(
         self,
@@ -1092,6 +1232,15 @@ class CompositeGestureDetector:
             return None
 
         posture = self._detect_base_posture(landmarks, active_gesture, pinched_fingers)
+        if self._active_posture == "open_hand" and posture != "open_hand" and self._open_goes_on(landmarks, posture, composites):
+            posture = "open_hand"
+        self.trace.append((now, posture, active_gesture, landmarks))
+        for comp in composites:                      # a spent hold stays spent while its shape is (still) seen
+            if comp["key"] in self._hold_spent and comp.get("base_posture") == posture:
+                if now - self._hold_spent[comp["key"]] >= self.REARM:
+                    del self._hold_spent[comp["key"]]            # the shape was gone long enough: a new hold
+                else:
+                    self._hold_spent[comp["key"]] = now
         # a frame or two that reads as no shape (turning the hand, blur) must not restart a hold (2026-11-10: the hold
         # felt slow); a real change to another shape still counts at once
         held = self._active_posture
@@ -1105,6 +1254,20 @@ class CompositeGestureDetector:
             self._blank_since = None
         palm_x = (float(landmarks[0].x) + float(landmarks[9].x)) * 0.5
         palm_y = (float(landmarks[0].y) + float(landmarks[9].y)) * 0.5 * max(0.25, float(aspect))
+
+        # another shape for a few frames (an open hand read as the knife hand, a taught shape, a V) must not end the shape
+        # being held for a "hold" either. Not when a double pinch is involved: its taps are that short on purpose.
+        since = now
+        if (posture and held and posture != held and self.SHAPE_GRACE > 0
+                and any(c.get("base_posture") == held and c.get("trigger_type") == "hold" for c in composites)
+                and not any(c.get("base_posture") in (held, posture) and c.get("trigger_type") == "double_pinch" for c in composites)):
+            if self._other[0] != posture:
+                self._other = (posture, now)
+            if now - self._other[1] <= self.SHAPE_GRACE:
+                return None                        # the held shape goes on (its time too)
+            since = self._other[1]                 # it stayed: the new shape began when it first showed
+        elif posture == held:
+            self._other = ("", 0.0)
 
         if posture != self._active_posture:
             # Check double_pinch transition (when entering a posture twice within 0.45s)
@@ -1122,15 +1285,20 @@ class CompositeGestureDetector:
                             return comp
                         self._last_tap_time[ckey] = now
             self._active_posture = posture
-            self._posture_since = now
+            self._posture_since = since
             self._anchor_xy = (palm_x, palm_y)
             self._history = [(now, palm_x, palm_y)]
+            self._path = [(now, palm_x, palm_y)]
+            self._other = ("", 0.0)
             self._hold_fired_for.clear()
             return None
 
         if not posture:
             return None
 
+        self._path.append((now, palm_x, palm_y))
+        while len(self._path) > 2 and now - self._path[0][0] > 3.0:
+            self._path.pop(0)
         self._history.append((now, palm_x, palm_y))
         while len(self._history) > 2 and (now - self._history[0][0]) > 0.65:
             self._history.pop(0)
@@ -1146,11 +1314,24 @@ class CompositeGestureDetector:
 
             if trig == "hold":
                 hold_sec = float(comp.get("hold_seconds", 0.55))
+                if ckey in self._hold_spent:
+                    continue
+                other, when = self._last_hold_fire
+                if other and other != ckey and now - when < self.OTHER_HOLD:
+                    continue
                 if ckey not in self._hold_fired_for and (now - self._posture_since) >= hold_sec:
-                    # Must have stayed relatively still during hold
-                    if self._anchor_xy is not None and math.hypot(palm_x - self._anchor_xy[0], palm_y - self._anchor_xy[1]) <= 0.06:
+                    # The hand must be still: near where the shape began, or (2026-11-11) not having moved for the whole
+                    # hold time wherever it is now - a hand that opened while moving and then stopped never ran before.
+                    anchored = (self._anchor_xy is not None
+                                and math.hypot(palm_x - self._anchor_xy[0], palm_y - self._anchor_xy[1]) <= self.STILL)
+                    recent = [p for p in self._path if now - p[0] <= hold_sec]
+                    settled = (self.STILL_ROLLING and bool(recent) and now - recent[0][0] >= hold_sec - .1
+                               and max(math.hypot(palm_x - x, palm_y - y) for _, x, y in recent) <= self.STILL)
+                    if anchored or settled:
                         self._hold_fired_for.add(ckey)
                         self._last_trigger_time[ckey] = now
+                        self._hold_spent[ckey] = now
+                        self._last_hold_fire = (ckey, now)
                         return comp
                 continue
 

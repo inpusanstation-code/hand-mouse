@@ -115,6 +115,12 @@ def v_hand(down=False, scale=.25):
     for mcp, tip in ((13, 16), (17, 20)):                     # ring and little finger folded
         for j in (tip - 2, tip - 1, tip):
             pts[j] = [pts[0][0] + (pts[mcp][0] - pts[0][0]) * 1.05, pts[0][1] + (pts[mcp][1] - pts[0][1]) * 1.05, pts[mcp][2]]
+    # a V: index and middle spread apart, tips about two knuckle gaps from each other (2026-11-11: two straight fingers
+    # held together are their own shape now, "two_fingers" - the fixture's parallel fingers were read as that)
+    gap = [pts[9][0] - pts[5][0], pts[9][1] - pts[5][1]]
+    for base, side in ((5, -1), (9, 1)):
+        for n, j in enumerate((base + 1, base + 2, base + 3), start=1):
+            pts[j] = [pts[j][0] + side * .5 * gap[0] * n / 3, pts[j][1] + side * .5 * gap[1] * n / 3, pts[j][2]]
     if not down:                      # the fixture's fingers point down the image (y grows down): turn it upright
         wy = pts[0][1]
         pts = [[x, 2 * wy - y, z] for x, y, z in pts]
@@ -142,12 +148,21 @@ def test_an_upside_down_v_is_its_own_sign_and_does_not_switch_the_control():
 def test_chrome_is_found_through_app_paths_with_its_arguments(monkeypatch):
     import subprocess
     import src.action_bindings as ab
-    opened = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
-    monkeypatch.setattr(ab, "_shell_open", lambda prog, params="": opened.append((prog, params)) or True)
+    import src.app_launch as al
+    opened, started = [], []
     reg = ab.ActionBindingRegistry.__new__(ab.ActionBindingRegistry)
-    ok, _ = ab.ActionBindingRegistry.execute_resolved_action(
-        reg, {"action_type": "launch_app", "action_value": "chrome.exe --incognito https://www.youtube.com"}, dry_run=False)
+    value = {"action_type": "launch_app", "action_value": "chrome.exe --incognito https://www.youtube.com"}
+    # Windows knows it (App Paths): started from there, with its arguments
+    monkeypatch.setattr(al.shutil, "which", lambda name: None)
+    monkeypatch.setattr(al, "_app_path", lambda name: r"C:\Apps\Chrome\chrome.exe" if name == "chrome.exe" else "")
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: started.append(cmd))
+    ok, _ = ab.ActionBindingRegistry.execute_resolved_action(reg, value, dry_run=False)
+    assert ok and started == [[r"C:\Apps\Chrome\chrome.exe", "--incognito", "https://www.youtube.com"]]
+    # found nowhere by the app: Windows' own search (ShellExecute) is the last try
+    monkeypatch.setattr(al, "_app_path", lambda name: "")
+    monkeypatch.setattr(al, "find_by_name", lambda name: "")
+    monkeypatch.setattr(ab, "_shell_open", lambda prog, params="": opened.append((prog, params)) or True)
+    ok, _ = ab.ActionBindingRegistry.execute_resolved_action(reg, value, dry_run=False)
     assert ok and opened == [("chrome.exe", "--incognito https://www.youtube.com")]
 
 
@@ -191,6 +206,29 @@ def test_a_real_upside_down_v_is_recognised():
         L = [SimpleNamespace(x=p[0], y=p[1], z=p[2]) for p in lm]
         assert hand_posture(L, 720 / 1280) == "v_sign_down"
         assert CompositeGestureDetector._detect_base_posture(L, "", set()) == "v_sign_down"
+
+
+def test_a_pointing_index_finger_is_not_a_thumb_middle_pinch():
+    """2026-11-11 report: '이건 중지 핀치가 아니라 검지를 들어올리는 동작인데' (the thumb rests on the folded middle finger)."""
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+    from src.action_bindings import POSTURE_NAMES_KO, CompositeGestureDetector
+    from src.motion_mode import custom_posture_ok
+    from src.pose_probe import _rule_posture, nearest_posture
+    data = json.loads((Path(__file__).parent / "fixtures" / "index_point_20261111.json").read_text(encoding="utf-8"))
+    assert "index_point" in POSTURE_NAMES_KO
+    for lm in data["frames"]:
+        L = [SimpleNamespace(x=p[0], y=p[1], z=p[2]) for p in lm]
+        assert _rule_posture(L, 720 / 1280) == "index_point"
+        # also when the rule engine reports the thumb on the middle finger as its pinch
+        assert CompositeGestureDetector._detect_base_posture_rules(L, "thumb_middle_pinch", {"middle"}) == "index_point"
+        assert custom_posture_ok("index_point", {"lm": lm}) and nearest_posture(lm) == "index_point"
+        # the middle finger out to meet the thumb, the index still up: the pinch stays a pinch
+        mid = [list(p) for p in lm]
+        mid[4] =[lm[9][0] + (lm[5][0] - lm[9][0]) * 2, lm[9][1] - .25, lm[4][2]]
+        mid[12] = [mid[4][0] + .01, mid[4][1], mid[4][2]]
+        assert _rule_posture([SimpleNamespace(x=p[0], y=p[1], z=p[2]) for p in mid], 720 / 1280) != "index_point"
 
 
 def test_a_v_is_a_v_even_when_the_rule_engine_calls_it_a_ring_pinch():

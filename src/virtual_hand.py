@@ -133,13 +133,66 @@ class OneEuro:
         return list(self.x)
 
 
+# How closely the drawn hand and the cursor follow the real hand (config "virtual_hand_response", 2026-11-11: "가상손이 반응을
+# 좀 느리게 하는데, 최대한 실시간으로"). Measured on this PC's recordings (12,191 frames, 29 fps; lag = how far behind along the
+# travel, slow 25-120 px/s / fast over 300 px/s; shake = frame-to-frame wobble while the hand is still, unfiltered 1.55 px for
+# the cursor and 3.49 px for a fingertip), filters plus the window's glide:
+#   "smooth" (what it was): cursor 98 / 65 ms behind, shake .32 px; fingertip 51 / 26 ms, shake .56 px
+#   "fast"   (the default): cursor about 30 / 15 ms, shake about .6 px; fingertip about 17 / 6 ms, shake about 1.4 px
+# The camera and the hand detector come before all of this and are not in these numbers.
+RESPONSE = {
+    "smooth": {"cursor": (.4, .012), "joints": (.5, .03), "glide": .04},
+    "fast": {"cursor": (1.5, .06), "joints": (1.0, .08), "glide": .015},
+}
+DEFAULT_RESPONSE = "fast"
+# "auto" (the setting's default since 2026-11-11, "그냥 이동일 때는 좀 떨림이 있어도 빠릿하게, 명령 모션 중일 때는 떨림 없이
+# 부드럽게"): "fast" while the hand only moves the cursor, "smooth" while it is making a command (see Responder).
+AUTO = "auto"
+# Not a signal on purpose: "the fingers are nearing each other". A thumb-to-index gap under .45 hand sizes covered 56 % of
+# the .3 s before a pinch but also 25 % of the frames outside any gesture (a relaxed hand rests like that), and with it the
+# hand was in smooth mode 74 % of the resting time. The click point does not need it: BoxMapper aims back .15 s.
+
+
+def response(mode: Any) -> Dict[str, Any]:
+    """The filter settings of a mode ("fast" / "smooth"; anything else, "auto" too = the fast ones)."""
+    return RESPONSE.get(str(mode or "").strip().lower(), RESPONSE[DEFAULT_RESPONSE])
+
+
+class Responder:
+    """Which filter settings to use right now. With the setting "auto": smooth while a command is being made (the fingers
+    closed for a click, a drag, the right-click pinch, the fist holding the page, the switcher shape, a hand shape a
+    command is bound to, a registered gesture), fast otherwise. The smooth settings stay for RELEASE seconds after the command, so the cursor does not start to
+    shake the moment the fingers open. The filters keep their state when the settings change: nothing jumps."""
+
+    RELEASE = .35
+
+    def __init__(self) -> None:
+        self.mode = DEFAULT_RESPONSE
+        self._smooth_until = -1e9
+
+    def step(self, setting: Any, commanding: bool, now: float) -> str:
+        setting = str(setting or AUTO).strip().lower()
+        if setting in RESPONSE:
+            self.mode = setting
+        else:                                   # "auto", and anything unknown
+            if commanding:
+                self._smooth_until = now + self.RELEASE
+            self.mode = "smooth" if now < self._smooth_until else "fast"
+        return self.mode
+
+
 class ViewSmoother:
     """Steadies the drawn joints, each with its own speed (a still palm stays still while a finger closes)."""
 
-    MIN_CUTOFF, BETA = .5, .03           # px: a few px of jitter is damped hard, a 300 px/s pinch is followed
+    MIN_CUTOFF, BETA = RESPONSE[DEFAULT_RESPONSE]["joints"]   # px: jitter is damped, a 300 px/s pinch is followed
 
     def __init__(self) -> None:
         self._filters = [OneEuro(self.MIN_CUTOFF, self.BETA) for _ in range(21)]
+
+    def set_response(self, mode: Any) -> None:
+        cutoff, beta = response(mode)["joints"]
+        for f in self._filters:
+            f.min_cutoff, f.beta = cutoff, beta
 
     def reset(self) -> None:
         for f in self._filters:
@@ -169,12 +222,19 @@ class BoxMapper:
     """Palm centre in the box -> 0..1 on the monitor; the box edges are the monitor edges. A One Euro filter steadies it. While a
     click finger touches the thumb the point stays still, at where the palm was just before the touch (the aim, not the pinch)."""
 
-    MIN_CUTOFF, BETA, SPEED_SCALE = .4, .012, 1000.0  # speed in thousandths of the monitor per second
+    MIN_CUTOFF, BETA = RESPONSE[DEFAULT_RESPONSE]["cursor"]
+    SPEED_SCALE = 1000.0                              # speed in thousandths of the monitor per second
     # from manux-merged-20261110 BoxMapper: a hand found again after a gap eases in instead of landing across the screen
     # in one frame (2.2/min in a 40 min replay); the aim-back only goes back a tilt-sized way (it went any distance: 8.9/min)
     EASE = .2              # s from the last position to the live one
     GAP = .1               # s without a hand after which the next position eases in
     AIM_BACK_MAX = .02     # monitor fractions
+    # 2026-11-11 report ("주먹 스크롤 … 손을 펴면 다른 위치로 jump"): the cursor stands still while a fist scrolls and the
+    # hand travels (sideways, to scroll). Let go, it went to where the hand now was within a frame or two - 19 logged
+    # releases: 133 to 996 px. Now a release that far from the hand keeps the cursor where it is (an offset) and gives
+    # the offset back out of the hand's own movement, CATCH_UP of every move, so nothing moves while the hand is still.
+    JUMP = .03             # monitor fractions between the held point and the hand that would be a jump
+    CATCH_UP = .5          # share of each hand movement spent on closing the offset
 
     def __init__(self) -> None:
         self.pos: Optional[Tuple[float, float]] = None
@@ -184,10 +244,15 @@ class BoxMapper:
         self._ease_from: Optional[Tuple[float, float]] = None
         self._ease_t = 0.0
         self._last_t: Optional[float] = None
+        self._offset = (0.0, 0.0)                     # cursor minus hand, left over from a release far from the hand
+        self._last_n: Optional[Tuple[float, float]] = None
 
     @property
     def held(self) -> bool:
         return self._held
+
+    def set_response(self, mode: Any) -> None:
+        self._filter.min_cutoff, self._filter.beta = response(mode)["cursor"]
 
     def reset(self) -> None:
         self.pos = None
@@ -196,8 +261,12 @@ class BoxMapper:
         self._filter.reset()
         self._ease_from = None
         self._last_t = None
+        self._offset, self._last_n = (0.0, 0.0), None
 
-    def target(self, landmarks: Sequence[Any], box, hold: bool = False, now: float = 0.0, aim: bool = True) -> Tuple[float, float]:
+    def target(self, landmarks: Sequence[Any], box, hold: bool = False, now: float = 0.0, aim: bool = True,
+               keep: bool = False) -> Tuple[float, float]:
+        """`keep` (with `hold`): this hold is one the hand travels during (a fist scrolling the page) - when it ends
+        the cursor stays where it is instead of going to the hand (see JUMP)."""
         x0, y0, x1, y1 = box
         cx, cy = palm_centre(landmarks)
         nx = min(1.0, max(0.0, (cx - x0) / (x1 - x0)))
@@ -207,20 +276,35 @@ class BoxMapper:
         if hold and self.pos is not None:
             if not self._held:
                 self._held = True
+                self._keep = False
                 self._ease_from = None
                 earlier = [p for t, p in self._history if t <= now - AIM_BACK] if aim else []
                 if earlier and math.dist(earlier[-1], self.pos) <= self.AIM_BACK_MAX:
                     self.pos = earlier[-1]
+            self._last_n = (nx, ny)
+            self._keep = self._keep or keep
             return self.pos
         if self.pos is not None and gap:
             self._ease_from, self._ease_t = self.pos, now   # found again after a gap: ease in from where it was
             self._filter.reset((nx, ny))
             self._filter.t = now
+            self._offset = (0.0, 0.0)
         elif self._held:
             self._filter.reset(self.pos)                    # released: follow the hand from the held point at its own speed
             self._filter.t = now
             self._ease_from = None
+            # ... or, after a hold the hand travelled during and far from the hand, stay and catch up as it moves
+            far = getattr(self, "_keep", False) and math.dist(self.pos, (nx, ny)) > self.JUMP
+            self._offset = (self.pos[0] - nx, self.pos[1] - ny) if far else (0.0, 0.0)
         self._held = False
+        if self._offset != (0.0, 0.0):
+            left = math.hypot(*self._offset)
+            moved = math.dist((nx, ny), self._last_n) if self._last_n is not None else 0.0
+            keep = max(0.0, 1.0 - self.CATCH_UP * moved / left) if left > 1e-4 else 0.0
+            self._offset = (self._offset[0] * keep, self._offset[1] * keep) if keep > 0 and left * keep > 1e-3 else (0.0, 0.0)
+            nx = min(1.0, max(0.0, nx + self._offset[0]))
+            ny = min(1.0, max(0.0, ny + self._offset[1]))
+        self._last_n = (nx - self._offset[0], ny - self._offset[1]) if self._offset != (0.0, 0.0) else (nx, ny)
         fx, fy = self._filter((nx, ny), now)
         # the filter only nears a clamped edge: snap so the box edge really is the monitor edge
         fx = nx if abs(fx - nx) < 1e-3 else fx
@@ -265,30 +349,53 @@ class Grip:
     """A fist holding the page: "scroll" or None, kept through a short loss of the shape (one shaky frame does not let go)."""
 
     GRACE = .4       # seconds the shape may vanish without letting go (a flickering fist kept stopping the page)
+    # 2026-11-11 report ("가상손이 … 중간에 뚝뚝 끊기는 경우가 잦다 … 중간에 스크롤 판정이 나서 가상손이 멈추면"): a hand on
+    # the move reads as a fist for a few frames now and then, and each time the page was "held": the cursor stood still for
+    # those frames plus GRACE. Of the 45 logged fist scrolls 12 never had 10 fist frames (8 had 5 or fewer) and held the
+    # cursor about half a second each. So a grip starts only after START fist frames in a row, and one that has not yet
+    # had SOLID of them lets go after SHORT_GRACE instead of GRACE.
+    START = 5        # fist frames in a row before the page is held (~0.17 s at 30 fps)
+    SOLID = 10       # fist frames that make it a meant grip (`solid`)
+    SHORT_GRACE = .12
 
     def __init__(self) -> None:
         self.kind: Optional[str] = None
         self.mode: Optional[str] = None
         self.started = False          # True on the frame the grip began
         self._lost: Optional[float] = None
+        self.fists = 0                # fist frames of this grip so far
+        self._run = 0                 # fist frames in a row before it began
+
+    @property
+    def solid(self) -> bool:
+        """The fist was really held (not a few stray frames): the page was meant to be scrolled."""
+        return self.kind is not None and self.fists >= self.SOLID
 
     def reset(self) -> None:
         self.kind = self.mode = None
         self.started = False
         self._lost = None
+        self.fists = self._run = 0
 
     def step(self, kind: Optional[str], now: float) -> Optional[str]:
         self.started = False
         if kind is not None:
             self._lost = None
             if self.kind is None:
-                self.kind, self.started = kind, True
-                self.mode = "scroll"
+                self._run += 1
+                if self._run >= self.START:
+                    self.kind, self.started = kind, True
+                    self.mode = "scroll"
+                    self.fists = self._run
+            else:
+                self.fists += 1
         elif self.kind is not None:
             if self._lost is None:
                 self._lost = now
-            if now - self._lost > self.GRACE:
+            if now - self._lost > (self.GRACE if self.fists >= self.SOLID else self.SHORT_GRACE):
                 self.reset()
+        else:
+            self._run = 0
         return self.mode
 
 
@@ -302,6 +409,12 @@ class ShapePinch:
 
     CLOSE, OPEN, FRAMES = .18, .24, 2   # OPEN .24 (was .28): quick double taps do not open the fingers wide
     FINGER_OUT = .8       # finger tip at least this many hand sizes from the wrist
+    # While a drag is held (2026-11-11, user: "drags break off midway; unless the fingers clearly part, keep it"): replayed over
+    # this PC's records (26,001 frames), 15 of 32 drags ended with the fingers never past 0.4 (most closed again at once: a
+    # wobble over OPEN for a frame or two), the real releases went past 0.4 within a few frames (0.25 -> 0.5 -> 0.9).
+    # So a drag lets go when the gap is past DRAG_CLEAR for DRAG_CLEAR_FRAMES frames, or stays past OPEN for DRAG_SLOW
+    # seconds (a hand opened only halfway still drops, later).
+    DRAG_CLEAR, DRAG_CLEAR_FRAMES, DRAG_SLOW = .40, 2, .8
 
     def __init__(self, finger: str = "index") -> None:
         self.finger = finger
@@ -309,12 +422,17 @@ class ShapePinch:
         self.closed = False
         self._n = 0
         self.ratio = 1.0
+        self._clear_n = 0
+        self._open_since: Optional[float] = None
 
     def reset(self) -> None:
         self.closed, self._n = False, 0
+        self._clear_n, self._open_since = 0, None
 
-    def step(self, landmarks: Sequence[Any], width: int, height: int, frames: Optional[int] = None) -> Optional[str]:
-        """frames: closed frames needed (default FRAMES; 1 for a double click's second tap)."""
+    def step(self, landmarks: Sequence[Any], width: int, height: int, frames: Optional[int] = None,
+             dragging: bool = False, now: Optional[float] = None) -> Optional[str]:
+        """frames: closed frames needed (default FRAMES; 1 for a double click's second tap). dragging: the caller holds the
+        button down on this pinch: it opens only when the fingers clearly part (see DRAG_CLEAR); `now` is needed for that."""
         if len(landmarks) != 21:
             return None
         pt = [(p.x * width, p.y * height) for p in landmarks]
@@ -333,8 +451,20 @@ class ShapePinch:
             else:
                 self._n = 0
             return None
+        if dragging and now is not None:
+            self._clear_n = self._clear_n + 1 if self.ratio > self.DRAG_CLEAR else 0
+            if self.ratio > self.OPEN:
+                if self._open_since is None:
+                    self._open_since = now
+            else:
+                self._open_since = None
+            if self._clear_n >= self.DRAG_CLEAR_FRAMES or (
+                    self._open_since is not None and now - self._open_since >= self.DRAG_SLOW):
+                self.reset()
+                return "up"
+            return None
         if self.ratio > self.OPEN:
-            self.closed = False
+            self.reset()
             return "up"
         return None
 
@@ -395,6 +525,11 @@ class ShapeSwitch:
 
     def __init__(self) -> None:
         self.reset()
+
+    @property
+    def holding(self) -> bool:
+        """The shape is being held toward the switcher (not fired yet, or fired and still shown)."""
+        return self._since is not None
 
     def reset(self) -> None:
         self._since: Optional[float] = None

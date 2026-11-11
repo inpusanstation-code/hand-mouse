@@ -1671,6 +1671,9 @@ def gesture_rows(
                "action_value": str(binding.get("action_value", "none")),
                "app_overrides": list(binding.get("app_overrides") or []),
                "binding_enabled": bool(binding.get("enabled", True)),
+               # other switched-on gestures with the same command: switching this one off does not stop those
+               "same_action_elsewhere": reg.others_with_action(key, str(binding.get("action_type", "mouse_action")),
+                                                               str(binding.get("action_value", "none"))),
                "is_custom_motion": key in reg.custom_motions,
                "has_motion_template": has_motion_tmpl,
                "motion_metrics_text": motion_metrics_text,

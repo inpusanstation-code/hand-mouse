@@ -26,6 +26,23 @@ LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
 RECENT_LIMIT = 5
 
 
+class ClipImage(QQuickImageProvider):
+    """The pictures of a [손 모양·움직임 보여주기] look, replayed on the screen like a GIF: image://probeshot/<look>/<n>
+    is the n-th picture (a bare <look> or a number past the end: the one still picture of the result)."""
+
+    def __init__(self):
+        super().__init__(QQuickImageProvider.Image)
+        self.image = QImage()
+        self.frames = []
+
+    def requestImage(self, image_id, size, requested_size):
+        try:
+            n = int(str(image_id).split("/")[1])
+        except (IndexError, ValueError):
+            return self.image
+        return self.frames[n] if 0 <= n < len(self.frames) else self.image
+
+
 class CameraImage(QQuickImageProvider):
     def __init__(self):
         super().__init__(QQuickImageProvider.Image)
@@ -87,6 +104,17 @@ def _virtual_hand_default() -> bool:
     except (OSError, ValueError):
         return True
 
+def _virtual_hand_glide() -> float:
+    """Seconds the drawn hand's window takes to close most of the gap to the newest camera frame (config
+    "virtual_hand_response": "fast" by default, "smooth" = as it was; src/virtual_hand.RESPONSE)."""
+    from src.virtual_hand import response
+    try:
+        cfg = json.loads((Path(__file__).resolve().parents[1] / "config" / "gestures.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    return float(response(cfg.get("virtual_hand_response"))["glide"])
+
+
 class QtDashboard(QObject):
     stateChanged = Signal()
     previewChanged = Signal()
@@ -99,6 +127,10 @@ class QtDashboard(QObject):
     learnChanged = Signal()           # online learning: background learning rounds
     virtualHandChanged = Signal()     # the hand drawn at the cursor
     fingerFrameChanged = Signal()     # the fingertips drawn next to the cursor (src/FingerTracker.qml)
+    pointChanged = Signal()           # pointing mode's dwell ring at the cursor (src/point_mode.py)
+    toastChanged = Signal()           # a short notice over the window that goes away by itself
+    useCasesChanged = Signal()        # the [사례 보기] viewer's cases (src/use_view.py)
+    simChanged = Signal()             # the mouse control is off: gestures and motion mode are only shown (simulation)
     llmChanged = Signal()             # gestures connected in words (src/llm_binding.py)
     drawChanged = Signal()            # drawing mode overlay (src/draw_mode.py)
     drawShapesChanged = Signal()      # drawing mode shapes and their commands (settings)
@@ -109,6 +141,8 @@ class QtDashboard(QObject):
     trackingActiveChanged = Signal()  # only when the test window opens or closes
     trainingChanged = Signal()        # training center: data, scores, training job, export
     motionTemplatesDone = Signal(str, object, str)   # (key, result, error) from the template worker thread
+    poseTeachDone = Signal(object, str)              # (report, error) from the taught-shape trainer thread
+    poseTeachProgress = Signal(str)
 
     def __init__(self, dry_run=False, *, hide_to_tray=False, start_hidden=False,
                  overlay=False, overlay_corner="top-right", tcn_app=False):
@@ -165,6 +199,14 @@ class QtDashboard(QObject):
         self.recording_editor = RecordingPlanEditor()
         self.recording_editor.startRequested.connect(self._start_focused_plan)
         self.motionTemplatesDone.connect(self._finish_motion_templates)
+        self.poseTeachDone.connect(self._finish_pose_teach)
+        self.poseTeachProgress.connect(self._pose_teach_progress)
+        self.teach_view = {"state": "", "text": ""}   # [이 손 모양 학습]: training / ready / error
+        self._teach_counts = (None, {})
+        self.teach_focus = ""                 # the shape being taught now: the screen talks about this one only
+        self.teach_adding = False             # [한 번 더 보여주기] is running: that look is one more example of it
+        self._probe_wait = False              # [보여주기] pressed, the runtime has not started that look yet
+        self.teach_new = False                # [새 동작 등록] pressed: the next look is to be named as a new shape
         self.model_version = 0                                  # +1 per newly trained model (runtime reloads the gate)
         from src.training_center import (
             TrainingJob,
@@ -238,6 +280,15 @@ class QtDashboard(QObject):
         self.live_gesture = ""
         self.virtual_hand = None
         self.virtual_hand_on = self.preferences.value("virtualHand", _virtual_hand_default(), type=bool)
+        self.point_mode_on = self.preferences.value("pointMode", True, type=bool)    # pointing mode: on by default
+        try:                                                                         # its details (settings window)
+            from src.point_mode import clean_settings
+            self.point_settings = clean_settings(json.loads(str(self.preferences.value("pointModeSettings", "{}") or "{}")))
+        except Exception:
+            from src.point_mode import clean_settings
+            self.point_settings = clean_settings({})
+        self.signal_text_on = self.preferences.value("signalText", True, type=bool)  # the signal's name beside the drawn hand
+        self.point_view = {}
         self.finger_overlay = self.preferences.value("fingerOverlay", False, type=bool)
         self.finger_frame = {}
         self.preview_hand = {}            # shown with the preview image it belongs to (src/HandSkeleton.qml)
@@ -289,6 +340,9 @@ class QtDashboard(QObject):
         self.engine = QQmlApplicationEngine()
         self.provider = CameraImage()
         self.engine.addImageProvider("vision", self.provider)
+        self.probe_shot = ClipImage()         # the hand picture(s) of a [손 모양 보여주기] result
+        self.probe_shot_seq = 0
+        self.engine.addImageProvider("probeshot", self.probe_shot)
         self.engine.rootContext().setContextProperty("dashboard", self)
         self.engine.load(QUrl.fromLocalFile(str(Path(__file__).with_name("dashboard.qml"))))
         if not self.engine.rootObjects():
@@ -406,6 +460,7 @@ class QtDashboard(QObject):
     @Slot()
     def startOnlineLearning(self):
         if self._online_job().start():
+            self.learn_auto = False          # asked for by hand: its words stay in the left panel, not the main banner
             self.learn_message = "학습을 시작했어요. 카메라와 마우스는 그대로 쓸 수 있어요."
             self.learnChanged.emit()
 
@@ -425,6 +480,80 @@ class QtDashboard(QObject):
             self.learn_summary = {}
         self.learnChanged.emit()
 
+    def auto_learn(self, request):
+        """Learning while using (docs/use-log.md): the runtime asks for a round when enough commands were logged and the hand has
+        been away. `request` = (+1 per request, use log folder). The round learns from the corrections and from that log; the
+        candidate still has to pass the same checks before it replaces anything."""
+        number, folder = request or (0, "")
+        if folder:
+            self.use_log_folder = folder       # where the simulator's "쓰면서 모은 자료" reads from (src/use_sim.py)
+        if number == getattr(self, "learn_request_seen", 0):
+            return
+        self.learn_request_seen = number
+        if folder and self._online_job().start(use_events=folder):
+            self.learn_auto = True
+            self.learn_message = "쓰면서 모은 사용 사례로 TCN 학습을 시작했어요 (자동). 카메라와 마우스는 그대로 쓸 수 있어요."
+            self.learnChanged.emit()
+
+    def set_learn_note(self, note):
+        """The runtime's line about the taught gestures' uses (Snapshot.learn_note), for the main screen's banner."""
+        note = str(note or "")
+        if note != getattr(self, "learn_note", ""):
+            self.learn_note = note
+            self.learnChanged.emit()
+
+    @Property("QVariantList", notify=learnChanged)
+    def learnItems(self):
+        """The banner as cards (2026-11-11): {"key", "name", "state": collecting|ready|waiting|learned, "n", "need", "text",
+        "hint"} per taught gesture."""
+        return list(getattr(self, "learn_items", []))
+
+    @Property(str, notify=learnChanged)
+    def learnAutoLine(self):
+        """An automatic learning round's progress / result line ("" when none is shown)."""
+        import time as _time
+        if getattr(self, "learn_auto", False) and self.learn_message:
+            if (self.online_job is not None and self.online_job.running) or _time.time() < getattr(self, "learn_banner_until", 0.0):
+                return self.learn_message
+        return ""
+
+    @Property("QVariant", notify=useCasesChanged)
+    def useCases(self):
+        """The [사례 보기] viewer: {"key", "name", "loading", "error", "items": src/use_view.cases(...)}."""
+        return getattr(self, "use_cases", {})
+
+    @Slot(str, str)
+    def openUseCases(self, key, name):
+        """Read one taught gesture's collected uses for the viewer, in a thread (the log can be tens of MB)."""
+        key, name = str(key or ""), str(name or key)
+        self.use_cases = {"key": key, "name": name, "loading": True, "error": "", "items": []}
+        self.useCasesChanged.emit()
+        from src.use_view import cases             # (tests: QTest.qWait keeps the GIL, wait with sleep + processEvents)
+        folder = self._use_folder()
+
+        def work():
+            try:
+                items = cases(folder, key)
+                self.use_cases = {"key": key, "name": name, "loading": False, "error": "", "items": items}
+            except Exception as exc:
+                self.use_cases = {"key": key, "name": name, "loading": False, "error": f"읽지 못했어요: {exc}", "items": []}
+            self.useCasesChanged.emit()
+
+        import threading
+        threading.Thread(target=work, name="use-cases", daemon=True).start()
+
+    BANNER_KEEP_SECONDS = 300.0      # how long the result of an automatic round stays on the main screen
+
+    @Property(str, notify=learnChanged)
+    def learnBanner(self):
+        """Main screen, under the title bar: what the app is doing with the taught gestures by itself. While an automatic round
+        runs (and for a while after) its progress and result; otherwise how many uses have been collected."""
+        import time as _time
+        if getattr(self, "learn_auto", False) and self.learn_message:
+            if (self.online_job is not None and self.online_job.running) or _time.time() < getattr(self, "learn_banner_until", 0.0):
+                return "자동 학습 · " + self.learn_message
+        return getattr(self, "learn_note", "")
+
     def poll_online_job(self):
         """Called every loop of the UI thread: turns the job's progress into words once it changes."""
         job = self.online_job
@@ -435,25 +564,144 @@ class QtDashboard(QObject):
         phase = state.get("phase")
         if phase == "update":
             self.learn_message = f"학습 중… {state.get('done', 0)}/{state.get('total', 0)}"
+        elif phase == "imported":
+            self.learn_message = (f"사용 기록에서 가져왔어요: 가르친 자세 사용 {state.get('taught', 0)}개, "
+                                  f"원하지 않은 동작 {state.get('negatives', 0)}개, 그 밖의 동작 {state.get('weak', 0)}개")
+        elif phase == "verifier":
+            self.learn_message = (f"'{self._gesture_name(state.get('key', ''))}' 자세의 확인 모델을 학습 중… "
+                                  f"({state.get('done', 0) + 1}/{state.get('total', 1)})")
         elif phase in ("starting", "loading"):
             self.learn_message = "데이터를 읽는 중…"
         elif phase == "checking":
             self.learn_message = "학습에 안 쓴 데이터로 검사 중…"
         elif phase == "error":
             self.learn_message = f"학습하지 못했어요: {state.get('message', '')}"
+            self.learn_banner_until = time.time() + self.BANNER_KEEP_SECONDS
         elif phase == "done":
-            self.learn_message = self._learn_result(state)
+            # 2026-11-11 report: the whole result - a paragraph per gesture, raw keys like 'left_click:thumb_index' - sat in
+            # the left panel for good ("유저가 꼭 알아야 하는 메세지면 … 알림 형식으로"). Now: one short line for a few
+            # minutes, a notice only for what the person has to know; the per-gesture state is on the cards above.
+            self.learn_detail = self._learn_result(state)
+            self.learn_message, notice = self._learn_summary(state)
+            self.learn_banner_until = time.time() + self.BANNER_KEEP_SECONDS
+            if notice:
+                self.notify(notice)
             self.online_commands.append(("online_reload",))
             self.refreshOnlineSummary()
         self.learnChanged.emit()
+
+    @Property("QVariant", notify=toastChanged)
+    def toast(self):
+        """{"text", "seq"}: the notice to show now (dashboard.qml shows it for a few seconds)."""
+        return getattr(self, "_toast", {"text": "", "seq": 0})
+
+    def notify(self, text):
+        self._toast = {"text": str(text), "seq": int(getattr(self, "_toast", {}).get("seq", 0)) + 1}
+        self.toastChanged.emit()
+
+    def _learn_summary(self, state):
+        """(one short line for the panel and the banner, a notice or "") of a finished learning round. The notice is only
+        for what changes something for the person: a checking model made or refused, the model replaced, refused or
+        rolled back. Gestures that only wait for another day's uses are counted, not listed (their cards say it)."""
+        reports = state.get("verifiers") or {}
+        by = {"saved": [], "rejected": [], "waiting": []}
+        for key, r in reports.items():
+            if r.get("status") in by:
+                by[r["status"]].append(self._gesture_name(key))
+        names = lambda items: ", ".join(f"'{n}'" for n in items[:3]) + (f" 외 {len(items) - 3}개" if len(items) > 3 else "")   # noqa: E731
+        line, notice = [], []
+        if by["saved"]:
+            text = f"{names(by['saved'])} 확인 모델을 만들었어요. 이제 TCN이 이 동작을 한 번 더 확인해요."
+            line.append(text)
+            notice.append(text)
+        if by["rejected"]:
+            text = f"{names(by['rejected'])} 확인 모델은 검사를 통과하지 못해 아직 쓰지 않아요. 더 쓰면 다시 학습해요."
+            line.append(text)
+            notice.append(text)
+        status = state.get("status")
+        if status == "promoted":
+            line.append("새 모델을 반영했어요.")
+            notice.append("자동 학습으로 만든 새 모델을 반영했어요." if getattr(self, "learn_auto", False) else "새 모델을 반영했어요.")
+        elif status == "rejected":
+            from src.online.collector import correction_choices
+            from src.online.update_job import reason_ko
+            known = {c["label"]: c["name"] for c in correction_choices()}
+            reasons = list(dict.fromkeys(reason_ko(p, known) for p in state.get("problems", [])))
+            line.append("새 모델은 검사에서 떨어져 지금 모델을 그대로 써요"
+                        + (f" ({', '.join(reasons[:2])})." if reasons else "."))
+        elif status == "rolled_back":
+            text = state.get("message") or "이전 모델로 되돌렸어요."
+            line.append(text)
+            notice.append(text)
+        elif status == "nothing_to_roll_back":
+            line.append("되돌릴 이전 모델이 없어요.")
+        elif status == "nothing" and not reports:
+            line.append(state.get("message") or "학습할 정정·확인 데이터가 없어요. F를 눌러 정정하거나 새 동작을 등록해 주세요.")
+        if by["waiting"]:
+            line.append(f"동작 {len(by['waiting'])}개는 다른 날에도 쓰면 검사해요.")
+        return " ".join(line) or "학습을 마쳤어요.", " ".join(notice)
+
+    @staticmethod
+    def _gesture_name(key):
+        """What the person calls a taught gesture (its binding's name); the key when there is none. A click's checking
+        model ("left_click:thumb_index") is "좌클릭" / "우클릭"."""
+        action = str(key).split(":")[0]
+        if ":" in str(key) and action in ("left_click", "right_click"):
+            from src.online.use_import import click_name
+            return click_name(key)             # which click, in which mode, made how, of which kind
+        try:
+            from src.action_bindings import get_action_registry
+            reg = get_action_registry()
+            return str((reg.composite_gestures.get(key) or {}).get("name") or reg.get_binding(key).get("name") or key)
+        except Exception:
+            return str(key)
 
     def _learn_result(self, state):
         from src.online.update_job import reason_ko
         from src.online.collector import correction_choices
         names = {c["label"]: c["name"] for c in correction_choices()}
         status = state.get("status")
+        taught = self._verifier_words(state.get("verifiers") or {})
+        if taught:
+            # the taught gestures' own checking models: the part of an automatic round the person asked for
+            return taught if status == "nothing" else taught + " " + self._model_words(state, status, names)
+        return self._model_words(state, status, names)
+
+    @staticmethod
+    def _gesture_exists(key):
+        """False for a composite gesture ("comp_*") that was deleted: its logged uses are not listed or counted any more."""
+        if not str(key).startswith("comp_"):
+            return True
+        try:
+            from src.action_bindings import get_action_registry
+            return key in get_action_registry().composite_gestures
+        except Exception:
+            return True
+
+    def _verifier_words(self, reports):
+        """What happened to each taught gesture's checking model in this round (src/online/verifier.py)."""
+        parts = []
+        for key, r in reports.items():
+            name = self._gesture_name(key)
+            if r.get("status") == "waiting":
+                parts.append(f"'{name}' 사용 사례 {r.get('uses', 0)}개를 저장했어요. "
+                             + ("하루치뿐이라 아직 검사하지 못해요: 다른 날에도 쓰면 그날 사용으로 검사한 뒤 TCN 확인을 시작해요."
+                                if r.get("reason") == "one_day" else "가장 최근 날의 사용이 적어 아직 검사하지 못해요 (4번 필요)."))
+            elif r.get("status") == "saved":
+                parts.append(f"'{name}' 확인 모델을 만들었어요 (가장 최근 날의 사용 {round(r.get('recall', 0) * r.get('held', 0))}/{r.get('held', 0)}번 인식, "
+                             f"다른 동작을 이 자세로 본 비율 {r.get('false_rate', 0):.1%}). 이제 이 자세의 명령을 TCN이 확인해요.")
+            elif r.get("status") == "rejected":
+                why = {"misses_uses": "가장 최근 날의 사용을 충분히 알아보지 못해요", "fires_on_other_things": "다른 동작을 이 자세로 너무 자주 봐요",
+                       "too_little_data": "자료가 부족해요"}.get(r.get("reason"), "검사에서 떨어졌어요")
+                parts.append(f"'{name}' 확인 모델은 아직 쓰지 않아요: {why} (인식 {r.get('recall', 0):.0%}, 오인 {r.get('false_rate', 0):.1%}). 더 쓰면 다시 학습해요.")
+        return " ".join(parts)
+
+    def _model_words(self, state, status, names):
+        from src.online.update_job import reason_ko
         if status == "promoted":
             text = "새 모델을 반영했어요."
+            if state.get("new_classes"):
+                text += " TCN이 새로 배운 동작: " + ", ".join(self._gesture_name(k) for k in state["new_classes"]) + "."
             if state.get("untested_new_classes"):
                 text += " (" + ", ".join(state["untested_new_classes"]) + "은 데이터가 적어 따로 검사하지 못했어요)"
             return text
@@ -481,7 +729,12 @@ class QtDashboard(QObject):
 
     @Property(str, notify=learnChanged)
     def learnText(self):
-        if self.learn_message:
+        """The line over [학습하기]: a round's progress while it runs and its short result for a few minutes after; then
+        how much there is to learn from. (It used to keep the last result until the app closed.)"""
+        import time as _time
+        running = self.online_job is not None and getattr(self.online_job, "running", False)
+        if self.learn_message and (running or _time.time() < getattr(self, "learn_banner_until", 0.0)
+                                   or not getattr(self, "learn_summary", None)):
             return self.learn_message
         s = self.learn_summary
         if not s:
@@ -622,6 +875,13 @@ class QtDashboard(QObject):
             self.set_finger_frame(None)
         self.stateChanged.emit()
 
+    @Property(float, constant=True)
+    def virtualHandGlide(self):
+        """Time constant of the drawn hand's glide between camera frames (read once: a config change needs a restart)."""
+        if not hasattr(self, "_vh_glide"):
+            self._vh_glide = _virtual_hand_glide()
+        return self._vh_glide
+
     @Property("QVariant", notify=virtualHandChanged)
     def virtualHand(self):
         return self.virtual_hand or {}
@@ -635,6 +895,71 @@ class QtDashboard(QObject):
         self.virtual_hand_on = bool(on)
         self.preferences.setValue("virtualHand", self.virtual_hand_on)
         self.stateChanged.emit()
+
+    @Property(bool, notify=stateChanged)
+    def pointModeOn(self):
+        return self.point_mode_on
+
+    @Slot(bool)
+    def setPointMode(self, on):
+        self.point_mode_on = bool(on)
+        self.preferences.setValue("pointMode", self.point_mode_on)
+        self.stateChanged.emit()
+
+    @Property(bool, notify=stateChanged)
+    def signalTextOn(self):
+        """The name of the signal ("더블클릭", "손 모양: …") written beside the hand drawn on the screen."""
+        return self.signal_text_on
+
+    @Slot(bool)
+    def setSignalText(self, on):
+        self.signal_text_on = bool(on)
+        self.preferences.setValue("signalText", self.signal_text_on)
+        self.stateChanged.emit()
+
+    @Property("QVariantMap", notify=stateChanged)
+    def pointSettings(self):
+        """The pointing mode's details for the settings window, and each one's range: {"values": {...}, "ranges": {name:
+        [default, low, high]}}."""
+        from src.point_mode import SETTINGS
+        return {"values": dict(self.point_settings),
+                "ranges": {k: [v[0], v[1], v[2]] for k, v in SETTINGS.items()}}
+
+    @Slot(str, "QVariant")
+    def setPointSetting(self, name, value):
+        from src.point_mode import SETTINGS, clean_settings
+        if name not in SETTINGS:
+            return
+        values = clean_settings({**self.point_settings, name: value})
+        if name == "tilt_min" and values["tilt_min"] > values["tilt_max"]:
+            values["tilt_max"] = values["tilt_min"]
+        if values != self.point_settings:
+            self.point_settings = values
+            self.preferences.setValue("pointModeSettings", json.dumps(values))
+            self.stateChanged.emit()
+
+    @Slot()
+    def resetPointSettings(self):
+        from src.point_mode import clean_settings
+        self.point_settings = clean_settings({})
+        self.preferences.setValue("pointModeSettings", json.dumps(self.point_settings))
+        self.stateChanged.emit()
+
+    @Property("QVariant", notify=pointChanged)
+    def pointView(self):
+        """Pointing mode now: {"kind", "progress", "on_file", "cursor": [x, y] logical px}; {} = not pointing."""
+        return self.point_view
+
+    def set_point_view(self, view):
+        if not view:
+            if self.point_view:
+                self.point_view = {}
+                self.pointChanged.emit()
+            return
+        from PySide6.QtGui import QCursor
+        pos = QCursor.pos()             # logical pixels, the space windows are placed in
+        self.point_view = {**view, "cursor": [pos.x(), pos.y()]}
+        self.pointChanged.emit()
 
     @Property("QVariantList", notify=stateChanged)
     def virtualBox(self):
@@ -858,7 +1183,8 @@ class QtDashboard(QObject):
         if on:
             if leaving >= 0.2:
                 return True, f"모션 모드 끄는 중… {int(leaving * 100)}%"
-            text = "모션 모드 켜짐" + (f" · {left:.0f}초" if left > 0 else "")
+            text = ("모션 모드 켜짐 (시뮬레이션)" if getattr(self, "simulating_now", False) else "모션 모드 켜짐") \
+                + (f" · {left:.0f}초" if left > 0 else "")
             return True, text + (f" · {last}" if last else "")
         if entering >= 0.2:
             return True, f"모션 모드 진입 중… {int(entering * 100)}%"
@@ -874,6 +1200,12 @@ class QtDashboard(QObject):
         if time.perf_counter() < self.motion_exit_until:
             return True, "모션 모드 꺼짐"
         return False, ""
+
+    @Property(bool, notify=simChanged)
+    def simulating(self):
+        """The main screen with the mouse control off (2026-11-11): the hand is still read, clicks / connected gestures / motion mode
+        are shown as what they would do, and nothing is sent. The top-right badge says so."""
+        return bool(getattr(self, "simulating_now", False))
 
     @Property(bool, notify=stateChanged)
     def motionBadgeVisible(self):
@@ -1257,12 +1589,15 @@ class QtDashboard(QObject):
                 self.aug_settings = tc.get_augmentation_settings()
                 self._gpu_cap = tc.detect_gpu_training_capability()
                 valid_files = {r["file"] for r in file_rows if r.get("file")}
-                if not getattr(self, "selected_sim_file", "") or self.selected_sim_file not in valid_files:
+                viewing_uses = str(getattr(self, "selected_sim_file", "")).startswith("use:")   # src/use_sim.py: not a file
+                if viewing_uses:
+                    pass
+                elif not getattr(self, "selected_sim_file", "") or self.selected_sim_file not in valid_files:
                     prev_file = self.sim_result.get("file") or self.sim_eval.get("file") or ""
                     self.selected_sim_file = (
                         prev_file if prev_file in valid_files else (file_rows[0]["file"] if file_rows else "")
                     )
-                if self.selected_sim_file:
+                if self.selected_sim_file and not viewing_uses:
                     if self.sim_eval.get("file") != self.selected_sim_file:
                         try:
                             self.sim_eval = tc.evaluate_recording_in_simulator(self.selected_sim_file)
@@ -1748,6 +2083,8 @@ class QtDashboard(QObject):
         target = str(filename or "").strip()
         if not target and getattr(self, "selected_sim_file", ""):
             target = self.selected_sim_file
+        if target.startswith("use:"):
+            return self.runUseSimulation(target)       # the collected uses have no recording file to evaluate
         if not target and self.training_files:
             target = self.training_files[0].get("file", "")
         if not target:
@@ -1928,11 +2265,69 @@ class QtDashboard(QObject):
         _timer(self, "start")
 
     @Slot(str)
+    # ------------------------------------------------------------------ the uses collected by themselves, in the simulator
+    def _use_folder(self):
+        """The use log's folder (src/use_log.py): the one the runtime reports, else logs/use_events."""
+        from pathlib import Path as _Path
+        folder = getattr(self, "use_log_folder", "")
+        return _Path(folder) if folder else _Path(__file__).resolve().parents[1] / "logs" / "use_events"
+
+    @Property("QVariantList", notify=trainingChanged)
+    def useGestures(self):
+        """Taught gestures with logged uses, for the simulator's "쓰면서 모은 자료" selector."""
+        return list(getattr(self, "use_gestures", []))
+
+    @Slot()
+    def refreshUseGestures(self):
+        from src.online.samples import DEFAULT_ROOT
+        from src.use_sim import list_gestures
+        try:
+            self.use_gestures = list_gestures(self._use_folder(), self.online_root or DEFAULT_ROOT, self._gesture_name,
+                                              self._gesture_exists)
+        except Exception:
+            self.use_gestures = []
+        self.trainingChanged.emit()
+
+    @Slot(str)
+    def runUseSimulation(self, key):
+        """Plays one taught gesture's logged uses in the simulator (src/use_sim.py). Nothing is written or trained."""
+        from src.use_sim import PREFIX
+        key = str(key or "").strip()
+        key = key[len(PREFIX):] if key.startswith(PREFIX) else key
+        if not key:
+            return
+        target = PREFIX + key
+        self.selected_sim_file = target
+        if self.training_busy:
+            self._pending_sim_request = (target, True)
+            self.trainingChanged.emit()
+            return
+        name = self._gesture_name(key)
+        self._set_busy_task("자동 수집 자료 불러오는 중", f"'{name}'의 사용 사례를 시뮬레이터용으로 정리하는 중…", 0.4)
+
+        def work():
+            from src.online.samples import DEFAULT_ROOT
+            from src.use_sim import simulate
+            try:
+                res = simulate(key, self._use_folder(), self.online_root or DEFAULT_ROOT, name)
+                self._store_sim_result(res)
+                self.sim_eval = {"file": target, "headline": res.get("summary", "")}
+                self.training_note = res.get("summary", "")
+            except Exception as exc:
+                self.training_note = f"자동 수집 자료를 불러오지 못했어요: {exc}"
+            self._set_busy_task("")
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        _timer(self, "start")
+
     @Slot(str, bool)
     def runSimulation(self, filename="", use_cleaned=True):
         target = str(filename or "").strip()
         if not target and getattr(self, "selected_sim_file", ""):
             target = self.selected_sim_file
+        if target.startswith("use:"):
+            return self.runUseSimulation(target)       # the collected uses, not a recording file
         if not target and self.training_files:
             target = self.training_files[0].get("file", "")
         if not target:
@@ -3030,18 +3425,229 @@ class QtDashboard(QObject):
     @Property("QVariantMap", notify=llmChanged)
     def llmContext(self):
         """What 이/저 point to: the shown hand shape and the remembered key."""
-        return {"pose": self.pose_probe_view or {}, "key": self.captured_key, "capturing": self.key_capturing}
+        done = (self.pose_probe_view or {}).get("state") == "done"
+        shot = f"image://probeshot/{self.probe_shot_seq}" if done and getattr(self, "probe_shot_ok", False) else ""
+        return {"pose": self.pose_probe_view or {}, "key": self.captured_key, "capturing": self.key_capturing,
+                "shot": shot, "shotFrames": len(self.probe_shot.frames) if shot else 0, "teach": self._teach_context()}
+
+    # ------------------------------------------------------------ teaching a shown hand shape (src/posture_teach.py)
+    @Property("QVariantList", notify=llmChanged)
+    def postureChoices(self):
+        """The listed shapes and the ones the user named (src/custom_postures.py)."""
+        from src.action_bindings import POSTURE_NAMES_KO
+        return [{"key": k, "name": v} for k, v in POSTURE_NAMES_KO.items() if k != "any"]
+
+    @Property("QVariantList", notify=llmChanged)
+    def customPostures(self):
+        """The hand shapes the user named, with what hangs on each (for the list with [삭제])."""
+        from src import custom_postures
+        import src.posture_teach as pt
+        counts = pt.example_counts()
+        rows = []
+        for key, name in custom_postures.load().items():
+            made = custom_postures.uses(key)
+            rows.append({"key": key, "name": name, "examples": counts.get(key, 0), "uses": len(made),
+                         "usesText": ", ".join(n for _, _, n in made)})
+        return rows
+
+    @Slot(str)
+    def removeCustomPosture(self, key):
+        from src import custom_postures
+        name = custom_postures.load().get(key, "")
+        gone = custom_postures.delete(key)
+        if not gone:
+            return
+        if self.teach_focus == key:
+            self.teach_focus, self.teach_adding = "", False
+        if (self.pose_probe_view or {}).get("posture") == key:       # the result on the screen is of that shape
+            self.clearPoseProbe()
+        self._teach_counts = (None, {})
+        self.online_commands.append(("seq_reload",))
+        self.teach_view = {"state": "", "text": f"손 모양 '{name}'을 지웠어요 (견본 {gone['examples']}개, 연결한 동작 {gone['gestures']}개 포함)."}
+        self.stateChanged.emit()
+        self.llmChanged.emit()
+
+    @Slot(str)
+    def poseTeachSaveNew(self, name):
+        """A look that is no listed shape (or a listed one the user wants as its own): a new shape with this name,
+        the look as its first example."""
+        if (self.pose_probe_view or {}).get("state") != "done":
+            return
+        from src import custom_postures
+        try:
+            key = custom_postures.add(name)
+        except ValueError as exc:
+            self.teach_view = {"state": "error", "text": str(exc)}
+            self.llmChanged.emit()
+            return
+        self.poseTeachSave(key)
+
+    def _teach_context(self):
+        from src.action_bindings import POSTURE_NAMES_KO
+        import src.posture_teach as pt
+        try:
+            stamp = pt.EXAMPLES_DIR.stat().st_mtime_ns
+        except OSError:
+            stamp = 0
+        if self._teach_counts[0] != stamp:
+            self._teach_counts = (stamp, pt.example_counts())
+        counts = self._teach_counts[1]
+        active = pt.read_report(pt.MODEL_PATH) if pt.MODEL_PATH.is_file() else None
+        name = lambda k: POSTURE_NAMES_KO.get(k, k)
+        focus = self.teach_focus if self.teach_focus in POSTURE_NAMES_KO else ""
+        state = self.teach_view.get("state", "")
+        words = pt.guide(focus, name(focus), counts, state, self.teach_view.get("report"), active,
+                         self.teach_view.get("text", ""))
+        return {
+            "state": state,
+            "steps": words["steps"],
+            "text": words["text"],
+            "canApply": bool(self.teach_view.get("canApply")),
+            "focus": focus,
+            "focusName": name(focus) if focus else "",
+            "adding": bool(focus and self.teach_adding),
+            "naming": bool(self.teach_new),
+            # with no shape being taught: one short line, no numbers of shapes nobody is working on
+            "summary": "" if focus or not (counts or active) else
+                       f"가르친 손 모양 {len(counts)}개" + (f" · 사용 중 {len(active.get('examples') or {})}개" if active else ""),
+            "hasExamples": bool(counts),
+            "active": "on" if active else "",
+        }
+
+    def _after_example_saved(self, label):
+        """The runtime saved a look as an example (the result now says "taught"): with enough examples of that shape
+        the training starts by itself, so showing the shape again IS the next step."""
+        import src.posture_teach as pt
+        self._teach_counts = (None, {})
+        n = pt.example_counts().get(label, 0)
+        if label == self.teach_focus and n >= pt.AUTO_TRAIN and self.teach_view.get("state") != "training":
+            self.poseTeachTrain()
+        else:
+            self.llmChanged.emit()
+
+    @Slot(str)
+    def poseTeachSave(self, label):
+        if (self.pose_probe_view or {}).get("state") != "done" or not label:
+            return
+        self.online_commands.append(("pose_teach_save", str(label)))
+        self.teach_focus, self.teach_new = str(label), False
+        self.teach_view = {"state": "", "text": ""}
+        self.llmChanged.emit()
+
+    @Slot()
+    def poseTeachTrain(self):
+        if self.teach_view.get("state") == "training":
+            return
+        import threading
+        import src.posture_teach as pt
+        self.teach_view = {"state": "training", "text": "학습 준비 중…"}
+        self.llmChanged.emit()
+
+        def work():
+            try:
+                self.poseTeachDone.emit(pt.train(progress=self.poseTeachProgress.emit), "")
+            except Exception as exc:
+                self.poseTeachDone.emit(None, str(exc))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pose_teach_progress(self, text):
+        if self.teach_view.get("state") == "training":
+            self.teach_view = {"state": "training", "text": text}
+            self.llmChanged.emit()
+
+    def _finish_pose_teach(self, report, error=""):
+        from src.action_bindings import POSTURE_NAMES_KO
+        import src.posture_teach as pt
+        if error or not isinstance(report, dict):
+            self.teach_view = {"state": "error", "text": f"학습하지 못했어요: {error or '결과 없음'}"}
+            self.llmChanged.emit()
+            return
+        ok = bool(report.get("can_apply"))
+        text = ""
+        if not self.teach_focus:              # [학습] pressed with no shape being taught: every shape, as before
+            parts = []
+            for k, r in (report.get("recognition") or {}).items():
+                n = (report.get("examples") or {}).get(k, 0)
+                parts.append(f"{POSTURE_NAMES_KO.get(k, k)} 인식 {round(r * 100)}%" if r is not None
+                             else f"{POSTURE_NAMES_KO.get(k, k)}: 견본 {n}개라 인식률은 못 쟀어요 (2개 이상 필요)")
+            fr = report.get("false_rate")
+            parts.append(f"평소 손에서 잘못 걸림 {fr * 100:.1f}%" if fr is not None else "잘못 걸림은 못 쟀어요")
+            text = " · ".join(parts) + (" · [적용]하면 바로 쓰여요" if ok else
+                                        f" · {pt.MAX_FALSE * 100:.0f}%를 넘어서 적용할 수 없어요. 견본을 더 모아 주세요")
+        self.teach_view = {"state": "ready", "canApply": ok, "report": report, "text": text}
+        if ok and self.teach_focus:
+            # the shape being taught passed the check: it is put to use at once. 2026-11-11 report ("등록했는데 작동
+            # 안함"): the training was done and a command connected, but [적용] had not been pressed, so the model in
+            # use did not know the shape and the command never ran
+            self.poseTeachApply()
+            return
+        self.llmChanged.emit()
+
+    @Slot()
+    def poseTeachApply(self):
+        import src.posture_teach as pt
+        if self.teach_view.get("canApply") and pt.apply_candidate():
+            self.teach_view = {"state": "applied", "text": "적용했어요. 이제 보여주기와 연결한 동작에서 가르친 손 모양을 알아봐요."}
+        self.llmChanged.emit()
+
+    @Slot()
+    def poseTeachDiscard(self):
+        import src.posture_teach as pt
+        pt.discard_candidate()
+        self.teach_view = {"state": "", "text": "학습 결과를 버렸어요 (견본은 남아 있어요)."}
+        self.llmChanged.emit()
+
+    @Slot()
+    def poseTeachOff(self):
+        import src.posture_teach as pt
+        pt.turn_off()
+        self.teach_view = {"state": "", "text": "가르친 손 모양 모델을 껐어요. 규칙만으로 판정해요 (견본은 남아 있어요)."}
+        self.llmChanged.emit()
+
+    @Slot()
+    def poseTeachNew(self):
+        """[새 동작 등록] (2026-11-11 request: "새로운 동작을 곧바로 이어서 등록할 수 있도록"): the shape taught so far
+        is done with; a fresh look starts at once, and when it ends the screen asks for its name."""
+        self.teach_focus, self.teach_adding, self.teach_new = "", False, True
+        self.teach_view = {"state": "", "text": "새 손 모양을 보여 주세요. 끝나면 이름을 지어 저장하면 돼요."}
+        self.startPoseProbe()
+
+    @Slot()
+    def poseTeachAgain(self):
+        """[한 번 더 보여주기]: one more look at the shape being taught. It is saved as an example of that shape by
+        itself when the look ends - whatever the rules call it, and without the "new hand shape" form (2026-11-11
+        report: the form for a NEW shape came up after it, as if another shape were being made)."""
+        if not self.teach_focus:
+            return
+        self.teach_adding = True
+        self.startPoseProbe()
+
+    def _teach_look_ended(self, probe):
+        """The look started by [한 번 더 보여주기] is over."""
+        from src.action_bindings import POSTURE_NAMES_KO
+        name = POSTURE_NAMES_KO.get(self.teach_focus, self.teach_focus)
+        if probe.get("state") == "done" and not probe.get("kind"):
+            self.poseTeachSave(self.teach_focus)          # teach_adding stays on until the runtime has saved it
+            return
+        self.teach_adding = False
+        why = ("손이 움직였어요. 가만히 든 채로" if probe.get("state") == "done" else "손이 잘 보이지 않았어요.")
+        self.teach_view = {"state": "error", "text": f"{why} [한 번 더 보여주기]를 눌러 '{name}'을 다시 보여 주세요 (견본은 추가되지 않았어요)."}
+        self.llmChanged.emit()
 
     @Slot()
     def startPoseProbe(self):
         self.online_commands.append(("pose_probe",))
         self.pose_probe_view = {"state": "countdown", "seconds": 3}
+        self._probe_wait = True
         self._llm_set(message="손을 카메라에 보여 주세요. 3초 뒤 2초 동안 손 모양을 봅니다.")
 
     @Slot()
     def clearPoseProbe(self):
         self.online_commands.append(("pose_probe_cancel",))
         self.pose_probe_view = None
+        self.teach_adding = self.teach_new = False
+        self._probe_wait = False
         self.llmChanged.emit()
 
     @Slot()
@@ -3130,6 +3736,43 @@ class QtDashboard(QObject):
         self.refreshTraining()
         self.stateChanged.emit()
         self._llm_set(message=message)
+
+    @Slot(str, result="QVariantMap")
+    def gesturePreview(self, key):
+        """A moving hand picture of a gesture, from its own saved joints (src/gesture_preview.py). Cached a few
+        seconds: the AI list re-reads its rows on every status message."""
+        import time
+        cache = getattr(self, "_preview_cache", None)
+        if cache is None:
+            cache = self._preview_cache = {}
+        key = str(key or "")
+        hit = cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < 10:
+            return hit[1]
+        try:
+            from src.action_bindings import get_action_registry
+            from src.gesture_preview import preview
+            value = preview(key, get_action_registry())
+        except Exception:
+            value = {"frames": [], "source": "", "move": "", "shapes": [], "steps": [], "fps": 15}
+        cache[key] = (time.monotonic(), value)
+        return value
+
+    @Slot(int, str, str, float, result=bool)
+    def editLlmConnection(self, index, action_type, action_value, hold_seconds):
+        """Change an AI connection's command and (hold gestures; < 0 = leave it) how long the shape is held."""
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History
+        ok = True
+        try:
+            message = History().edit(int(index), get_action_registry(), str(action_type), str(action_value),
+                                     None if float(hold_seconds) < 0 else float(hold_seconds))
+        except ValueError as exc:
+            message, ok = str(exc), False
+        self.refreshTraining()
+        self.stateChanged.emit()
+        self._llm_set(message=message)
+        return ok
 
     @Slot(int)
     def forgetLlmConnection(self, index):
@@ -3808,7 +4451,7 @@ class QtDashboard(QObject):
             screen_ratio=_screen_ratio(),
             rec_focus=self.rec_focus, model_version=self.model_version,
             rec_plan=copy.deepcopy(self.rec_plan), rec_paused=self.rec_paused,
-            rec_discard=self.rec_discard,
+            rec_discard=self.rec_discard, point_mode=self.point_mode_on, point_settings=dict(self.point_settings), signal_text=self.signal_text_on,
         )
 
     LAG_FPS, RECOVER_FPS = 20.0, 26.0     # camera loop speed at which background learning is slowed / let go again
@@ -3834,9 +4477,52 @@ class QtDashboard(QObject):
             self.learn_message = "긴급 정지로 학습을 멈췄어요"
             self.learnChanged.emit()
 
+    def _set_pose_probe(self, probe):
+        """The runtime's view of [보여주기] (None, countdown, holding, done, failed)."""
+        if self._probe_wait:
+            # the button was just pressed: until the runtime has started the new look its snapshots still carry the
+            # PREVIOUS result. 2026-11-11 report: that old result (saved as an example, so "taught") was taken for the
+            # new look's - it switched "this look adds an example" off and trained again, and when the new look ended
+            # the form for a new hand shape came up
+            if (probe or {}).get("state") not in ("countdown", "holding"):
+                return
+            self._probe_wait = False
+        if probe == self.pose_probe_view:
+            return
+        before = self.pose_probe_view or {}
+        ended = (probe or {}).get("state") in ("done", "failed") and before.get("state") in ("countdown", "holding")
+        saved = (probe or {}).get("taught") if before.get("state") == "done" and not before.get("taught") else None
+        self.pose_probe_view = probe
+        if ended and self.teach_adding:
+            self._teach_look_ended(probe)
+        if saved:
+            self.teach_adding = False
+        self.llmChanged.emit()
+        if saved:
+            self._after_example_saved(saved)
+
+    def _set_probe_shot(self, shot):
+        """(number, BGR picture, the look's pictures in order) of a [보여주기] result: the still and the replay."""
+        if shot is None or shot[0] == getattr(self, "probe_shot_seq", 0):
+            return
+        img = shot[1]
+        self.probe_shot_ok = img is not None
+        to_image = lambda a: QImage(a.data, a.shape[1], a.shape[0], a.strides[0], QImage.Format_BGR888).copy()
+        self.probe_shot.frames = [to_image(a) for a in (shot[2] if len(shot) > 2 and img is not None else []) if a is not None]
+        if img is not None:
+            self.probe_shot.image = to_image(img)
+        self.probe_shot_seq = shot[0]
+        self.llmChanged.emit()
+
     def apply_snapshot(self, snap):
         """Render one runtime snapshot (UI thread)."""
         self.throttle_learning(getattr(snap, "fps", 0.0))
+        self.auto_learn(getattr(snap, "learn_request", None))
+        self.set_learn_note(getattr(snap, "learn_note", ""))
+        items = list(getattr(snap, "learn_items", None) or [])
+        if items != getattr(self, "learn_items", []):
+            self.learn_items = items
+            self.learnChanged.emit()
         if self.stage_name == "capture":
             self.select_hand(snap.detections, snap.mirrored)
         if self.use_index_pointer:
@@ -3858,10 +4544,10 @@ class QtDashboard(QObject):
             self.draw_view = draw
             self.drawChanged.emit()
         probe = getattr(snap, "pose_probe", None)
-        if probe != self.pose_probe_view:
-            self.pose_probe_view = probe
-            self.llmChanged.emit()
+        self._set_probe_shot(getattr(snap, "pose_probe_shot", None))
+        self._set_pose_probe(probe)
         self.set_finger_frame(getattr(snap, "finger", None))
+        self.set_point_view(getattr(snap, "point", None))
         lost = (bool(getattr(snap, "hand_lost", False)), bool(getattr(snap, "arm_lost", False)),
                 bool(getattr(snap, "admin_blocked", False)))
         if lost != (getattr(self, "hand_lost", False), getattr(self, "arm_lost", False), getattr(self, "admin_blocked", False)):
@@ -4170,6 +4856,10 @@ class QtDashboard(QObject):
             f"{fps:.1f} fps  ·  추론 {detect_ms:.1f} ms" + (f"  ·  {status}" if status else ""),
         )
         self._update_reception(detected, paused)
+        sim = bool(paused) and self.stage_name == "main"
+        if sim != getattr(self, "simulating_now", False):
+            self.simulating_now = sim
+            self.simChanged.emit()
         contact_text = " + ".join(map(str, contacts))
         if (state, contact_text) != (self.state, self.contact_text):
             self.state = state

@@ -107,16 +107,290 @@ ApplicationWindow {
         }
     }
 
+    // [사례 보기] (2026-11-11): one taught gesture's collected uses (src/use_view.py), each replayed as the hand around the command
+    Dialog {
+        id: useCasesDialog
+        objectName: "useCasesDialog"
+        anchors.centerIn: parent
+        width: Math.min(1100, window.width - 48)
+        height: window.height - 80
+        modal: true
+        readonly property var cases: dashboard.useCases
+        readonly property var items: cases.items || []
+        property int current: 0
+        property int frame: 0
+        property bool playing: true
+        readonly property var shown: items.length > 0 ? items[Math.min(current, items.length - 1)] : null
+        title: "모은 사용 사례 · " + (cases.name || "")
+        onItemsChanged: { current = 0; frame = 0 }
+        onCurrentChanged: frame = 0
+        footer: DialogButtonBox {
+            onRejected: useCasesDialog.close()
+            Button {
+                objectName: "useCasesClose"
+                text: "닫기"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
+        Timer {
+            interval: 1000 / 15
+            repeat: true
+            running: useCasesDialog.visible && useCasesDialog.playing && useCasesDialog.shown !== null
+                     && (useCasesDialog.shown.frames || []).length > 1
+            onTriggered: {
+                var n = useCasesDialog.shown.frames.length
+                useCasesDialog.frame = (useCasesDialog.frame + 1) % n
+                caseCanvas.requestPaint()
+            }
+        }
+        contentItem: ColumnLayout {
+            spacing: 10
+            TextLabel {
+                Layout.fillWidth: true
+                text: useCasesDialog.cases.loading ? "불러오는 중…"
+                      : useCasesDialog.cases.error ? useCasesDialog.cases.error
+                      : useCasesDialog.items.length === 0 ? "아직 모은 사례가 없어요. 이 동작을 쓰면 실행될 때마다 앞뒤 손 움직임이 저장돼요."
+                      : "이 동작이 실행될 때마다 저장된 손 움직임이에요 (최근 " + useCasesDialog.items.length + "개). "
+                        + "빨간 선이 명령이 실행된 순간이에요. F로 '원하지 않음'을 표시한 사례는 '아님'으로 학습돼요."
+                wrapMode: Text.Wrap
+                color: window.muted
+                font.pixelSize: 12
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 12
+                // the list of uses, newest first
+                Rectangle {
+                    Layout.preferredWidth: 300
+                    Layout.fillHeight: true
+                    radius: 8
+                    color: "#FFFFFF"
+                    border.color: window.line
+                    ListView {
+                        id: caseList
+                        objectName: "useCasesList"
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        clip: true
+                        spacing: 4
+                        model: useCasesDialog.items
+                        delegate: Rectangle {
+                            required property var modelData
+                            required property int index
+                            width: caseList.width
+                            height: 44
+                            radius: 6
+                            color: index === useCasesDialog.current ? "#E6F6EF" : (rowMouse.containsMouse ? "#F5F8F7" : "transparent")
+                            border.color: index === useCasesDialog.current ? "#6CCB9F" : "transparent"
+                            Column {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.leftMargin: 10
+                                spacing: 2
+                                Text {
+                                    text: (useCasesDialog.items.length - index) + ".  " + modelData.when
+                                          + (modelData.direction ? "   " + modelData.direction : "")
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                    color: window.ink
+                                }
+                                Text {
+                                    text: modelData.marked ? modelData.mark_text : "실행됨 (원하는 동작으로 학습)"
+                                    font.pixelSize: 11
+                                    color: modelData.marked ? "#B91C1C" : window.muted
+                                }
+                            }
+                            MouseArea {
+                                id: rowMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: { useCasesDialog.current = index; useCasesDialog.playing = true }
+                            }
+                        }
+                    }
+                }
+                // the replay
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 8
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: 10
+                        color: "#0E1B26"
+                        Canvas {
+                            id: caseCanvas
+                            objectName: "useCasesCanvas"
+                            readonly property real side: Math.min(width, height)
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+                            Connections { target: useCasesDialog; function onShownChanged() { caseCanvas.requestPaint() } }
+                            onPaint: {
+                                var c = getContext("2d"); c.reset()
+                                var shownCase = useCasesDialog.shown
+                                if (!shownCase || !shownCase.frames || shownCase.frames.length === 0) return
+                                var p = shownCase.frames[Math.min(useCasesDialog.frame, shownCase.frames.length - 1)]
+                                var s = side, ox = (width - s) / 2, oy = (height - s) / 2
+                                var fired = Math.abs(useCasesDialog.frame - shownCase.fire) <= 2
+                                var chains = [[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20],[5,9,13,17]]
+                                c.lineCap = "round"; c.lineJoin = "round"
+                                for (var pass = 0; pass < 2; pass++) {
+                                    c.strokeStyle = pass === 0 ? "rgba(0,0,0,0.5)" : (fired ? "#F87171" : "#6EE7C8")
+                                    c.lineWidth = pass === 0 ? 9 : 5
+                                    for (var k = 0; k < chains.length; k++) {
+                                        var ch = chains[k]
+                                        c.beginPath()
+                                        for (var i = 0; i < ch.length; i++) {
+                                            var v = p[ch[i]]
+                                            if (i === 0) c.moveTo(ox + v[0] * s, oy + v[1] * s); else c.lineTo(ox + v[0] * s, oy + v[1] * s)
+                                        }
+                                        c.stroke()
+                                    }
+                                }
+                                c.fillStyle = "#FFFFFF"
+                                for (var j = 0; j < 21; j++) {
+                                    c.beginPath(); c.arc(ox + p[j][0] * s, oy + p[j][1] * s, j % 4 === 0 && j > 0 ? 6 : 4, 0, Math.PI * 2); c.fill()
+                                }
+                            }
+                        }
+                        Text {
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.margins: 12
+                            visible: useCasesDialog.shown !== null
+                            text: useCasesDialog.shown === null ? ""
+                                  : Math.abs(useCasesDialog.frame - useCasesDialog.shown.fire) <= 2 ? "▶ 명령 실행"
+                                  : useCasesDialog.frame < useCasesDialog.shown.fire ? "실행 전" : "실행 후"
+                            color: useCasesDialog.shown !== null && Math.abs(useCasesDialog.frame - useCasesDialog.shown.fire) <= 2 ? "#F87171" : "#94A3B8"
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+                    }
+                    // timeline: where the command ran
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 10
+                        radius: 5
+                        color: "#E5EFEA"
+                        readonly property int n: useCasesDialog.shown ? Math.max(1, (useCasesDialog.shown.frames || []).length - 1) : 1
+                        Rectangle {
+                            width: parent.width * useCasesDialog.frame / parent.n
+                            height: parent.height
+                            radius: 5
+                            color: "#10B981"
+                        }
+                        Rectangle {
+                            visible: useCasesDialog.shown !== null
+                            x: useCasesDialog.shown ? parent.width * useCasesDialog.shown.fire / parent.n - 1.5 : 0
+                            y: -4
+                            width: 3
+                            height: parent.height + 8
+                            color: "#EF4444"
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: function (m) {
+                                useCasesDialog.playing = false
+                                useCasesDialog.frame = Math.round(m.x / width * parent.n)
+                                caseCanvas.requestPaint()
+                            }
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        CompactButton {
+                            text: "◀ 이전"
+                            enabled: useCasesDialog.current > 0
+                            onClicked: useCasesDialog.current--
+                        }
+                        CompactButton {
+                            text: useCasesDialog.playing ? "일시정지" : "재생"
+                            onClicked: useCasesDialog.playing = !useCasesDialog.playing
+                        }
+                        CompactButton {
+                            text: "다음 ▶"
+                            enabled: useCasesDialog.current < useCasesDialog.items.length - 1
+                            onClicked: useCasesDialog.current++
+                        }
+                        Item { Layout.fillWidth: true }
+                        Text {
+                            text: useCasesDialog.shown ? ("실행 " + useCasesDialog.shown.before + "초 전 ~ " + useCasesDialog.shown.after + "초 후") : ""
+                            font.pixelSize: 12
+                            color: window.muted
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A short notice (dashboard.notify): something the person has to know that is not worth a place in the window -
+    // a finished learning round that changed something. Goes away by itself; a click closes it.
+    Popup {
+        id: toastPopup
+        objectName: "toast"
+        x: Math.round((window.width - width) / 2)
+        y: window.height - height - 36
+        padding: 14
+        modal: false
+        focus: false
+        closePolicy: Popup.NoAutoClose
+        background: Rectangle { radius: 10; color: "#112331"; opacity: 0.96 }
+        contentItem: Text {
+            objectName: "toastText"
+            text: (dashboard.toast && dashboard.toast.text) || ""
+            color: "white"
+            font.pixelSize: 13
+            wrapMode: Text.Wrap
+            width: Math.min(620, window.width - 120)
+            MouseArea { anchors.fill: parent; onClicked: toastPopup.close() }
+        }
+        Timer { id: toastTimer; interval: 9000; onTriggered: toastPopup.close() }
+        Connections {
+            target: dashboard
+            function onToastChanged() {
+                if (((dashboard.toast && dashboard.toast.text) || "") !== "") { toastPopup.open(); toastTimer.restart() }
+            }
+        }
+    }
+
     // Connect gestures in words (AI): its own window, opened from the top bar (was the 5-4 sub-tab of the bindings)
     Dialog {
         id: llmDialog
         objectName: "llmDialog"
         anchors.centerIn: parent
-        width: Math.min(980, window.width - 48)
+        width: Math.min(1560, window.width - 48)
         height: window.height - 48
         modal: true
         title: "말·글로 연결 (AI)"
-        standardButtons: Dialog.Close
+        // 2026-11-11: [새 동작 등록] sits at the bottom beside Close - "done with this one, on to the next" (it was in
+        // the teaching row, among the buttons of the shape being taught)
+        footer: DialogButtonBox {
+            onRejected: llmDialog.close()
+            // (both buttons written out: with standardButtons + one more button only that one showed, 2026-11-11)
+            Button {
+                objectName: "llmClose"
+                text: "닫기"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+            Button {
+                objectName: "poseTeachNew"
+                readonly property var pose: dashboard.llmContext.pose || {}
+                readonly property var teach: dashboard.llmContext.teach || {}
+                text: "🆕 새 동작 등록"
+                font.bold: true
+                enabled: pose.state !== "countdown" && pose.state !== "holding" && teach.state !== "training"
+                DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
+                onClicked: {
+                    llmScroll.ScrollBar.vertical.position = 0      // the look is shown at the top
+                    dashboard.poseTeachNew()
+                }
+            }
+        }
         contentItem: Item {
                     // =========================================================================
                     // SUB-TAB 4: CONNECT GESTURES IN WORDS (LLM: Claude / OpenAI / Gemini / OpenRouter / Ollama)
@@ -135,7 +409,11 @@ ApplicationWindow {
                         readonly property var result: dashboard.llmResult
                         readonly property var proposals: result.proposals || []
                         ScrollView {
-                            anchors.fill: parent
+                            id: llmScroll
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.left: parent.left
+                            anchors.right: llmListPane.left
                             anchors.margins: 12
                             clip: true
                             contentWidth: availableWidth
@@ -149,95 +427,158 @@ ApplicationWindow {
                                     font.bold: true
                                     wrapMode: Text.Wrap
                                 }
-                                // 1. where the request goes
-                                RowLayout {
+                                // 1. where the request goes - a card that folds to one line once it is set up (2026-11-11: the
+                                // connection rows took the top of the window and pushed the gesture part below the fold)
+                                Rectangle {
+                                    id: llmSetup
+                                    objectName: "llmSetup"
                                     Layout.fillWidth: true
-                                    spacing: 6
-                                    FormLabel { text: "AI 연결" }
-                                    Flow {
-                                        Layout.fillWidth: true
-                                        spacing: 6
-                                        Repeater {
-                                            model: dashboard.llmProviders
-                                            delegate: CompactButton {
-                                                required property var modelData
-                                                text: modelData.label
-                                                accent: llmPanel.cfg.provider === modelData.id
-                                                enabled: !dashboard.llmBusy
-                                                onClicked: dashboard.setLlmProvider(modelData.id)
+                                    radius: 8
+                                    color: "#FFFFFF"
+                                    border.color: window.line
+                                    property bool userOpen: false
+                                    // no model or no key yet: always open, there is nothing to fold
+                                    readonly property bool ready: (llmPanel.cfg.modelShown || "") !== "" && !!llmPanel.cfg.hasKey
+                                    readonly property bool open: userOpen || !ready
+                                    readonly property string providerLabel: {
+                                        var ps = dashboard.llmProviders
+                                        for (var i = 0; i < ps.length; i++) if (ps[i].id === llmPanel.cfg.provider) return ps[i].label
+                                        return llmPanel.cfg.provider || ""
+                                    }
+                                    implicitHeight: setupCol.implicitHeight + 16
+                                    ColumnLayout {
+                                        id: setupCol
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.margins: 8
+                                        spacing: 8
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Text {
+                                                text: llmSetup.open ? "▾" : "▸"
+                                                font.pixelSize: 14
+                                                color: window.muted
+                                            }
+                                            Text {
+                                                objectName: "llmSetupSummary"
+                                                Layout.fillWidth: true
+                                                text: "AI 연결  ·  " + llmSetup.providerLabel
+                                                      + "  ·  " + ((llmPanel.cfg.modelShown || "") !== "" ? llmPanel.cfg.modelShown : "모델 미정")
+                                                      + (llmPanel.cfg.needsKey ? "  ·  " + (llmPanel.cfg.hasKey ? "🔑 " + llmPanel.cfg.keySource : "⚠ 키 없음") : "")
+                                                font.pixelSize: 13
+                                                font.bold: true
+                                                color: llmSetup.ready ? window.ink : "#B3261E"
+                                                elide: Text.ElideRight
+                                            }
+                                            CompactButton {
+                                                objectName: "llmSetupToggle"
+                                                visible: llmSetup.ready
+                                                text: llmSetup.open ? "접기" : "연결 설정"
+                                                onClicked: llmSetup.userOpen = !llmSetup.userOpen
+                                            }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            visible: llmSetup.open
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+                                                FormLabel { text: "AI 연결" }
+                                                Flow {
+                                                    Layout.fillWidth: true
+                                                    spacing: 6
+                                                    Repeater {
+                                                        model: dashboard.llmProviders
+                                                        delegate: CompactButton {
+                                                            required property var modelData
+                                                            text: modelData.label
+                                                            accent: llmPanel.cfg.provider === modelData.id
+                                                            enabled: !dashboard.llmBusy
+                                                            onClicked: dashboard.setLlmProvider(modelData.id)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            TextLabel {
+                                                Layout.fillWidth: true
+                                                Layout.leftMargin: 90
+                                                text: {
+                                                    var ps = dashboard.llmProviders
+                                                    for (var i = 0; i < ps.length; i++) if (ps[i].id === llmPanel.cfg.provider) return ps[i].note
+                                                    return ""
+                                                }
+                                                color: window.muted
+                                                font.pixelSize: 12
+                                                wrapMode: Text.Wrap
+                                            }
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+                                                FormLabel { text: "모델" }
+                                                TextField {
+                                                    id: llmModelField
+                                                    Layout.fillWidth: true
+                                                    text: llmPanel.cfg.model || ""
+                                                    placeholderText: llmPanel.cfg.modelShown ? ("기본: " + llmPanel.cfg.modelShown) : "모델 이름 (목록에서 고르거나 직접 입력)"
+                                                    font.pixelSize: 13
+                                                    onEditingFinished: dashboard.setLlmModel(text)
+                                                }
+                                                StyledComboBox {
+                                                    visible: dashboard.llmModels.length > 0
+                                                    Layout.preferredWidth: 240
+                                                    model: dashboard.llmModels
+                                                    onActivated: function (i) { dashboard.setLlmModel(dashboard.llmModels[i]); llmModelField.text = dashboard.llmModels[i] }
+                                                }
+                                                CompactButton {
+                                                    text: "모델 목록 불러오기"
+                                                    enabled: !dashboard.llmBusy
+                                                    onClicked: dashboard.loadLlmModels()
+                                                }
+                                            }
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+                                                visible: llmPanel.cfg.needsKey
+                                                FormLabel { text: "API 키" }
+                                                TextField {
+                                                    id: llmKeyField
+                                                    Layout.fillWidth: true
+                                                    echoMode: TextInput.Password
+                                                    placeholderText: llmPanel.cfg.keySource + " · 새 키를 붙여 넣고 [키 저장]"
+                                                    font.pixelSize: 13
+                                                }
+                                                CompactButton {
+                                                    text: "키 저장"
+                                                    enabled: llmKeyField.text.length > 0
+                                                    onClicked: { dashboard.saveLlmKey(llmKeyField.text); llmKeyField.text = "" }
+                                                }
+                                                CompactButton {
+                                                    text: "키 지우기"
+                                                    visible: llmPanel.cfg.keySaved
+                                                    onClicked: dashboard.clearLlmKey()
+                                                }
+                                            }
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+                                                FormLabel { text: "주소 (고급)" }
+                                                TextField {
+                                                    Layout.fillWidth: true
+                                                    text: llmPanel.cfg.baseUrl || ""
+                                                    placeholderText: llmPanel.cfg.defaultBase ? ("기본: " + llmPanel.cfg.defaultBase) : "기본 주소 사용"
+                                                    font.pixelSize: 12
+                                                    onEditingFinished: dashboard.setLlmBaseUrl(text)
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                TextLabel {
-                                    Layout.fillWidth: true
-                                    Layout.leftMargin: 90
-                                    text: {
-                                        var ps = dashboard.llmProviders
-                                        for (var i = 0; i < ps.length; i++) if (ps[i].id === llmPanel.cfg.provider) return ps[i].note
-                                        return ""
-                                    }
-                                    color: window.muted
-                                    font.pixelSize: 12
-                                    wrapMode: Text.Wrap
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    FormLabel { text: "모델" }
-                                    TextField {
-                                        id: llmModelField
-                                        Layout.fillWidth: true
-                                        text: llmPanel.cfg.model || ""
-                                        placeholderText: llmPanel.cfg.modelShown ? ("기본: " + llmPanel.cfg.modelShown) : "모델 이름 (목록에서 고르거나 직접 입력)"
-                                        font.pixelSize: 13
-                                        onEditingFinished: dashboard.setLlmModel(text)
-                                    }
-                                    StyledComboBox {
-                                        visible: dashboard.llmModels.length > 0
-                                        Layout.preferredWidth: 240
-                                        model: dashboard.llmModels
-                                        onActivated: function (i) { dashboard.setLlmModel(dashboard.llmModels[i]); llmModelField.text = dashboard.llmModels[i] }
-                                    }
-                                    CompactButton {
-                                        text: "모델 목록 불러오기"
-                                        enabled: !dashboard.llmBusy
-                                        onClicked: dashboard.loadLlmModels()
-                                    }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    visible: llmPanel.cfg.needsKey
-                                    FormLabel { text: "API 키" }
-                                    TextField {
-                                        id: llmKeyField
-                                        Layout.fillWidth: true
-                                        echoMode: TextInput.Password
-                                        placeholderText: llmPanel.cfg.keySource + " · 새 키를 붙여 넣고 [키 저장]"
-                                        font.pixelSize: 13
-                                    }
-                                    CompactButton {
-                                        text: "키 저장"
-                                        enabled: llmKeyField.text.length > 0
-                                        onClicked: { dashboard.saveLlmKey(llmKeyField.text); llmKeyField.text = "" }
-                                    }
-                                    CompactButton {
-                                        text: "키 지우기"
-                                        visible: llmPanel.cfg.keySaved
-                                        onClicked: dashboard.clearLlmKey()
-                                    }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    FormLabel { text: "주소 (고급)" }
-                                    TextField {
-                                        Layout.fillWidth: true
-                                        text: llmPanel.cfg.baseUrl || ""
-                                        placeholderText: llmPanel.cfg.defaultBase ? ("기본: " + llmPanel.cfg.defaultBase) : "기본 주소 사용"
-                                        font.pixelSize: 12
-                                        onEditingFinished: dashboard.setLlmBaseUrl(text)
+                                    TapHandler {
+                                        // a tap anywhere on the folded card opens it
+                                        enabled: llmSetup.ready && !llmSetup.open
+                                        onTapped: llmSetup.userOpen = true
                                     }
                                 }
                                 Divider {}
@@ -261,17 +602,78 @@ ApplicationWindow {
                                         enabled: poseRow.pose.state !== "countdown" && poseRow.pose.state !== "holding"
                                         onClicked: dashboard.startPoseProbe()
                                     }
+                                    // 2026-11-11: what was looked at (the user's own hand, joints drawn) -> what it was told as
+                                    Rectangle {
+                                        objectName: "poseProbeShot"
+                                        visible: poseRow.pose.state === "done" && (dashboard.llmContext.shot || "") !== ""
+                                        Layout.preferredWidth: 112
+                                        Layout.preferredHeight: 112
+                                        radius: 6
+                                        clip: true
+                                        color: "#111"
+                                        // the look replayed like a GIF (memory only, src/pose_probe.PoseProbe.clip); one
+                                        // picture when there is a single frame
+                                        id: poseShot
+                                        property int frame: 0
+                                        readonly property int frames: dashboard.llmContext.shotFrames || 0
+                                        onVisibleChanged: frame = 0
+                                        onFramesChanged: frame = 0
+                                        Timer {
+                                            interval: 66
+                                            repeat: true
+                                            running: poseShot.visible && poseShot.frames > 1
+                                            onTriggered: poseShot.frame = (poseShot.frame + 1) % poseShot.frames
+                                        }
+                                        Image {
+                                            anchors.fill: parent
+                                            source: !poseShot.visible ? ""
+                                                  : poseShot.frames > 1 ? (dashboard.llmContext.shot + "/" + poseShot.frame)
+                                                  : dashboard.llmContext.shot
+                                            fillMode: Image.PreserveAspectFit
+                                            cache: false
+                                            smooth: true
+                                        }
+                                    }
+                                    // 2026-11-11: the hand emoji that stood here (🖐 ✌ …) is gone - often wrong, and the photo beside it shows the hand anyway.
+                                    // The arrow of a movement / turn stays: the photo does not show which way the hand went.
+                                    Text {
+                                        objectName: "poseProbeArrow"
+                                        readonly property var arrows: ({"left": "←", "right": "→", "up": "↑", "down": "↓",
+                                            "diag_up_left": "↖", "diag_up_right": "↗", "diag_down_left": "↙", "diag_down_right": "↘",
+                                            "rotate_cw": "↻", "rotate_ccw": "↺"})
+                                        visible: poseRow.pose.state === "done" && text !== ""
+                                        text: poseRow.pose.kind === "motion" ? (arrows[poseRow.pose.direction] || "")
+                                            : poseRow.pose.kind === "rotate" ? (arrows[poseRow.pose.rotate] || "") : ""
+                                        font.pixelSize: 32
+                                        color: Theme.Studio.mintDark
+                                    }
                                     TextLabel {
                                         Layout.fillWidth: true
                                         wrapMode: Text.Wrap
                                         font.pixelSize: 13
                                         // an approximate answer (the nearest known shape / movement) says so
                                         readonly property string approxText: poseRow.pose.approx ? " · 가장 가까운 것으로 봤어요" : ""
-                                        color: poseRow.pose.state === "failed" ? Theme.Studio.danger
+                                        readonly property var teach: dashboard.llmContext.teach || {}
+                                        color: poseRow.pose.state === "failed" || (poseRow.pose.unknown && !teach.adding) ? Theme.Studio.danger
                                              : poseRow.pose.state === "done" ? Theme.Studio.mintDark : window.muted
                                         font.bold: poseRow.pose.state === "countdown" || poseRow.pose.state === "done"
-                                        text: poseRow.pose.state === "countdown" ? ("손을 준비하세요… " + poseRow.pose.seconds)
+                                        text: poseRow.pose.state === "countdown"
+                                                ? ((teach.adding ? "'" + teach.focusName + "' 모양으로 " : "") + "손을 준비하세요… " + poseRow.pose.seconds)
+                                            // [한 번 더 보여주기]: this look is one more example of the shape being taught
+                                            : poseRow.pose.state === "done" && teach.adding ? ("'" + teach.focusName + "' 견본으로 추가하는 중…")
+                                            : poseRow.pose.state === "done" && !poseRow.pose.kind && poseRow.pose.taught
+                                                ? ("✓ '" + poseRow.pose.name + "' 견본으로 저장했어요"
+                                                   + (String(poseRow.pose.posture).indexOf("custom_") === 0 ? " · [학습] → [적용] 뒤부터 앱이 알아봐요" : ""))
                                             : poseRow.pose.state === "holding" ? ("그대로 유지! " + Math.round(poseRow.pose.progress * 100) + "%")
+                                            // [새 동작 등록]: whatever the app took the look for, it is to be named
+                                            : poseRow.pose.state === "done" && !poseRow.pose.kind && teach.naming
+                                                ? ((poseRow.pose.unknown ? "목록에 없는 손 모양이에요."
+                                                    : "앱은 '" + poseRow.pose.name + "'(으)로 봤어요. 다른 모양이면")
+                                                   + " 아래에 새 이름을 지어 저장해 주세요.")
+                                            // 2026-11-11: no listed shape / movement is said so, not forced into the nearest one
+                                            : poseRow.pose.state === "done" && poseRow.pose.kind === "unknown_move" ? poseRow.pose.message
+                                            : poseRow.pose.state === "done" && poseRow.pose.unknown
+                                                ? "목록에 없는 손 모양이에요. 아래에 이름을 지어 새 손 모양으로 저장해 주세요."
                                             : poseRow.pose.state === "done" && poseRow.pose.kind === "rotate"
                                                 ? ("이 움직임 = " + poseRow.pose.name + " 모양으로 " + poseRow.pose.rotate_name + approxText)
                                             : poseRow.pose.state === "done" && poseRow.pose.kind === "drawn"
@@ -280,7 +682,7 @@ ApplicationWindow {
                                             : poseRow.pose.state === "done" && poseRow.pose.kind === "motion"
                                                 ? ("이 움직임 = " + poseRow.pose.name + " 모양으로 " + poseRow.pose.direction_name + approxText)
                                             : poseRow.pose.state === "done" ? ("이 손모양 = " + poseRow.pose.name + approxText
-                                                                               + (poseRow.pose.gesture_key ? "" : " · 새 동작으로 등록됨"))
+                                                                               + (poseRow.pose.gesture_key ? "" : " · 아직 연결 없음 (연결하면 새 동작이 돼요)"))
                                             : poseRow.pose.state === "failed" ? poseRow.pose.message
                                             : "3초 뒤 2초 동안 카메라로 봅니다 · 가만히 = 손 모양, 한 모양으로 한 방향 움직이기 = 움직임"
                                     }
@@ -288,6 +690,112 @@ ApplicationWindow {
                                         visible: poseRow.pose.state === "done" || poseRow.pose.state === "failed"
                                         text: "지우기"
                                         onClicked: dashboard.clearPoseProbe()
+                                    }
+                                }
+                                // 2026-11-11: teach the shown hand shape to a small MLP (src/posture_teach.py)
+                                RowLayout {
+                                    id: teachSaveRow
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    readonly property var teach: dashboard.llmContext.teach || {}
+                                    visible: poseRow.pose.state === "done" && !poseRow.pose.kind && !poseRow.pose.taught && !teach.adding
+                                    // the shape being taught: one press adds this look to it, whatever the rules called it
+                                    ActionButton {
+                                        objectName: "poseTeachAddFocus"
+                                        visible: !poseRow.pose.taught && (teachSaveRow.teach.focus || "") !== ""
+                                        text: "➕ '" + (teachSaveRow.teach.focusName || "") + "' 견본으로 추가"
+                                        onClicked: dashboard.poseTeachSave(teachSaveRow.teach.focus)
+                                    }
+                                    // a look that is no listed shape (or a listed one that should be its own): name it
+                                    TextField {
+                                        id: teachNewName
+                                        objectName: "poseTeachNewName"
+                                        Layout.preferredWidth: 130
+                                        visible: !poseRow.pose.taught
+                                        placeholderText: "새 손 모양 이름"
+                                        onVisibleChanged: if (visible && teachSaveRow.teach.naming) forceActiveFocus()
+                                        onAccepted: if (text.trim() !== "") { dashboard.poseTeachSaveNew(text); text = "" }
+                                        maximumLength: 20
+                                        font.pixelSize: 12
+                                    }
+                                    CompactButton {
+                                        objectName: "poseTeachSaveNew"
+                                        visible: !poseRow.pose.taught
+                                        text: "새 손 모양으로 저장"
+                                        enabled: teachNewName.text.trim() !== ""
+                                        onClicked: { dashboard.poseTeachSaveNew(teachNewName.text); teachNewName.text = "" }
+                                    }
+                                    TextLabel {
+                                        visible: poseRow.pose.taught || (teachSaveRow.teach.focus || "") === ""
+                                        text: poseRow.pose.taught ? "✓ 견본 저장됨" : "또는 목록의 이 모양:"
+                                        font.pixelSize: 12
+                                        color: poseRow.pose.taught ? Theme.Studio.mintDark : window.muted
+                                    }
+                                    StyledComboBox {
+                                        id: teachChoice
+                                        objectName: "poseTeachChoice"
+                                        Layout.preferredWidth: 190
+                                        model: dashboard.postureChoices
+                                        textRole: "name"
+                                        currentIndex: {
+                                            var c = dashboard.postureChoices
+                                            for (var i = 0; i < c.length; i++) if (c[i].key === poseRow.pose.posture) return i
+                                            return poseRow.pose.unknown ? -1 : 0
+                                        }
+                                    }
+                                    CompactButton {
+                                        objectName: "poseTeachSave"
+                                        text: "이 이름으로 견본 저장"
+                                        enabled: !poseRow.pose.taught && teachChoice.currentIndex >= 0
+                                        onClicked: dashboard.poseTeachSave(dashboard.postureChoices[teachChoice.currentIndex].key)
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    readonly property var teach: dashboard.llmContext.teach || {}
+                                    id: teachRow
+                                    visible: teach.hasExamples || teach.active !== "" || teach.text !== ""
+                                    CompactButton {
+                                        objectName: "poseTeachTrain"
+                                        text: teachRow.teach.state === "training" ? "학습 중…"
+                                            : teachRow.teach.focus ? ("🧠 '" + teachRow.teach.focusName + "' 학습") : "🧠 가르친 손 모양 학습 (MLP)"
+                                        enabled: teachRow.teach.hasExamples && teachRow.teach.state !== "training"
+                                        onClicked: dashboard.poseTeachTrain()
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.Wrap
+                                        font.pixelSize: 12
+                                        color: teachRow.teach.state === "error" ? Theme.Studio.danger
+                                             : teachRow.teach.state === "ready" ? (teachRow.teach.canApply ? Theme.Studio.mintDark : Theme.Studio.danger)
+                                             : window.muted
+                                        objectName: "poseTeachGuide"
+                                        // the shape being taught now, step by step - nothing about the other taught shapes
+                                        text: [teachRow.teach.steps || "", teachRow.teach.text || "", teachRow.teach.summary || ""]
+                                              .filter(function (t) { return t !== "" }).join("\n")
+                                    }
+                                    ActionButton {
+                                        objectName: "poseTeachAgain"
+                                        visible: (teachRow.teach.focus || "") !== "" && teachRow.teach.state !== "training"
+                                                 && poseRow.pose.state !== "countdown" && poseRow.pose.state !== "holding"
+                                        text: "✋ 한 번 더 보여주기"
+                                        onClicked: dashboard.poseTeachAgain()
+                                    }
+                                    CompactButton {
+                                        visible: teachRow.teach.state === "ready" && teachRow.teach.canApply
+                                        text: "적용"
+                                        onClicked: dashboard.poseTeachApply()
+                                    }
+                                    CompactButton {
+                                        visible: teachRow.teach.state === "ready"
+                                        text: "버리기"
+                                        onClicked: dashboard.poseTeachDiscard()
+                                    }
+                                    CompactButton {
+                                        visible: teachRow.teach.active !== "" && teachRow.teach.state !== "ready"
+                                        text: "끄기"
+                                        onClicked: dashboard.poseTeachOff()
                                     }
                                 }
                                 RowLayout {
@@ -470,8 +978,73 @@ ApplicationWindow {
                                     ActionButton { text: "버리기"; onClicked: dashboard.clearLlmResult() }
                                 }
 
-                                // 4. what the AI connected so far (src/llm_binding.History): readable, newest first, with undo
-                                Divider { Layout.topMargin: 6 }
+                                // the hand shapes the user named (src/custom_postures.py): a wrong name can be deleted
+                                Divider { Layout.topMargin: 6; visible: dashboard.customPostures.length > 0 }
+                                SectionLabel {
+                                    visible: dashboard.customPostures.length > 0
+                                    text: "내가 이름 지은 손 모양 (" + dashboard.customPostures.length + ")"
+                                }
+                                Repeater {
+                                    model: dashboard.customPostures
+                                    delegate: Rectangle {
+                                        id: customCard
+                                        objectName: "customPostureCard"
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        implicitHeight: customRow.implicitHeight + 16
+                                        radius: 8
+                                        color: Theme.Studio.paper
+                                        border.color: window.line
+                                        RowLayout {
+                                            id: customRow
+                                            anchors.fill: parent
+                                            anchors.margins: 8
+                                            spacing: 8
+                                            TextLabel { text: customCard.modelData.name; font.bold: true }
+                                            TextLabel {
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.Wrap
+                                                color: window.muted
+                                                font.pixelSize: 12
+                                                text: "견본 " + customCard.modelData.examples + "개 · "
+                                                      + (customCard.modelData.uses ? "연결한 동작: " + customCard.modelData.usesText : "연결한 동작 없음")
+                                            }
+                                            CompactButton {
+                                                text: "삭제"
+                                                danger: true
+                                                onClicked: confirmDialog.ask("손 모양 삭제",
+                                                    "'" + customCard.modelData.name + "' 손 모양을 지웁니다. 견본 " + customCard.modelData.examples + "개"
+                                                    + (customCard.modelData.uses ? "와 이 모양에 연결한 동작(" + customCard.modelData.usesText + ")" : "")
+                                                    + "도 함께 지워지고 되돌릴 수 없어요.",
+                                                    "삭제", function () { dashboard.removeCustomPosture(customCard.modelData.key) })
+                                            }
+                                        }
+                                    }
+                                }
+
+                            }
+                        }
+                        // 2026-11-11: the AI connections in their own column on the right (the window had room to spare)
+                        Rectangle {
+                            id: llmListPane
+                            objectName: "llmListPane"
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.right: parent.right
+                            anchors.margins: 12
+                            width: Math.max(340, Math.min(560, parent.width * 0.4))
+                            radius: 8
+                            color: "#FFFFFF"
+                            border.color: window.line
+                            ScrollView {
+                                id: llmListScroll
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                clip: true
+                                contentWidth: availableWidth
+                                ColumnLayout {
+                                    width: llmListScroll.availableWidth
+                                    spacing: 8
                                 RowLayout {
                                     Layout.fillWidth: true
                                     SectionLabel { text: "AI로 연결한 명령 (" + dashboard.llmHistory.length + ")" }
@@ -480,7 +1053,7 @@ ApplicationWindow {
                                 }
                                 TextLabel {
                                     visible: dashboard.llmHistory.length === 0
-                                    text: "아직 없어요. 위에서 제안을 받아 적용하면 여기에 쌓여요."
+                                    text: "아직 없어요. 왼쪽에서 제안을 받아 적용하면 여기에 쌓여요."
                                     color: window.muted
                                     font.pixelSize: 12
                                 }
@@ -488,17 +1061,127 @@ ApplicationWindow {
                                     model: dashboard.llmHistory
                                     delegate: Rectangle {
                                         id: historyCard
+                                        objectName: "llmHistoryCard"
                                         required property var modelData
+                                        // 2026-11-11: the command and the hold time can be changed later by hand
+                                        property bool editing: false
+                                        property string editType: "hotkey"
+                                        property string editValue: ""
+                                        property real editHold: -1
+                                        readonly property bool hasHold: modelData.hold_seconds !== undefined
+                                        function startEdit() {
+                                            editType = String(modelData.action_type || "hotkey")
+                                            editValue = editType === "macro" ? "" : String(modelData.action_value || "")
+                                            if (editType === "macro") editType = "hotkey"     // a macro is re-made through the AI
+                                            editHold = hasHold ? Number(modelData.hold_seconds) : -1
+                                            editing = true
+                                        }
                                         visible: modelData.current || historyAll.checked
                                         Layout.fillWidth: true
-                                        implicitHeight: visible ? historyCol.implicitHeight + 16 : 0
+                                        implicitHeight: visible ? Math.max(historyCol.implicitHeight, historyButtons.implicitHeight,
+                                                                           handPic.visible ? handPic.implicitHeight : 0) + 16 : 0
                                         radius: 8
                                         color: modelData.current ? Theme.Studio.paper : Theme.Studio.surface
                                         border.color: window.line
+                                        // 2026-11-11: which hand this command was registered with, from that gesture's own saved
+                                        // joints (src/gesture_preview.py), looping like a short clip
+                                        readonly property var preview: dashboard.gesturePreview(String(modelData.gesture_key || ""))
                                         RowLayout {
-                                            anchors.fill: parent
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
                                             anchors.margins: 8
                                             spacing: 8
+                                            ColumnLayout {
+                                                id: handPic
+                                                objectName: "llmHistoryHand"
+                                                readonly property var frames: historyCard.preview.frames || []
+                                                visible: frames.length > 0
+                                                Layout.alignment: Qt.AlignTop
+                                                Layout.preferredWidth: 96
+                                                spacing: 2
+                                                Rectangle {
+                                                    Layout.preferredWidth: 96
+                                                    Layout.preferredHeight: 96
+                                                    radius: 8
+                                                    color: "#0E1B26"
+                                                    Canvas {
+                                                        id: handCanvas
+                                                        anchors.fill: parent
+                                                        property int frame: 0
+                                                        onFrameChanged: requestPaint()
+                                                        onAvailableChanged: if (available) requestPaint()
+                                                        Timer {
+                                                            interval: 1000 / Math.max(1, historyCard.preview.fps || 15)
+                                                            repeat: true
+                                                            running: handPic.visible && historyCard.visible && handPic.frames.length > 1
+                                                            onTriggered: handCanvas.frame = (handCanvas.frame + 1) % handPic.frames.length
+                                                        }
+                                                        onPaint: {
+                                                            if (!available) return
+                                                            let c = getContext("2d"); c.reset()
+                                                            let fs = handPic.frames
+                                                            if (!fs.length) return
+                                                            let p = fs[Math.min(frame, fs.length - 1)]
+                                                            let W = width, H = height
+                                                            let chains = [[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20],[5,9,13,17]]
+                                                            c.lineCap = "round"; c.lineJoin = "round"
+                                                            for (let pass = 0; pass < 2; pass++) {
+                                                                c.strokeStyle = pass === 0 ? "rgba(0,0,0,0.55)" : Theme.Studio.mint
+                                                                c.lineWidth = pass === 0 ? 4 : 2
+                                                                for (let chain of chains) {
+                                                                    c.beginPath()
+                                                                    for (let i = 0; i < chain.length; i++) {
+                                                                        let v = p[chain[i]]
+                                                                        if (i === 0) c.moveTo(v[0] * W, v[1] * H); else c.lineTo(v[0] * W, v[1] * H)
+                                                                    }
+                                                                    c.stroke()
+                                                                }
+                                                            }
+                                                            c.fillStyle = "#FFFFFF"
+                                                            for (let i of [4, 8, 12, 16, 20]) {
+                                                                c.beginPath(); c.arc(p[i][0] * W, p[i][1] * H, 2.4, 0, Math.PI * 2); c.fill()
+                                                            }
+                                                            // the movement: an arrow for a direction, a word for the rest
+                                                            let m = historyCard.preview.move || ""
+                                                            let dirs = {"left": [-1, 0], "right": [1, 0], "up": [0, -1], "down": [0, 1],
+                                                                        "diag_up_left": [-.7, -.7], "diag_up_right": [.7, -.7],
+                                                                        "diag_down_left": [-.7, .7], "diag_down_right": [.7, .7]}
+                                                            if (dirs[m]) {
+                                                                let d = dirs[m], cx = W - 18, cy = 18, r = 11
+                                                                let x0 = cx - d[0] * r, y0 = cy - d[1] * r, x1 = cx + d[0] * r, y1 = cy + d[1] * r
+                                                                c.strokeStyle = "#F2B544"; c.fillStyle = "#F2B544"; c.lineWidth = 2.5
+                                                                c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1); c.stroke()
+                                                                let a = Math.atan2(y1 - y0, x1 - x0)
+                                                                c.beginPath(); c.moveTo(x1, y1)
+                                                                c.lineTo(x1 - 7 * Math.cos(a - .5), y1 - 7 * Math.sin(a - .5))
+                                                                c.lineTo(x1 - 7 * Math.cos(a + .5), y1 - 7 * Math.sin(a + .5))
+                                                                c.closePath(); c.fill()
+                                                            } else if (m) {
+                                                                let label = m === "double_pinch" ? "두 번 집기" : m.indexOf("draw_") === 0 ? "그리기"
+                                                                          : m === "sequence" ? "" : ""
+                                                                if (m === "sequence") {
+                                                                    let st = historyCard.preview.steps || [], n = 0
+                                                                    for (let i = 0; i < st.length; i++) if (frame >= st[i]) n = i + 1
+                                                                    label = n + " / " + st.length
+                                                                }
+                                                                if (label) {
+                                                                    c.font = "bold 11px sans-serif"; c.fillStyle = "#F2B544"
+                                                                    c.fillText(label, 6, 14)
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    Layout.preferredWidth: 96
+                                                    text: historyCard.preview.source || ""
+                                                    font.pixelSize: 10
+                                                    color: window.muted
+                                                    wrapMode: Text.Wrap
+                                                    horizontalAlignment: Text.AlignHCenter
+                                                }
+                                            }
                                             ColumnLayout {
                                                 id: historyCol
                                                 Layout.fillWidth: true
@@ -514,6 +1197,10 @@ ApplicationWindow {
                                                     Chip {
                                                         text: historyCard.modelData.current ? "적용 중" : "이후 바뀜"
                                                         warn: !historyCard.modelData.current
+                                                    }
+                                                    Chip {
+                                                        visible: historyCard.hasHold
+                                                        text: "유지 " + Number(historyCard.modelData.hold_seconds || 0).toFixed(1) + "초"
                                                     }
                                                     Item { Layout.fillWidth: true }
                                                 }
@@ -540,13 +1227,138 @@ ApplicationWindow {
                                                     Layout.fillWidth: true
                                                     visible: (historyCard.modelData.request || "") !== ""
                                                     text: "요청: " + historyCard.modelData.request + "  ·  " + historyCard.modelData.time
+                                                          + (historyCard.modelData.edited ? "  ·  직접 고침 " + historyCard.modelData.edited : "")
                                                     color: window.muted
                                                     font.pixelSize: 11
                                                     wrapMode: Text.Wrap
                                                 }
+                                                // ---- the editor: hold time (hold gestures) and command
+                                                ColumnLayout {
+                                                    objectName: "llmHistoryEditor"
+                                                    visible: historyCard.editing
+                                                    Layout.fillWidth: true
+                                                    Layout.topMargin: 6
+                                                    spacing: 6
+                                                    RowLayout {
+                                                        visible: historyCard.hasHold
+                                                        Layout.fillWidth: true
+                                                        spacing: 6
+                                                        TextLabel { text: "발동까지 유지"; font.pixelSize: 12; font.bold: true }
+                                                        Slider {
+                                                            id: holdSlider
+                                                            objectName: "llmHoldSlider"
+                                                            Layout.fillWidth: true
+                                                            from: historyCard.modelData.hold_min || 0.4
+                                                            to: historyCard.modelData.hold_max || 3.0
+                                                            stepSize: 0.1
+                                                            snapMode: Slider.SnapAlways
+                                                            value: historyCard.editHold
+                                                            onMoved: historyCard.editHold = Math.round(value * 10) / 10
+                                                        }
+                                                        TextLabel {
+                                                            text: historyCard.editHold.toFixed(1) + "초"
+                                                                  + (historyCard.editHold <= (historyCard.modelData.hold_min || 0.4) + 0.001 ? " (최소)" : "")
+                                                            font.pixelSize: 12
+                                                        }
+                                                        CompactButton {
+                                                            text: "최소로"
+                                                            enabled: historyCard.editHold > (historyCard.modelData.hold_min || 0.4) + 0.001
+                                                            onClicked: historyCard.editHold = historyCard.modelData.hold_min || 0.4
+                                                        }
+                                                    }
+                                                    TextLabel {
+                                                        visible: historyCard.hasHold
+                                                        Layout.fillWidth: true
+                                                        text: (historyCard.modelData.hold_min || 0.4) >= 1.0
+                                                              ? "평소 조작 중에도 자주 하는 손 모양이라 최소 1초예요. 잘못 실행되면 늘려 보세요."
+                                                              : "짧을수록 빨리 실행되고, 지나가던 손 모양에 잘못 실행되면 늘려 보세요."
+                                                        color: window.muted
+                                                        font.pixelSize: 11
+                                                        wrapMode: Text.Wrap
+                                                    }
+                                                    TextLabel { text: "실행할 명령"; font.pixelSize: 12; font.bold: true }
+                                                    Flow {
+                                                        Layout.fillWidth: true
+                                                        spacing: 6
+                                                        Repeater {
+                                                            model: [["hotkey", "단축키"], ["youtube_key", "유튜브·미디어 키"],
+                                                                    ["launch_app", "프로그램·폴더·웹사이트"], ["mouse_action", "마우스·시스템"]]
+                                                            delegate: CompactButton {
+                                                                required property var modelData
+                                                                text: modelData[1]
+                                                                accent: historyCard.editType === modelData[0]
+                                                                onClicked: {
+                                                                    if (historyCard.editType !== modelData[0]) historyCard.editValue = ""
+                                                                    historyCard.editType = modelData[0]
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    TextLabel {
+                                                        visible: historyCard.modelData.action_type === "macro"
+                                                        Layout.fillWidth: true
+                                                        text: "지금은 여러 단계(매크로)예요. 여기서 고르면 한 가지 명령으로 바뀌어요. 단계를 바꾸려면 AI에게 다시 부탁해 주세요."
+                                                        color: window.muted
+                                                        font.pixelSize: 11
+                                                        wrapMode: Text.Wrap
+                                                    }
+                                                    TextField {
+                                                        objectName: "llmEditValue"
+                                                        visible: historyCard.editType !== "mouse_action"
+                                                        Layout.fillWidth: true
+                                                        text: historyCard.editValue
+                                                        placeholderText: historyCard.editType === "hotkey" ? "예: ctrl+shift+t, win+d, f5"
+                                                                       : historyCard.editType === "youtube_key" ? "예: k (재생/정지), f (전체 화면), m (음소거)"
+                                                                       : "예: chrome.exe --incognito https://www.youtube.com 또는 %USERPROFILE%\\Desktop\\폴더"
+                                                        font.pixelSize: 13
+                                                        onTextEdited: historyCard.editValue = text
+                                                    }
+                                                    StyledComboBox {
+                                                        visible: historyCard.editType === "mouse_action"
+                                                        Layout.fillWidth: true
+                                                        model: dashboard.mouseActionPresets
+                                                        textRole: "label"
+                                                        currentIndex: {
+                                                            var ps = dashboard.mouseActionPresets
+                                                            for (var i = 0; i < ps.length; i++) if (ps[i].value === historyCard.editValue) return i
+                                                            return -1
+                                                        }
+                                                        onActivated: function (i) { historyCard.editValue = dashboard.mouseActionPresets[i].value }
+                                                    }
+                                                    RowLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 6
+                                                        Item { Layout.fillWidth: true }
+                                                        CompactButton {
+                                                            text: "취소"
+                                                            onClicked: historyCard.editing = false
+                                                        }
+                                                        CompactButton {
+                                                            objectName: "llmEditSave"
+                                                            text: "저장"
+                                                            accent: true
+                                                            enabled: historyCard.editValue.trim().length > 0
+                                                            onClicked: {
+                                                                if (dashboard.editLlmConnection(historyCard.modelData.index, historyCard.editType,
+                                                                                                historyCard.editValue.trim(), historyCard.hasHold ? historyCard.editHold : -1))
+                                                                    historyCard.editing = false
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                             ColumnLayout {
+                                                id: historyButtons
+                                                Layout.alignment: Qt.AlignTop
+                                                Layout.minimumWidth: implicitWidth      // as wide as its widest button (a fixed 118 px let the labels spill out, 2026-11-11)
                                                 spacing: 4
+                                                CompactButton {
+                                                    objectName: "llmEditButton"
+                                                    visible: historyCard.modelData.editable === true && !historyCard.editing
+                                                    Layout.fillWidth: true
+                                                    text: "수정"                       // the editor below says what can change (time, command)
+                                                    onClicked: historyCard.startEdit()
+                                                }
                                                 CompactButton {
                                                     // back one step: what was there just before this AI change
                                                     visible: historyCard.modelData.current && !historyCard.modelData.created
@@ -578,6 +1390,7 @@ ApplicationWindow {
                                             }
                                         }
                                     }
+                                }
                                 }
                             }
                         }
@@ -639,6 +1452,118 @@ ApplicationWindow {
                         onClicked: confirmDialog.ask("커서 방향 보정 초기화", "저장한 커서 방향 보정을 지웁니다.", "초기화",
                                                      function () { dashboard.resetPalmCalibration() })
                     }
+                }
+                Divider {}
+                // ---------------------------------------------------------------- pointing mode (src/point_mode.py)
+                SectionLabel { text: "포인팅 모드" }
+                ActionButton {
+                    objectName: "pointModeButton"
+                    Layout.fillWidth: true
+                    text: dashboard.pointModeOn ? "포인팅 모드 · 켜짐 (눌러서 끄기)" : "포인팅 모드 · 꺼짐 (눌러서 켜기)"
+                    accent: dashboard.pointModeOn
+                    onClicked: dashboard.setPointMode(!dashboard.pointModeOn)
+                }
+                TextLabel {
+                    Layout.fillWidth: true
+                    text: "따로 켤 필요 없이 손 모양만으로 바뀌어요. 엄지를 위로 펴고 검지를 비스듬히 펴면(권총 모양) 검지 끝으로 커서가 움직이고, "
+                          + "파일·폴더 위에서 1초 멈추면 더블클릭해요. 검지·중지를 붙여 함께 펴면(엄지도 위로) 같은 방법으로 우클릭. "
+                          + "파일·폴더가 아닌 곳에서는 멈춰도 클릭하지 않아요."
+                    color: window.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                // the details (2026-11-11 request: "포인팅 모드도 설정 안에서 상세 설정") - src/point_mode.SETTINGS
+                ColumnLayout {
+                    objectName: "pointSettingsBox"
+                    visible: dashboard.pointModeOn
+                    Layout.fillWidth: true
+                    spacing: 4
+                    readonly property var values: dashboard.pointSettings.values || {}
+                    readonly property var ranges: dashboard.pointSettings.ranges || {}
+                    id: pointBox
+                    Repeater {
+                        // [name, label, unit, step, how the value is written]
+                        model: [["dwell", "발동 대기 시간", "초", 0.1, 1],
+                                ["area_px", "손가락 끝 주변 파일 인정 범위", "px", 5, 0],
+                                ["tilt_min", "손가락 기울기 · 최소", "°", 5, 0],
+                                ["tilt_max", "손가락 기울기 · 최대", "°", 5, 0],
+                                ["enter_frames", "모드 진입 · 모양 유지 프레임", "프레임", 1, 0],
+                                ["leave", "손 모양을 놓쳐도 유지", "초", 0.05, 2],
+                                ["speed", "커서 속도 배율", "배", 0.1, 1]]
+                        delegate: RowLayout {
+                            required property var modelData
+                            readonly property string key: modelData[0]
+                            readonly property var range: pointBox.ranges[key] || [0, 0, 1]
+                            Layout.fillWidth: true
+                            spacing: 6
+                            TextLabel {
+                                text: modelData[1]
+                                font.pixelSize: 12
+                                Layout.preferredWidth: 190
+                            }
+                            Slider {
+                                objectName: "pointSetting_" + parent.key
+                                Layout.fillWidth: true
+                                from: parent.range[1]
+                                to: parent.range[2]
+                                stepSize: modelData[3]
+                                snapMode: Slider.SnapAlways
+                                value: pointBox.values[parent.key] !== undefined ? pointBox.values[parent.key] : parent.range[0]
+                                onPressedChanged: if (!pressed) dashboard.setPointSetting(parent.key, value)
+                            }
+                            TextLabel {
+                                Layout.preferredWidth: 70
+                                horizontalAlignment: Text.AlignRight
+                                text: Number(pointBox.values[parent.key] !== undefined ? pointBox.values[parent.key] : parent.range[0]).toFixed(modelData[4])
+                                      + " " + modelData[2]
+                                      + (Math.abs((pointBox.values[parent.key] || 0) - parent.range[0]) < 1e-6 ? " (기본)" : "")
+                                font.pixelSize: 12
+                                color: window.muted
+                            }
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        CheckBox {
+                            objectName: "pointSettingRight"
+                            text: "검지·중지를 붙인 모양으로 우클릭"
+                            checked: pointBox.values.right_click !== false
+                            onToggled: dashboard.setPointSetting("right_click", checked)
+                        }
+                        Item { Layout.fillWidth: true }
+                        CompactButton {
+                            objectName: "pointSettingsReset"
+                            text: "기본값으로"
+                            onClicked: dashboard.resetPointSettings()
+                        }
+                    }
+                    TextLabel {
+                        Layout.fillWidth: true
+                        text: "대기 시간이 짧을수록 빨리 열리지만 지나가다 열릴 수 있어요. 인정 범위가 넓을수록 손끝이 조금 빗나가도 파일이 잡혀요. "
+                              + "기울기 범위를 넓히면 손가락을 똑바로 세우거나 눕혀도 포인팅으로 읽어요 (다른 손 모양과 헷갈릴 수 있음). "
+                              + "진입 프레임을 늘리면 모드가 늦게 켜지지만 잘못 켜지는 일이 줄어요."
+                        color: window.muted
+                        font.pixelSize: 11
+                        wrapMode: Text.Wrap
+                    }
+                }                Divider {}
+                // ---------------------------------------------------------------- the words beside the drawn hand
+                SectionLabel { text: "신호 글자 표시" }
+                ActionButton {
+                    objectName: "signalTextButton"
+                    Layout.fillWidth: true
+                    text: dashboard.signalTextOn ? "가상 손 옆 신호 글자 · 켜짐 (눌러서 끄기)" : "가상 손 옆 신호 글자 · 꺼짐 (눌러서 켜기)"
+                    accent: dashboard.signalTextOn
+                    onClicked: dashboard.setSignalText(!dashboard.signalTextOn)
+                }
+                TextLabel {
+                    Layout.fillWidth: true
+                    text: "화면에 그린 손 옆에 '더블클릭', '우클릭' 같은 신호 이름을 글자로 보여 줘요. 마우스 제어가 꺼져 있을 때는 "
+                          + "아무것도 실행하지 않고, 손이 낸 신호(클릭·끌기, 연결한 동작과 그 명령, 포인팅 모양, 지금 보이는 손 모양)를 "
+                          + "초록 글자로 보여 줘서 손짓을 미리 확인할 수 있어요."
+                    color: window.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
                 }
                 Divider {}
                 // ---------------------------------------------------------------- drawing mode (src/draw_mode.py)
@@ -2124,7 +3049,147 @@ ApplicationWindow {
                 }
             }
         }
-        Item {
+        // learning while using (docs/use-log.md): what the app is doing by itself with the taught gestures' uses.
+        // 2026-11-11: one card per gesture (it was one long sentence), each with its own [사례 보기] = those collected uses
+        Rectangle {
+            objectName: "learnBanner"
+            visible: dashboard.learnItems.length > 0 || dashboard.learnAutoLine !== ""
+            Layout.fillWidth: true
+            Layout.leftMargin: 20
+            Layout.rightMargin: 20
+            Layout.topMargin: 12
+            implicitHeight: learnCol.implicitHeight + 20
+            radius: 10
+            color: "#F2FAF6"
+            border.color: "#BFE5D3"
+            ColumnLayout {
+                id: learnCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 10
+                spacing: 8
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text {
+                        text: "쓰면서 배우는 중"
+                        font.pixelSize: 13
+                        font.bold: true
+                        color: "#17603F"
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: dashboard.learnAutoLine !== "" ? "자동 학습 · " + dashboard.learnAutoLine
+                                                            : "가르친 동작을 쓸 때마다 앞뒤 손 움직임을 모아 TCN을 자동으로 학습해요"
+                        font.pixelSize: 12
+                        color: dashboard.learnAutoLine !== "" ? "#17603F" : window.muted
+                        elide: Text.ElideRight
+                    }
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Repeater {
+                        model: dashboard.learnItems
+                        delegate: Rectangle {
+                            id: learnCard
+                            objectName: "learnCard"
+                            required property var modelData
+                            readonly property bool counting: modelData.need > 0
+                            width: 300
+                            height: learnCardCol.implicitHeight + 16
+                            radius: 8
+                            color: "#FFFFFF"
+                            border.color: modelData.state === "ready" || modelData.state === "learned" ? "#6CCB9F" : "#D5E7DE"
+                            ColumnLayout {
+                                id: learnCardCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: 8
+                                spacing: 5
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: learnCard.modelData.name
+                                        font.pixelSize: 13
+                                        font.bold: true
+                                        color: window.ink
+                                        elide: Text.ElideRight
+                                    }
+                                    Rectangle {
+                                        radius: 9
+                                        implicitWidth: stateText.implicitWidth + 14
+                                        implicitHeight: 18
+                                        color: ({collecting: "#E8F0FE", ready: "#DCFCE7", waiting: "#FEF3C7", learned: "#D1FAE5"})[learnCard.modelData.state] || "#EEE"
+                                        Text {
+                                            id: stateText
+                                            anchors.centerIn: parent
+                                            text: ({collecting: "모으는 중", ready: "곧 학습", waiting: "다른 날 기다림", learned: "학습됨"})[learnCard.modelData.state] || ""
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            color: ({collecting: "#1D4ED8", ready: "#15803D", waiting: "#B45309", learned: "#047857"})[learnCard.modelData.state] || window.muted
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    visible: learnCard.counting
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        implicitHeight: 8
+                                        radius: 4
+                                        color: "#E5EFEA"
+                                        Rectangle {
+                                            width: parent.width * Math.min(1, learnCard.modelData.n / Math.max(1, learnCard.modelData.need))
+                                            height: parent.height
+                                            radius: 4
+                                            color: "#10B981"
+                                        }
+                                    }
+                                    Text {
+                                        text: learnCard.modelData.n + " / " + learnCard.modelData.need
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        color: window.ink
+                                    }
+                                }
+                                Text {
+                                    visible: !learnCard.counting && learnCard.modelData.n > 0
+                                    text: "사용 사례 " + learnCard.modelData.n + "개 저장됨"
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                    color: window.ink
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: learnCard.modelData.text + (learnCard.modelData.hint ? " · " + learnCard.modelData.hint : "")
+                                        font.pixelSize: 11
+                                        color: window.muted
+                                        wrapMode: Text.Wrap
+                                    }
+                                    CompactButton {
+                                        objectName: "learnCardCases"
+                                        text: "사례 보기"
+                                        onClicked: {
+                                            dashboard.openUseCases(learnCard.modelData.key, learnCard.modelData.name)
+                                            useCasesDialog.open()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }        Item {
             visible: dashboard.appWorking
             Layout.fillWidth: true
             Layout.leftMargin: 20
@@ -2197,51 +3262,9 @@ ApplicationWindow {
                                     text: "커서 기준점 · " + dashboard.anchorJointsLabel
                                     onClicked: anchorPicker.openWith(dashboard.anchorJoints)
                                 }
-                                ActionButton {
-                                    visible: !dashboard.pointerOnly && dashboard.onlineReady
-                                    Layout.fillWidth: true
-                                    Layout.minimumWidth: 0
-                                    implicitWidth: 0
-                                    enabled: !dashboard.palmCalibrating && !dashboard.trackingActive
-                                    text: "새 동작 등록"
-                                    onClicked: registerPopup.open()
-                                }
-
-                                // background learning from the person's corrections (online learning, phase 4)
-                                ColumnLayout {
-                                    visible: dashboard.onlineReady
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    Component.onCompleted: dashboard.refreshOnlineSummary()
-                                    TextLabel {
-                                        Layout.fillWidth: true
-                                        visible: dashboard.learnText !== ""
-                                        text: dashboard.learnText
-                                        color: window.muted
-                                        font.pixelSize: 12
-                                        wrapMode: Text.WordWrap
-                                    }
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 6
-                                        ActionButton {
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            implicitWidth: 0
-                                            enabled: !dashboard.learnRunning
-                                            text: dashboard.learnRunning ? "학습 중…" : "학습하기"
-                                            onClicked: dashboard.startOnlineLearning()
-                                        }
-                                        ActionButton {
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            implicitWidth: 0
-                                            enabled: !dashboard.learnRunning && dashboard.learnCanRollback
-                                            text: "되돌리기"
-                                            onClicked: confirmDialog.ask("이전 모델로 되돌리기", "마지막 학습 전의 모델로 돌아갑니다.", "되돌리기", function () { dashboard.rollbackOnlineModel() })
-                                        }
-                                    }
-                                }
+                                // (2026-11-11: [새 동작 등록], [학습하기]·[되돌리기] and their line were here - removed, the AI window and the
+                                // training center do the same; the summary they read is still loaded for the rest of the screen)
+                                Item { Component.onCompleted: dashboard.refreshOnlineSummary() }
                                 SectionLabel { visible: !dashboard.pointerOnly; text: "화면에 가상 손" }
                                 Segmented {
                                     visible: !dashboard.pointerOnly
@@ -2345,15 +3368,6 @@ ApplicationWindow {
                                         enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
                                         text: "기준점 · " + dashboard.anchorJointsLabel + "  · 바꾸기"
                                         onClicked: anchorPicker.openWith(dashboard.anchorJoints)
-                                    }
-                                    ActionButton {
-                                        visible: dashboard.onlineReady
-                                        Layout.fillWidth: true
-                                        Layout.minimumWidth: 0
-                                        implicitWidth: 0
-                                        enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                        text: "새 동작 등록"
-                                        onClicked: registerPopup.open()
                                     }
                                     SectionLabel { text: "손 주변 확대 (시험)" }
                                     Segmented {
@@ -3936,9 +4950,10 @@ ApplicationWindow {
                 }
 
                 function currentSimFilename() {
-                    if (dashboard.selectedSimFile !== "")
+                    // while the collected uses are shown ("use:..."), the recording buttons act on the recording the combo shows
+                    if (dashboard.selectedSimFile !== "" && dashboard.selectedSimFile.indexOf("use:") !== 0)
                         return dashboard.selectedSimFile
-                    if (trainingCenter.selectedSimFile !== "")
+                    if (trainingCenter.selectedSimFile !== "" && trainingCenter.selectedSimFile.indexOf("use:") !== 0)
                         return trainingCenter.selectedSimFile
                     var idx = simFileCombo.currentIndex
                     if (idx >= 0 && idx < dashboard.trainingFiles.length)
@@ -4048,6 +5063,71 @@ ApplicationWindow {
                         Chip {
                             visible: dashboard.simulationResult.file !== undefined && dashboard.simulationResult.file !== ""
                             text: dashboard.simulationResult.using_cleaned ? "현재: 보정본 재생" : "현재: 원본 재생"
+                        }
+                    }
+                }
+
+                // The uses the app collects by itself while a taught gesture is used (src/use_log.py), played like a recording
+                // (src/use_sim.py). Nothing here is a recording file: it is read from the use log and never trained from this tab.
+                Rectangle {
+                    objectName: "useSimRow"
+                    Layout.fillWidth: true
+                    implicitHeight: useSimRow.implicitHeight + 12
+                    radius: 10
+                    color: "#EAF7F1"
+                    border.color: "#BFE5D3"
+                    onVisibleChanged: if (visible) dashboard.refreshUseGestures()
+                    Component.onCompleted: dashboard.refreshUseGestures()
+                    RowLayout {
+                        id: useSimRow
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 8
+                        TextLabel { text: "쓰면서 모은 자료:"; font.bold: true; font.pixelSize: 13; color: "#17603F" }
+                        StyledComboBox {
+                            id: useGestureCombo
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 180
+                            implicitHeight: 32
+                            enabled: dashboard.useGestures.length > 0
+                            model: dashboard.useGestures
+                            textRole: "combo_label"
+                            displayText: dashboard.useGestures.length > 0 ? currentText : "아직 모은 사용 사례가 없어요 (가르친 자세를 쓰면 자동으로 쌓여요)"
+                            currentIndex: {
+                                var list = dashboard.useGestures || []
+                                for (var i = 0; i < list.length; i++) {
+                                    if (list[i].file === dashboard.selectedSimFile) return i
+                                }
+                                return list.length > 0 ? 0 : -1
+                            }
+                        }
+                        CompactButton {
+                            objectName: "useSimPlay"
+                            text: "시뮬레이터에서 보기"
+                            implicitHeight: 32
+                            leftPadding: 12; rightPadding: 12
+                            primary: true
+                            enabled: dashboard.trainingBusy === "" && dashboard.useGestures.length > 0
+                            onClicked: {
+                                var list = dashboard.useGestures || []
+                                var idx = useGestureCombo.currentIndex
+                                if (idx >= 0 && idx < list.length) {
+                                    simTabRoot.isPlaying = false
+                                    simTabRoot.playFrameIdx = 0
+                                    trainingCenter.selectedSimFile = list[idx].file
+                                    dashboard.runUseSimulation(list[idx].key)
+                                }
+                            }
+                        }
+                        CompactButton {
+                            text: "새로 고침"
+                            implicitHeight: 32
+                            leftPadding: 12; rightPadding: 12
+                            onClicked: dashboard.refreshUseGestures()
+                        }
+                        Chip {
+                            visible: dashboard.simulationResult.use_view === true
+                            text: "현재: 자동 수집 자료 재생 (녹화 파일 아님)"
                         }
                     }
                 }
@@ -5409,8 +6489,17 @@ ApplicationWindow {
                                     TextLabel { text: "#" + repRow.modelData.rep + " (" + repRow.modelData.time_s + "초)"; font.bold: true; font.pixelSize: 12; Layout.preferredWidth: 85 }
                                     TextLabel { text: repRow.modelData.name; font.pixelSize: 12; Layout.preferredWidth: 150; elide: Text.ElideRight }
                                     TextLabel { text: "최고 확률 " + Math.round(repRow.modelData.peak_prob * 100) + "% (평균 " + Math.round(repRow.modelData.mean_prob * 100) + "%)"; font.pixelSize: 12; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight }
-                                    Chip { warn: !repRow.modelData.model_ok; text: repRow.modelData.model_ok ? "모델 통과" : "모델 미달" }
-                                    Chip { warn: !repRow.modelData.rule_ok; text: repRow.modelData.rule_ok ? "규칙 통과" : "규칙 미달" }
+                                    // a collected use (src/use_sim.py) says what happened to it instead of "rule passed"
+                                    Chip {
+                                        warn: !repRow.modelData.model_ok && repRow.modelData.no_model !== true
+                                        text: repRow.modelData.no_model === true ? "확인 모델 없음" : (repRow.modelData.model_ok ? "모델 통과" : "모델 미달")
+                                    }
+                                    Chip {
+                                        warn: !repRow.modelData.rule_ok
+                                        text: repRow.modelData.use === true
+                                            ? (repRow.modelData.rule_ok ? "실행됨" : "원하지 않음 표시")
+                                            : (repRow.modelData.rule_ok ? "규칙 통과" : "규칙 미달")
+                                    }
                                     CompactButton {
                                         text: "구간 재생 ▶"
                                         onClicked: {
@@ -5835,6 +6924,19 @@ ApplicationWindow {
                                             text: bindingsTabRoot.selectedRowObj ? ("현재 매핑: " + bindingsTabRoot.selectedRowObj.shortcut_detail + "  ·  학습 트랙: " + bindingsTabRoot.selectedRowObj.training_format_badge) : ""
                                             font.pixelSize: 12
                                             color: "#0369A1"
+                                            font.bold: true
+                                            wrapMode: Text.Wrap
+                                        }
+                                        // 2026-11-11: switching this gesture off does not stop another one bound to the same command
+                                        TextLabel {
+                                            objectName: "bindingSameActionElsewhere"
+                                            readonly property var others: bindingsTabRoot.selectedRowObj ? (bindingsTabRoot.selectedRowObj.same_action_elsewhere || []) : []
+                                            visible: others.length > 0
+                                            Layout.fillWidth: true
+                                            text: "⚠ 같은 명령이 다른 동작에도 연결돼 있어요: " + others.join(", ")
+                                                  + (bindingsTabRoot.editBindingEnabled ? "" : "  ·  이 동작을 꺼도 그 동작으로는 계속 실행됩니다 (5-3 복합 동작 등에서 끄세요)")
+                                            font.pixelSize: 12
+                                            color: "#B45309"
                                             font.bold: true
                                             wrapMode: Text.Wrap
                                         }
@@ -7352,7 +8454,10 @@ ApplicationWindow {
         property var shownAnchor: [0, 0] // the drawn anchor (thumb-index point placed on the cursor), glides too
         property real shownX: 0
         property real shownY: 0
-        readonly property real glide: 0.04   // seconds: time constant of the glide
+        // seconds: time constant of the glide. .015 ("fast", the default) only bridges the camera frames; .04 was 16 ms more lag
+        // The runtime sends the glide with each hand (fast while it only moves, smooth while it makes a command).
+        readonly property real glide: (hand.glide !== undefined && hand.glide > 0) ? hand.glide
+                                      : (dashboard.virtualHandGlide > 0 ? dashboard.virtualHandGlide : 0.015)
         function placeAt(px, py) { x = Math.round(px - width / 2); y = Math.round(py - height / 2) }
         // the hand stays (faded, see VH_LOST_KEEP) through a short loss, so it is never thrown away and re-placed here
         onPresentChanged: if (!present) shown = null
@@ -7434,13 +8539,23 @@ ApplicationWindow {
                     ctx.lineWidth = h.aim ? 2 : 3
                     ctx.strokeStyle = h.action !== "" ? "#E5484D" : (h.aim ? "rgba(17,35,49,0.45)" : "#112331")
                     ctx.beginPath(); ctx.arc(kx, ky, h.aim ? 6 : 9, 0, 2 * Math.PI); ctx.stroke()
-                    if (h.action !== "") {
+                    if (h.action !== "" && h.text !== false) {     // (the words can be switched off in the settings)
                         ctx.font = "bold 16px 'Noto Sans KR'"
                         ctx.lineWidth = 4; ctx.strokeStyle = "rgba(255,255,255,0.9)"
                         ctx.strokeText(h.action, kx + 14, ky - 12)
                         ctx.fillStyle = "#E5484D"
                         ctx.fillText(h.action, kx + 14, ky - 12)
                     }
+                }
+                // the control is off: what the hand's signal would do, to check a gesture without running it (h.note)
+                if (h.action === "" && (h.note || "") !== "" && h.text !== false) {
+                    var nx = (h.click ? (h.anchor ? width / 2 : cx + h.click[0]) : cx) + 14
+                    var ny = (h.click ? (h.anchor ? height / 2 : cy + h.click[1]) : cy) - 12
+                    ctx.font = "bold 15px 'Noto Sans KR'"
+                    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(255,255,255,0.9)"
+                    ctx.strokeText(h.note, nx, ny)
+                    ctx.fillStyle = "#1B6B5A"
+                    ctx.fillText(h.note, nx, ny)
                 }
             }
         }
@@ -7449,6 +8564,109 @@ ApplicationWindow {
     FingerTracker { }
     DrawOverlay { }
 
+    // Pointing mode (src/point_mode.py): a ring at the cursor fills over the 1 s rest on a file / folder. Click-through.
+    Window {
+        id: pointRing
+        objectName: "pointRing"
+        title: "MANUX 포인팅"
+        transientParent: null
+        readonly property var view: dashboard.pointView
+        readonly property bool on: view.kind !== undefined
+        visible: on
+        color: "transparent"
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+               | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+        width: 150
+        height: 70
+        x: on ? view.cursor[0] + 14 : 0
+        y: on ? view.cursor[1] + 14 : 0
+        onViewChanged: ringCanvas.requestPaint()
+        Canvas {
+            id: ringCanvas
+            x: 0; y: 0; width: 40; height: 40
+            onPaint: {
+                var c = getContext("2d"); c.reset()
+                var v = pointRing.view
+                if (v.kind === undefined) return
+                var cx = 20, cy = 20, r = 14
+                c.lineWidth = 5
+                c.strokeStyle = "rgba(17,35,49,0.55)"
+                c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.stroke()
+                if (v.on_file && v.progress > 0) {
+                    c.strokeStyle = v.kind === "right" ? "#3B82F6" : "#10B981"
+                    c.beginPath(); c.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * v.progress); c.stroke()
+                }
+            }
+        }
+        Rectangle {
+            x: 44; y: 8
+            width: pointLabel.implicitWidth + 16
+            height: 24
+            radius: 12
+            color: "#E0112331"
+            Label {
+                id: pointLabel
+                anchors.centerIn: parent
+                text: pointRing.view.kind === "right" ? "우클릭" : "더블클릭"
+                color: pointRing.view.on_file ? (pointRing.view.kind === "right" ? "#93C5FD" : "#6EE7B7") : "#94A3B8"
+                font.pixelSize: 12
+                font.bold: true
+            }
+        }
+    }
+    // Simulation badge (2026-11-11): the mouse control is off - the hand is still read and every gesture, connected command and
+    // motion-mode swipe is SHOWN as what it would do, but nothing is sent. Top-right, above the motion badge, so the two states
+    // are never confused. Click-through, always on top.
+    Window {
+        id: simBadge
+        objectName: "simBadge"
+        title: "MANUX 시뮬레이션"
+        transientParent: null
+        visible: dashboard.simulating
+        color: "transparent"
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+               | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+        width: simPill.implicitWidth
+        height: 56
+        readonly property var area: dashboard.overlayArea
+        x: area[0] + area[2] - width - 16
+        y: area[1] + 16 + (dashboard.overlayVisible && dashboard.overlayCorner === "top-right" ? 42 : 0)
+        Rectangle {
+            id: simPill
+            anchors.fill: parent
+            implicitWidth: simCol.implicitWidth + 36
+            radius: 14
+            color: "#E61E3A8A"
+            border.width: 2
+            border.color: "#93C5FD"
+            Row {
+                anchors.centerIn: parent
+                spacing: 10
+                Rectangle {
+                    width: 12; height: 12; radius: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: "#93C5FD"
+                }
+                Column {
+                    id: simCol
+                    spacing: 1
+                    Label {
+                        text: "시뮬레이션 중 · 마우스 제어 꺼짐"
+                        color: "#FFFFFF"
+                        font.pixelSize: 15
+                        font.bold: true
+                        font.family: Theme.Studio.font
+                    }
+                    Label {
+                        text: "손짓·모션은 화면에 표시만 하고 실행하지 않아요"
+                        color: "#DBEAFE"
+                        font.pixelSize: 11
+                        font.family: Theme.Studio.font
+                    }
+                }
+            }
+        }
+    }
     // Motion-mode badge: always on top and click-through, in the top-right corner of the screen, so the user
     // can tell the mode from anywhere (also when this window is hidden or behind others).
     Window {
@@ -7465,6 +8683,7 @@ ApplicationWindow {
         x: area[0] + area[2] - width - 16
         // below the small reception pill when that one is showing in the same corner
         y: area[1] + 16 + (dashboard.overlayVisible && dashboard.overlayCorner === "top-right" ? 42 : 0)
+           + (dashboard.simulating ? 64 : 0)          // under the simulation badge
         Rectangle {
             id: badgePill
             anchors.fill: parent

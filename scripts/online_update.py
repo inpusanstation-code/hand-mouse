@@ -17,6 +17,8 @@ def main(argv=None) -> int:
     ap.add_argument("--progress", action="store_true")
     ap.add_argument("--rollback", action="store_true")
     ap.add_argument("--root", default="")
+    ap.add_argument("--use-events", default="", help="use log folder (logs/use_events): import its commands and learn from them too")
+    ap.add_argument("--no-weak", action="store_true", help="with --use-events: only the commands marked as not meant")
     a = ap.parse_args(argv)
 
     def emit(event, **info):
@@ -34,7 +36,12 @@ def main(argv=None) -> int:
             return 0
         from scripts.train_tcn import augment
         from src.online.update_job import run_update
-        result = run_update(root, emit=emit, augment=lambda x: augment(x))
+        result = run_update(root, emit=emit, augment=lambda x: augment(x),
+                            use_events=Path(a.use_events) if a.use_events else None, weak=not a.no_weak)
+        if a.use_events:
+            # each taught gesture's own checking model, from its uses (the production model above is not touched by this)
+            from src.online.verifier import train_verifiers
+            result["verifiers"] = train_verifiers(root, emit=emit)
         emit("done", **result)
         return 0
     except Exception as exc:     # the app shows it; production is untouched by a crash before submit

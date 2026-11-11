@@ -36,19 +36,23 @@ class OnlineJob:
 
     @property
     def running(self) -> bool:
-        return self.state.get("phase") in ("starting", "loading", "update", "checking")
+        return self.state.get("phase") in ("starting", "imported", "loading", "update", "checking", "rolled_back", "verifier")
 
     def _set(self, **state: Any) -> None:
         with self._lock:
             self.state = state
             self.version += 1
 
-    def start(self, rollback: bool = False, command: Optional[List[str]] = None) -> bool:
+    def start(self, rollback: bool = False, command: Optional[List[str]] = None, use_events: str = "", weak: bool = True) -> bool:
+        """`use_events` = the use log folder: that round also learns from the commands logged in everyday use."""
         if self.running:
             return False
         args = command or [_python(), "-u", str(ROOT / "scripts" / "online_update.py"), "--progress", "--root", str(self.root)]
         if rollback and command is None:
             args.append("--rollback")
+        elif use_events and command is None:
+            args += ["--use-events", str(use_events)] + ([] if weak else ["--no-weak"])
+        self.last_args = list(args)
         self._set(phase="starting", rollback=rollback)
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         try:

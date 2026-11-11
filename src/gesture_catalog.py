@@ -43,7 +43,7 @@ BASE_TASKS = (
     Task("swipe_right", "손 펴고 오른쪽 쓸기 (앞으로)", "엄지까지 손을 펴고 오른쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="right"),
     Task("swipe_tab_left", "엄지 접고 왼쪽 쓸기 (이전 탭)", "엄지를 접고 네 손가락을 펴 왼쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="left"),
     Task("swipe_tab_right", "엄지 접고 오른쪽 쓸기 (다음 탭)", "엄지를 접고 네 손가락을 펴 오른쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="right"),
-    Task("swipe_down", "손 펴고 아래로 쓸기 (창 닫기)", "손을 펴 아래로 한 번 쓸어 멈추세요. 쉬기 때 올리세요. 실제 창은 닫히지 않아요", category="방향 모션", direction="down"),
+    Task("swipe_down", "손 펴고 아래로 쓸기 (창 내리기)", "손을 펴 아래로 한 번 쓸어 멈추세요. 쉬기 때 올리세요. 실제 창은 내려가지 않아요", category="방향 모션", direction="down"),
     Task("open_move", "손 펴고 이동 (정밀 커서)", "손을 편 채 천천히 여러 방향으로 움직이세요. 손가락을 집지 마세요", True, "이동·중립", "none"),
     Task("fist_move", "주먹 이동 (빠른 커서)", "주먹을 쥐고 여러 방향으로 움직이세요. 엄지만 세우지 마세요", True, "이동·중립", "none"),
     # Near misses: the hard negatives of each pinch. Taught as "none" so a finger that only comes close stops firing.
@@ -71,7 +71,7 @@ BASE_MOTION_TARGETS = {
     "forward": "swipe_right",
     "tab_prev": "swipe_tab_left",
     "tab_next": "swipe_tab_right",
-    "close_window": "swipe_down",
+    "window_down": "swipe_down",
 }
 MOTION_TARGETS = dict(BASE_MOTION_TARGETS)
 

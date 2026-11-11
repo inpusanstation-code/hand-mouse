@@ -103,22 +103,30 @@ def at(x, y):
 
 def test_the_drawn_joints_stop_shaking_but_follow_a_real_move():
     import random
-    random.seed(1)
-    smooth = ViewSmoother()
     base = view(landmarks(), 1280, 720)["pts"]
-    raw_moves, drawn_moves, prev = [], [], None
-    for i in range(60):
-        noisy = [v + random.uniform(-3, 3) for v in base]
-        out = smooth(noisy, i / 30)
-        if prev is not None:
-            raw_moves.append(abs(noisy[24] - base[24]))
-            drawn_moves.append(abs(out[24] - prev[24]))
-        prev = out
-    assert sum(drawn_moves) < .3 * sum(raw_moves)             # jitter of a few px is mostly gone
-    moved = [v + 60 for v in base]
-    for i in range(60, 66):
-        out = smooth(moved, i / 30)
-    assert out[24] == pytest.approx(moved[24], abs=6)         # a real 60 px move arrives within 0.2 s
+
+    def shake_and_move(mode, frames_to_arrive):
+        random.seed(1)
+        smooth = ViewSmoother()
+        smooth.set_response(mode)
+        raw_moves, drawn_moves, prev = [], [], None
+        for i in range(60):
+            noisy = [v + random.uniform(-3, 3) for v in base]
+            out = smooth(noisy, i / 30)
+            if prev is not None:
+                raw_moves.append(abs(noisy[24] - base[24]))
+                drawn_moves.append(abs(out[24] - prev[24]))
+            prev = out
+        moved = [v + 60 for v in base]
+        for i in range(60, 60 + frames_to_arrive):
+            out = smooth(moved, i / 30)
+        return sum(drawn_moves) / sum(raw_moves), abs(out[24] - moved[24])
+
+    shake, gap = shake_and_move("smooth", 6)                  # as it was until 2026-11-11
+    assert shake < .3 and gap <= 6                            # jitter of a few px is mostly gone; a 60 px move arrives within 0.2 s
+    fast_shake, fast_gap = shake_and_move("fast", 3)          # the default now: follows sooner, damps less
+    assert fast_shake < .7 and fast_gap <= 6 and fast_shake > shake
+    assert shake_and_move("no such mode", 3) == (fast_shake, fast_gap)
 
 
 def test_the_box_corners_are_the_monitor_corners_and_outside_is_clamped():
@@ -265,7 +273,9 @@ def test_a_held_fist_browses_right_down_and_left_up(tmp_path):
     forcing(rt, active_gesture="fist")
     sent = []
     rt.mouse._send_scroll = lambda v, h: sent.append(v)
-    rt._step()
+    for _ in range(rt.grip.SOLID + 2):         # the fist is held a moment before the page is (stray fist frames are not a grip)
+        rt._step()
+    assert rt.grip.solid
     still = tuple(rt.mouse.last_screen_pos)
     for _ in range(8):
         rt.tracker.dx += .03
@@ -299,12 +309,27 @@ def test_one_fist_scrolls_one_way_only_when_the_lock_is_on(monkeypatch):
 
 def test_a_grip_survives_a_short_loss():
     from src.virtual_hand import Grip
-    g = Grip()
-    assert g.step("fist", 0.0) == "scroll" and g.started
-    assert g.step("fist", .03) == "scroll" and not g.started
-    assert g.step(None, .06) == "scroll"
-    assert g.step(None, .3) == "scroll"
-    assert g.step(None, .5) is None
+    g, t = Grip(), 0.0
+    for _ in range(Grip.START - 1):                    # a few stray fist frames hold nothing (2026-11-11)
+        assert g.step("fist", t) is None
+        t += 1 / 30
+    assert g.step(None, t) is None                     # ... and the count starts over
+    t += 1 / 30
+    for _ in range(Grip.START - 1):
+        assert g.step("fist", t) is None
+        t += 1 / 30
+    assert g.step("fist", t) == "scroll" and g.started and not g.solid
+    lost = t + 1 / 30
+    assert g.step(None, lost) == "scroll" and g.step(None, lost + .1) == "scroll"
+    assert g.step(None, lost + .2) is None             # a grip that young lets go soon (it was the long grace)
+    g, t = Grip(), 0.0
+    for _ in range(Grip.SOLID):                        # a fist that was really held
+        g.step("fist", t)
+        t += 1 / 30
+    assert g.solid and not g.started
+    assert g.step(None, t) == "scroll"
+    assert g.step(None, t + .3) == "scroll"            # ... rides out a flickering frame or ten
+    assert g.step(None, t + .5) is None
 
 
 def test_the_thumb_index_click_comes_from_the_hand_shape_alone():
@@ -323,6 +348,52 @@ def test_the_thumb_index_click_comes_from_the_hand_shape_alone():
     fist[4] = fist[8]
     for _ in range(3):
         assert sp.step(fist, 1280, 720) is None                                  # index curled in: not a pinch
+
+
+def _gap(hand, ratio):
+    """The hand with the thumb tip `ratio` hand sizes (wrist -> middle knuckle, in 1280 x 720 pixels) from the index tip."""
+    out = list(hand)
+    size = math.dist((hand[0].x * 1280, hand[0].y * 720), (hand[9].x * 1280, hand[9].y * 720))
+    tip = hand[8]
+    out[4] = SimpleNamespace(x=tip.x - ratio * size / 1280, y=tip.y, z=tip.z)
+    return out
+
+
+def test_a_held_drag_survives_a_wobble_and_lets_go_when_the_fingers_clearly_part():
+    """2026-11-11: drags broke off with the fingers still close (15 of 32 in this PC's records); now only a clear opening drops."""
+    from src.virtual_hand import ShapePinch
+    sp = ShapePinch()
+    hand = landmarks()
+    t = 0.0
+    for _ in range(3):
+        sp.step(_gap(hand, .05), 1280, 720, dragging=False, now=t); t += 1 / 30
+    assert sp.closed
+    # the fingers wobble past OPEN for a few frames (0.30 hand sizes) and come back: the drag holds
+    for r in (.30, .33, .28, .12, .30, .05):
+        assert sp.step(_gap(hand, r), 1280, 720, dragging=True, now=t) is None and sp.closed
+        t += 1 / 30
+    # a single spike past the clear line (a tracking glitch) does not drop it either
+    assert sp.step(_gap(hand, .6), 1280, 720, dragging=True, now=t) is None
+    t += 1 / 30
+    assert sp.step(_gap(hand, .1), 1280, 720, dragging=True, now=t) is None
+    t += 1 / 30
+    # clearly apart for two frames: dropped
+    assert sp.step(_gap(hand, .5), 1280, 720, dragging=True, now=t) is None
+    t += 1 / 30
+    assert sp.step(_gap(hand, .7), 1280, 720, dragging=True, now=t) == "up" and not sp.closed
+    # a hand opened only halfway still drops, after DRAG_SLOW
+    sp = ShapePinch()
+    for _ in range(3):
+        sp.step(_gap(hand, .05), 1280, 720)
+    t0 = 10.0
+    assert sp.step(_gap(hand, .32), 1280, 720, dragging=True, now=t0) is None
+    assert sp.step(_gap(hand, .32), 1280, 720, dragging=True, now=t0 + ShapePinch.DRAG_SLOW - .05) is None
+    assert sp.step(_gap(hand, .32), 1280, 720, dragging=True, now=t0 + ShapePinch.DRAG_SLOW + .01) == "up"
+    # without a drag (a click) the old line still opens at once
+    sp = ShapePinch()
+    for _ in range(3):
+        sp.step(_gap(hand, .05), 1280, 720)
+    assert sp.step(_gap(hand, .30), 1280, 720) == "up"
 
 
 def pinch_hand(rt):
@@ -367,6 +438,8 @@ def test_a_held_thumb_index_pinch_drags_and_opening_drops(tmp_path):
     assert rt.mouse.is_dragging and rt.mouse.last_screen_pos[0] > before[0]     # the held thing follows the hand
     rt.tracker.hand[:] = opened
     rt._step()
+    assert rt.mouse.is_dragging                     # one open frame may be a wobble (2026-11-11)
+    rt._step()
     assert not rt.mouse.is_dragging and "mouseUp" in rt.mouse.event_log and "left_click" not in rt.mouse.event_log
 
 
@@ -399,6 +472,7 @@ def test_a_dragged_thing_is_dropped_between_thumb_and_index(tmp_path):
     rt.mouse._mouse_up = lambda: (ups.append(tuple(rt.mouse.last_screen_pos)), up())
     rt.tracker.hand[:] = opened
     rt._step()
+    rt._step()                                      # clearly apart for two frames: dropped
     hand = rt._snap.virtual_hand
     assert ups and ups[0] == tuple(hand["screen"])          # dropped at the cursor, where the drawn anchor sits
     assert hand["click"] == hand["anchor"]
@@ -534,3 +608,86 @@ def test_in_box_mode_the_shape_opens_the_switcher_and_pinky_pinch_does_nothing(t
         rt._step()
         time.sleep(.2)
     assert rt.mouse.switcher_open
+
+
+def _vh_runtime(tmp_path):
+    import dataclasses
+    from tests.test_qt_runtime import runtime
+    rt = runtime(tmp_path)
+    rt.ui = dataclasses.replace(rt.ui, use_index_pointer=False, virtual_hand=True)
+    rt.paused = False
+    return rt
+
+
+def test_the_virtual_hand_stays_while_a_sign_is_held(tmp_path, monkeypatch):
+    """2026-11-11 "the virtual hand keeps vanishing": with a V or close sign held, motion or draw mode, the hand was seen but
+    the window was hidden for those frames. It stays, faded."""
+    import time
+    rt = _vh_runtime(tmp_path)
+    for _ in range(4):
+        rt._step(); time.sleep(1 / 200)
+    assert rt._snap.virtual_hand and not rt._snap.virtual_hand.get("lost")
+    monkeypatch.setattr(rt, "_toggle_sign", lambda *a, **k: True)      # the V sign held: the controls are off
+    for _ in range(4):
+        rt._step(); time.sleep(1 / 200)
+        assert rt._snap.virtual_hand and rt._snap.virtual_hand["lost"] and len(rt._snap.virtual_hand["pts"]) == 42
+
+
+def test_the_virtual_hand_stays_when_the_same_hand_is_found_twice(tmp_path):
+    import copy
+    import time
+    rt = _vh_runtime(tmp_path)
+    real = rt.tracker.detect
+    rt.tracker.detect = lambda frame, roi=None: [d for h in real(frame, roi) for d in (h, copy.copy(h))]
+    for _ in range(4):
+        rt._step(); time.sleep(1 / 200)
+        assert rt._snap.virtual_hand and not rt._snap.virtual_hand.get("lost")
+
+
+def test_the_response_is_fast_while_moving_and_smooth_while_a_command_is_made():
+    """2026-11-11: "그냥 이동일 때는 좀 떨림이 있어도 빠릿하게, 명령 모션 중일 때는 떨림 없이 부드럽게"."""
+    from src.virtual_hand import Responder
+    r = Responder()
+    assert r.step("auto", False, 0.0) == "fast"
+    assert r.step("auto", True, 1.0) == "smooth"
+    assert r.step("auto", False, 1.0 + Responder.RELEASE - .05) == "smooth"       # stays a moment after the command
+    assert r.step("auto", False, 1.0 + Responder.RELEASE + .05) == "fast"
+    assert r.step("fast", True, 2.0) == "fast" and r.step("smooth", False, 2.0) == "smooth"   # a fixed setting stays
+    assert r.step("no such setting", True, 3.0) == "smooth" and r.step(None, False, 9.0) == "fast"   # unknown = auto
+
+
+def test_the_runtime_switches_the_filters_and_the_glide_with_what_the_hand_does(tmp_path):
+    import time as _time
+    from src.virtual_hand import RESPONSE, Responder
+    rt = box_runtime(tmp_path)
+    rt._step()
+    assert rt._vh_mode == "fast" and rt._snap.virtual_hand["glide"] == RESPONSE["fast"]["glide"]
+    assert rt.box_mapper._filter.min_cutoff == RESPONSE["fast"]["cursor"][0]
+    opened = pinch_hand(rt)                                    # the fingers close for a click
+    rt._step()
+    assert rt._vh_mode == "fast"                               # one frame of touching is not a pinch yet
+    rt._step(); rt._step()
+    assert rt._vh_mode == "smooth" and rt._snap.virtual_hand["glide"] == RESPONSE["smooth"]["glide"]
+    assert rt.box_mapper._filter.min_cutoff == RESPONSE["smooth"]["cursor"][0]
+    assert rt.view_smoother._filters[8].min_cutoff == RESPONSE["smooth"]["joints"][0]
+    rt.tracker.hand[:] = opened
+    rt._step()
+    assert rt._vh_mode == "smooth"                             # just opened: not yet
+    _time.sleep(Responder.RELEASE + .1)
+    rt._step()
+    assert rt._vh_mode == "fast"
+    rt.engine.config["virtual_hand_response"] = "smooth"       # a fixed setting: as it was before "auto"
+    rt._step()
+    assert rt._vh_mode == "smooth"
+
+
+def test_a_hand_shape_with_a_command_counts_as_commanding_but_the_open_hand_does_not(tmp_path):
+    from src.action_bindings import ActionBindingRegistry, CompositeGestureDetector
+    reg = ActionBindingRegistry(tmp_path / "b.json")
+    reg.composite_gestures["comp_a"] = {"key": "comp_a", "base_posture": "v_sign_down", "trigger_type": "hold", "enabled": True}
+    reg.composite_gestures["comp_b"] = {"key": "comp_b", "base_posture": "open_hand", "trigger_type": "hold", "enabled": True}
+    reg.composite_gestures["comp_c"] = {"key": "comp_c", "base_posture": "fist", "trigger_type": "hold", "enabled": False}
+    det = CompositeGestureDetector(reg)
+    for posture, want in (("v_sign_down", True), ("open_hand", False), ("fist", False), ("", False), ("rock_sign", False)):
+        det._active_posture = posture
+        assert det.commanding() is want

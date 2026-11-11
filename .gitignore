@@ -60,3 +60,8 @@ config/ai_connections.json
 
 # The app's own settings (QSettings ini): hand choice, box, AI provider and the encrypted API key
 config/tcn-ui.ini
+
+# Hand shapes the user taught by showing them (src/posture_teach.py): joints of their hand, and the model fitted on them
+data/posture_examples/
+models/posture_teach.json
+models/posture_teach.candidate.json

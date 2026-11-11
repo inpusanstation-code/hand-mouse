@@ -48,17 +48,18 @@ ACTION_KEYS: Dict[str, Tuple[str, ...]] = {
     "forward": ("alt", "right"),
     "tab_prev": ("ctrl", "shift", "tab"),
     "tab_next": ("ctrl", "tab"),
-    "close_window": ("alt", "f4"),     # only after the two-step confirmation below
+    "close_window": ("alt", "f4"),     # the rock sign (two steps); motion mode no longer sends it
+    "window_down": ("win", "down"),    # the downward stroke (2026-11-11, was the Alt+F4 question): restore / minimise
 }
-ACTION_LABELS = {"back": "뒤로", "forward": "앞으로", "tab_prev": "이전 탭", "tab_next": "다음 탭", "close_window": "창 닫기"}
+ACTION_LABELS = {"back": "뒤로", "forward": "앞으로", "tab_prev": "이전 탭", "tab_next": "다음 탭", "close_window": "창 닫기", "window_down": "창 내리기"}
 DEFAULT_ACTIONS = {
     "nav": {"left": "back", "right": "forward"},
     "tab": {"left": "tab_prev", "right": "tab_next"},
 }
 
 DEFAULTS: Dict[str, Any] = {
-    "motion_close_enabled": 1.0,     # 1 = a downward swipe asks to close the window (Alt+F4), a second one within motion_close_confirm does it
-    "motion_close_confirm": 3.0,     # s the question stays open
+    "motion_close_enabled": 1.0,     # 1 = a downward swipe brings the window down (Win+Down); the name is from when it closed the window
+    "motion_close_confirm": 3.0,     # unused since 2026-11-11 (the Alt+F4 question is gone)
     "motion_close_min_dy": 0.15,     # net downward travel of the palm centre, frame widths
     "motion_close_min_time": 0.10,
     "motion_close_min_speed": 0.7,   # frame widths per s (faster than the horizontal swipes: a hand that is merely lowered is slower)
@@ -182,7 +183,8 @@ def custom_posture_ok(posture: str, f: Dict[str, Any]) -> bool:
         return max(curls) <= 1.18 and not _thumbs_up(f)
     if posture == "thumbs_up":
         return _thumbs_up(f)
-    if posture in ("knife_hand", "fingers_bent", "v_sign_down"):
+    if posture in ("knife_hand", "fingers_bent", "v_sign_down", "two_fingers", "index_point", "l_sign", "pinky_up", "shaka",
+                   "thumbs_down") or posture.startswith("custom_"):      # custom_: a shape the user named and taught
         # shapes added 2026-11-10 (손날, ㄱ자, 거꾸로 V): the same judge as the shape probe and the sequences
         lm = f.get("lm")
         if lm is None or len(lm) < 21:
@@ -607,8 +609,8 @@ class MotionMode:
 
     def _down_stroke(self, now: float, h: List[Tuple[float, float, float, bool, Optional[str], float, float]]
                      ) -> Optional[MotionEvent]:
-        """A fast straight DOWNWARD stroke of the open hand: the first asks to close the window, a second within
-        motion_close_confirm closes it. (Image y grows downward, so dy > 0 is down.)"""
+        """A fast straight DOWNWARD stroke of the open hand brings the window down (Win+Down) at once. Until 2026-11-11 it
+        asked to close the window and a second stroke sent Alt+F4. (Image y grows downward, so dy > 0 is down.)"""
         if now - self._close_last_t < self.cfg("motion_close_cooldown"):
             return None
         for start in range(len(h) - 3):
@@ -637,12 +639,8 @@ class MotionMode:
             self._close_last_t = self._last_activity = now
             self._settled = False
             self._hist.clear()
-            if now - self._close_ask_t <= self.cfg("motion_close_confirm"):
-                self._close_ask_t = -1e9
-                self.last_swipe = {**info, "variant": "down", "side": "down", "action": "close_window"}
-                return MotionEvent("swipe", self.last_swipe, "close_window")
-            self._close_ask_t = now
-            return MotionEvent("close_ask", info)
+            self.last_swipe = {**info, "variant": "down", "side": "down", "action": "window_down"}
+            return MotionEvent("swipe", self.last_swipe, "window_down")
         return None
 
     def _stroke(self, now: float, seg: List[Tuple[float, float, float, bool, Optional[str], float, float]],

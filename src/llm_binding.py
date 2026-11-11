@@ -25,7 +25,17 @@ MAX_PROPOSALS = 20
 NEW = "__new__"              # gesture key of a composite gesture the AI proposes to create (posture + movement)
 from src.sequence import POSTURES as SEQ_POSTURES  # noqa: E402
 
-HOLD_SECONDS = .5       # a new "hold" gesture (2026-11-10: 1 s felt too slow); everyday shapes keep 1 s
+# How long a hand shape must be held before its command runs (2026-11-11, user: "the shortest by default, longer only
+# if I want"). A new hold gesture starts at its minimum; the user can raise it (up to HOLD_MAX) in the AI list.
+HOLD_MIN = .4           # the user's upside-down V ran well at 0.4 s; below that a passing shape fires
+HOLD_MIN_EVERYDAY = 1.0  # shapes the hand is in during normal use (open hand, fist, thumb tucked): shorter fires all day
+EVERYDAY_POSTURES = ("open_hand", "fist", "thumb_tucked")
+HOLD_MAX = 3.0
+HOLD_SECONDS = HOLD_MIN  # kept for older callers
+
+
+def hold_minimum(posture: str) -> float:
+    return HOLD_MIN_EVERYDAY if posture in EVERYDAY_POSTURES else HOLD_MIN
 CLICK_POSTURES = {"thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle"}
 
 
@@ -125,7 +135,12 @@ def system_prompt(gestures: Sequence[Dict[str, Any]]) -> str:
         "- mouse_action: one of the mouse/system actions below.",
         "- youtube_key: one of the YouTube/media keys below (works in the focused player).",
         "- hotkey: a key combination like ctrl+shift+t, alt+left, win+d, f5 (lowercase, '+' between).",
-        "- launch_app: a program path/command, or a web address to open.",
+        "- launch_app: a program path/command, a web address to open, or a folder / document to open. To start an "
+        "installed program write just its name as the user said it, in Latin letters when it has one (\"arduino ide\", "
+        "\"kakaotalk\", \"notepad\"): the app finds it on the computer. Never invent a path. For the user's own "
+        "folders write %USERPROFILE% (their home folder, the one named after the user): %USERPROFILE%\\Desktop, "
+        "%USERPROFILE%\\Downloads, %USERPROFILE%\\Documents, %USERPROFILE%\\Desktop\\<folder name>. Never guess "
+        "a user name or a drive.",
         f"- macro: several commands in order, in `steps` (action_value \"\"). At most {MAX_STEPS} steps. Step kinds:",
         "  key (a hotkey as above), type (text to type, any language), wait (seconds, at most "
         f"{MAX_WAIT:g}; all waits at most {MAX_TOTAL_WAIT:g}), open (a program or web address),",
@@ -135,6 +150,9 @@ def system_prompt(gestures: Sequence[Dict[str, Any]]) -> str:
         "  chrome.exe --incognito https://www.youtube.com   (Edge: msedge.exe -inprivate <address>).",
         "  Add --start-maximized for a maximised window, or a key step f11 (after a wait) for full screen.",
         "  Never open the page first and then press ctrl+shift+n: that opens an empty private window.",
+        "The user must have said or shown WHICH gesture runs the command (a gesture named in the request, or the hand",
+        "  shape / movement in the app's confirmed information). If neither is there, make NO proposal and do not invent",
+        "  a gesture: ask in `questions` which hand shape to use and tell them to press [손 모양·움직임 보여주기] first.",
         "Do exactly what the user asks: no extra steps. Opening one page or program is ONE launch_app command, not a",
         "  macro; add waits, maximising or full screen ONLY when the user asks for them in this request (earlier",
         "  connections in the list are not a pattern to copy).",
@@ -320,9 +338,21 @@ def check(answer: Dict[str, Any], gestures: Sequence[Dict[str, Any]]) -> Dict[st
                 problem = "없는 동작이에요"
         if g is not None and not enabled and (not value or value == "none") and atype != "macro":
             atype, value = str(g.get("action_type", "mouse_action")), str(g.get("action_value", "none"))
+        found = ""
         if atype == "launch_app":
             from src.action_bindings import web_address
             value = web_address(value)
+            if problem is None and enabled and value and value != "none":
+                # the AI does not see this computer: what it wrote is looked up here, and a program that is not on
+                # this PC is refused now instead of failing silently later (2026-11-11: "arduino", a folder, …)
+                from src import app_launch
+                target = app_launch.resolve(value)
+                if not target.ok:
+                    problem = target.note
+                elif target.note:
+                    found = target.note
+                    if target.kind == "run" or target.path.lower().endswith(".lnk"):
+                        value = " ".join([f'"{target.path}"'] + list(target.args))
         if atype == "macro" and problem is None:
             from src.macro import MacroError, parse
             try:
@@ -340,7 +370,7 @@ def check(answer: Dict[str, Any], gestures: Sequence[Dict[str, Any]]) -> Dict[st
             problem = "꺼 둔 채로 새 동작을 만들 수는 없어요"
         warning = ""
         if atype == "launch_app":
-            warning = f"프로그램을 실행합니다: {value}"
+            warning = f"프로그램을 실행합니다: {value}" + (f" ({found})" if found else "")
         elif atype == "macro" and steps:
             from src.macro import risky as macro_risky
             warning = macro_risky(steps)
@@ -419,7 +449,7 @@ def _apply_row(r: Dict[str, Any], registry, request: str, when: str, sequences, 
             return
         comp = registry.register_composite_gesture("", r.get("new_name", ""), r["new_posture"], trigger,
                                                    r["action_type"], r["action_value"],
-                                                   hold_seconds=(1.0 if r["new_posture"] in ("open_hand", "fist", "thumb_tucked") else HOLD_SECONDS) if trigger == "hold" else .55)
+                                                   hold_seconds=hold_minimum(r["new_posture"]) if trigger == "hold" else .55)
         done.append(f"새 동작 '{comp['name']}' 등록 → {r['after']}")
         log.append({**entry, "gesture_key": comp["key"], "gesture_name": comp["name"], "created": True,
                     "before": {}, "before_text": "(새로 만듦)"})
@@ -525,8 +555,8 @@ SHOWN = "__shown__"          # gesture key of a shown hand shape that is not a g
 def shown_key(shown: Optional[Dict[str, Any]], gestures: Sequence[Dict[str, Any]]) -> str:
     """The existing gesture a shown shape stands for: its catalogue gesture, else a "hold" gesture made for that
     shape before (2026-11-10: registering it again replaced the earlier one silently), else ""."""
-    if not (shown and shown.get("state") == "done"):
-        return ""
+    if not (shown and shown.get("state") == "done") or shown.get("unknown"):
+        return ""            # unknown: no listed shape / movement (2026-11-11: not forced into the nearest one)
     if shown.get("kind") == "drawn":            # a drawn path: the drawing mode's shape
         return str(shown.get("shape_key", ""))
     if shown.get("kind") == "rotate":           # a turn: a "hold the shape and turn" gesture if one exists
@@ -552,7 +582,10 @@ def shown_key(shown: Optional[Dict[str, Any]], gestures: Sequence[Dict[str, Any]
 def context_block(shown: Optional[Dict[str, Any]], key: str, gestures: Sequence[Dict[str, Any]]) -> str:
     """What the app saw, appended to the user's text so the AI can resolve 이/저 (no image, only names)."""
     lines = []
-    if shown and shown.get("state") == "done" and shown.get("kind") == "rotate":
+    if shown and shown.get("state") == "done" and shown.get("unknown"):
+        lines.append("- 사용자가 손 모양·움직임을 보여 주었지만 앱의 목록에 없는 것이었어요. 사용자가 이름을 지어 새 손 모양으로 "
+                     "가르친 뒤에야 쓸 수 있으니, 그 손 모양('이 손모양', '이 동작')에 대한 제안은 하지 말고 그 사실을 알려 주세요.")
+    elif shown and shown.get("state") == "done" and shown.get("kind") == "rotate":
         gk = shown_key(shown, gestures)
         what = f"{shown['name']} 모양으로 {shown['rotate_name']}"
         if gk:
@@ -584,9 +617,6 @@ def context_block(shown: Optional[Dict[str, Any]], key: str, gestures: Sequence[
         else:
             lines.append(f"- 사용자가 보여준 손 모양('이 손모양', '이거'): {shown['name']}. 아직 동작 목록에 없음. 이 손 모양에 연결하려면 "
                          f"gesture_key \"{SHOWN}\"를 쓰세요 (앱이 '{shown['name']}을 잠깐 유지' 동작을 새로 등록함).")
-    if shown and shown.get("state") == "done" and shown.get("approx"):
-        lines.append("- 위 손 모양·움직임은 정확히 맞는 것이 없어 앱이 가장 가까운 것으로 본 것이에요. 사용자의 말이 다른 모양이나 "
-                     "움직임을 가리키면 말을 따르세요.")
     if key:
         lines.append(f"- 사용자가 방금 누른 키('저렇게', '이 키', '이렇게'): {key} → action_type \"hotkey\", action_value \"{key}\"")
     return ("\n\n[앱이 확인한 정보]\n" + "\n".join(lines)) if lines else ""
@@ -595,7 +625,8 @@ def context_block(shown: Optional[Dict[str, Any]], key: str, gestures: Sequence[
 def with_shown(gestures: Sequence[Dict[str, Any]], shown: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The gesture list plus a stand-in for a shown shape that is not a gesture yet."""
     out = list(gestures)
-    if shown and shown.get("state") == "done" and shown.get("kind") not in ("motion", "drawn", "rotate"):
+    if (shown and shown.get("state") == "done" and not shown.get("unknown")
+            and shown.get("kind") not in ("motion", "drawn", "rotate")):
         if not shown_key(shown, gestures):
             out.append({"key": SHOWN, "name": f"{shown['name']} 유지 (새 동작)", "instruction": "보여준 손 모양",
                         "action_type": "mouse_action", "action_value": "none", "enabled": True, "app_overrides": [],
@@ -674,8 +705,67 @@ class History:
         for i, e in enumerate(self.load()):
             if e.get("undone"):
                 continue
-            out.append({**e, "index": i, "current": still_in_force(e, registry, self.sequences_path, self.paths_path)})
+            row = {**e, "index": i, "current": still_in_force(e, registry, self.sequences_path, self.paths_path)}
+            comp = registry.composite_gestures.get(e.get("gesture_key", ""))    # created here or an existing hold gesture
+            if comp is not None and comp.get("trigger_type") == "hold" and not e.get("motion"):
+                posture = str(comp.get("base_posture", ""))
+                row.update(hold_seconds=round(float(comp.get("hold_seconds", .55)), 2),
+                           hold_min=hold_minimum(posture), hold_max=HOLD_MAX)
+            row["editable"] = bool(row["current"]) and e.get("enabled", True) is not False
+            out.append(row)
         return list(reversed(out))
+
+    def edit(self, index: int, registry, action_type: str, action_value: str,
+             hold_seconds: Optional[float] = None) -> str:
+        """Change the command of an AI connection (and, for a created hold gesture, how long it must be held) later,
+        by hand (2026-11-11). The list line follows, so it stays "적용 중" and undo still goes to what was there before
+        the AI."""
+        entries = self.load()
+        if not 0 <= index < len(entries) or entries[index].get("undone"):
+            raise ValueError("고칠 항목이 없어요.")
+        e = entries[index]
+        if not still_in_force(e, registry, self.sequences_path, self.paths_path):
+            raise ValueError("그 뒤에 다른 곳에서 바뀌어서 여기서는 고치지 않았어요.")
+        atype, value = str(action_type or "").strip(), str(action_value or "").strip()
+        steps: List[Any] = []
+        if atype == "macro":
+            from src.macro import MacroError, parse
+            try:
+                steps = parse(value)
+            except MacroError as exc:
+                raise ValueError(str(exc)) from exc
+            value = json.dumps(steps, ensure_ascii=False)
+
+        problem = _check_value(atype, value)
+        if problem:
+            raise ValueError(problem)
+        key, app = e["gesture_key"], e.get("app_match", "")
+        notes = []
+        if hold_seconds is not None:
+            comp = registry.composite_gestures.get(key)
+            if comp is None or comp.get("trigger_type") != "hold":
+                raise ValueError("유지 시간은 손 모양을 유지하는 동작에서만 바꿀 수 있어요.")
+            low = hold_minimum(str(comp.get("base_posture", "")))
+            seconds = round(max(low, min(HOLD_MAX, float(hold_seconds))), 2)
+            if abs(float(comp.get("hold_seconds", .55)) - seconds) > 1e-6:
+                comp["hold_seconds"] = seconds
+                notes.append(f"유지 {seconds:g}초")
+        if (atype, value) != (e["action_type"], e["action_value"]):
+            if app:
+                registry.add_app_override(key, app, atype, value)
+            else:
+                current = registry.get_binding(key)
+                registry.set_binding(key, atype, value, enabled=bool(current.get("enabled", True)),
+                                     track=current.get("track"))
+            notes.append(format_action_badge(atype, value))
+        else:
+            registry.save()            # the hold time alone
+        if not notes:
+            return "바뀐 것이 없어요."
+        entries[index] = {**e, "action_type": atype, "action_value": value, "after": format_action_badge(atype, value),
+                          "steps": steps, "edited": time.strftime("%Y-%m-%d %H:%M")}
+        self._save(entries)
+        return f"고쳤어요: {e.get('gesture_name', key)} → " + " · ".join(notes)
 
     def delete(self, index: int, registry) -> str:
         """Remove the connection itself (not "go back one step"): a gesture the AI created is deleted, a program-specific

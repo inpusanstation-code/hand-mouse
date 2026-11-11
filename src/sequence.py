@@ -20,9 +20,9 @@ HOLD = .25               # s a shape must be steady to count as a step (passing 
 GAP = 1.0                # s at most from one step to the next
 COOLDOWN = 1.0           # s after a sequence fired before another can
 MIN_STEPS, MAX_STEPS = 2, 3
-POSTURES = ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle", "v_sign", "v_sign_down",
-            "rock_sign",
-            "thumbs_up", "fist", "fingers_bent", "open_hand", "knife_hand", "thumb_tucked")
+POSTURES = ["thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle", "v_sign", "two_fingers", "v_sign_down",
+            "rock_sign", "index_point", "l_sign", "pinky_up", "shaka", "thumbs_down",
+            "thumbs_up", "fist", "fingers_bent", "open_hand", "knife_hand", "thumb_tucked"]     # + the shapes the user named (src/custom_postures.register)
 
 
 def steps_text(steps: Sequence[str]) -> str:

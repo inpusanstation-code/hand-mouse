@@ -1973,6 +1973,17 @@ class MouseController:
                 self._flush_cursor()
                 pyautogui.mouseUp(button="left", _pause=False)
 
+    def point_click(self, kind: str) -> None:
+        """Pointing mode (src/point_mode.py): "double" = double click, "right" = right click, where the cursor is."""
+        self.event_log.append("double_click" if kind == "double" else "right_click")
+        if self.dry_run:
+            return
+        self._flush_cursor()
+        if kind == "double":
+            pyautogui.doubleClick(_pause=False)
+        else:
+            pyautogui.click(button="right", _pause=False)
+
     def release_all(self) -> None:
         """Safely release any held mouse buttons / keys and reset relative anchors."""
         self.close_switcher(confirm=True)
@@ -2167,11 +2178,15 @@ class MouseController:
                 self._mouse_up()
             self.event_log.append("show_desktop")
             if not self.dry_run:
-                pyautogui.keyDown("win", _pause=False)
-                try:
-                    pyautogui.press("d", _pause=False)
-                finally:
-                    pyautogui.keyUp("win", _pause=False)
+                def send():
+                    pyautogui.keyDown("win", _pause=False)
+                    try:
+                        pyautogui.press("d", _pause=False)
+                    finally:
+                        pyautogui.keyUp("win", _pause=False)
+                # a window once kept "always on top" right after this Win+D (src/topmost_guard.py): undo that
+                from src.topmost_guard import guard
+                guard(send, log=lambda m: print(f"[topmost] {m}", flush=True))
 
         elif action == "alt_tab":
             # Windows window switch: hold Alt, tap Tab, release Alt

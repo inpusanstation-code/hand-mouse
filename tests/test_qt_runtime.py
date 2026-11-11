@@ -192,11 +192,11 @@ def test_motion_mode_suspends_the_pointer_and_sends_the_swipe_command(tmp_path):
     assert not rt.motion.active
 
 
-def test_pressing_the_motion_button_while_paused_does_nothing(tmp_path):
+def test_pressing_the_motion_button_while_paused_enters_a_simulated_motion_mode(tmp_path):
     rt = runtime(tmp_path)
     rt.ui = UiState(stage="main", control_hand="Right", click_style="off", motion_request=1)
     steps(rt, 5)                                               # still paused (starts paused)
-    assert not rt.motion.active
+    assert rt.motion.active and rt.paused                      # 2026-11-11: control off = simulation, nothing is sent
 
 
 def test_cursor_direction_wizard_measures_saves_and_straightens_the_palm_cursor(tmp_path):
