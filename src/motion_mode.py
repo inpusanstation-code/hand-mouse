@@ -184,7 +184,7 @@ def custom_posture_ok(posture: str, f: Dict[str, Any]) -> bool:
     if posture == "thumbs_up":
         return _thumbs_up(f)
     if posture in ("knife_hand", "fingers_bent", "v_sign_down", "two_fingers", "index_point", "l_sign", "pinky_up", "shaka",
-                   "thumbs_down") or posture.startswith("custom_"):      # custom_: a shape the user named and taught
+                   "thumbs_down", "open_hand_back") or posture.startswith("custom_"):      # custom_: a shape the user named and taught
         # shapes added 2026-11-10 (손날, ㄱ자, 거꾸로 V): the same judge as the shape probe and the sequences
         lm = f.get("lm")
         if lm is None or len(lm) < 21:

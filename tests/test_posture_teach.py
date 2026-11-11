@@ -88,3 +88,48 @@ def test_the_model_replaces_only_what_the_rules_said_for_its_examples(tmp_path):
 def test_too_many_misfires_cannot_be_applied(tmp_path, monkeypatch):
     monkeypatch.setattr(pt, "MAX_FALSE", -1.0)
     assert not _teach(tmp_path)["can_apply"]
+
+
+def _thumb_out(lm, far=.9):
+    """The same hand with its thumb stretched away from the fingers (`far` palm lengths from its base)."""
+    import math
+    out = [list(p) for p in lm]
+    palm = math.hypot(lm[9][0] - lm[0][0], lm[9][1] - lm[0][1])
+    dx, dy = lm[2][0] - lm[1][0], lm[2][1] - lm[1][1]          # on along the thumb's own base: a straight thumb
+    n = math.hypot(dx, dy) or 1e-6
+    for joint, share in ((3, .5), (4, 1.0)):
+        out[joint] = [lm[2][0] + dx / n * far * palm * share, lm[2][1] + dy / n * far * palm * share, lm[2][2]]
+    return out
+
+
+def test_a_shape_taught_with_the_thumb_out_needs_the_thumb_out(tmp_path):
+    """2026-11-11 report: a fist turned over (the back of the hand down) was told as the taught "thumb to the right",
+    though the thumb was not out at all."""
+    fists = _frames("half_fist_moving.json")
+    shown = [_thumb_out(lm) for lm in fists[:20]]                       # what the person showed: the thumb well out
+    stats = pt.thumb_stats([{"label": "custom_1", "frames": shown}, {"label": "custom_9", "frames": fists[:20]}])
+    assert stats["custom_1"]["len"] > .8 and stats["custom_1"]["reach"] > .4
+    assert all(pt.thumb_ok(stats["custom_1"], lm) for lm in shown)
+    assert not any(pt.thumb_ok(stats["custom_1"], lm) for lm in fists)                      # the thumb is in: not it
+    assert not any(pt.thumb_ok(stats["custom_1"], lm) for lm in _frames("v_sign_down_20261110.json"))   # long, but on the fingers
+    assert all(pt.thumb_ok(stats["custom_1"], _thumb_out(lm, .75)) for lm in fists[20:40])  # out a little less: still it
+    assert all(pt.thumb_ok(stats["custom_9"], lm) for lm in fists)      # a shape taught with the thumb in: no thumb rule
+    assert pt.thumb_ok(None, fists[0]) and pt.thumb_ok({}, fists[0])
+    # the model keeps each shape's taught thumb and asks it before telling the shape
+    ex = [{"label": "custom_1", "frames": shown[:10], "rule_said": ["fist"], "aspect": pt.ASPECT},
+          {"label": "custom_1", "frames": shown[10:], "rule_said": ["fist"], "aspect": pt.ASPECT}]
+    pt.train(ex, _negatives(), out=pt.CANDIDATE_PATH)
+    assert pt.apply_candidate()
+    pt.reset_cache()
+    model = pt.active_model()
+    assert model.thumb["custom_1"]["reach"] > .4
+    model.predict = lambda *a, **k: ("custom_1", .99)                   # whatever the model says of the turned fist
+    assert model.override(_pts(fists[0]), "fist") == "fist"
+    assert model.override(_pts(shown[0]), "fist") == "custom_1"
+    # a model trained before the thumb was kept reads it from the saved examples
+    data = json.loads(pt.MODEL_PATH.read_text(encoding="utf-8"))
+    data.pop("thumb")
+    pt.MODEL_PATH.write_text(json.dumps(data), encoding="utf-8")
+    pt.save_example("custom_1", shown[:10], ["fist"])
+    pt.reset_cache()
+    assert pt.active_model().thumb["custom_1"]["reach"] > .4

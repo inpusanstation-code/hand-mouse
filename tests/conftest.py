@@ -30,6 +30,16 @@ def _own_fold_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(fold_cache, "CACHE_ROOT", tmp_path / "fold_cache")
 
 
+@pytest.fixture(autouse=True)
+def _no_hand_label_left_over():
+    """Which hand is being judged (src/pose_probe.set_hand_label, set by a runtime's loop on this thread) must not stay
+    for the next test: an open hand would then read as showing its back there."""
+    import src.pose_probe as pose_probe
+    pose_probe.set_hand_label("")
+    yield
+    pose_probe.set_hand_label("")
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "record_off: run with Record & Fling at its shipped default (off)")
 
@@ -46,6 +56,7 @@ def _own_binding_files(tmp_path, monkeypatch):
     import src.sequence as sq
     monkeypatch.setattr(ab, "DEFAULT_BINDINGS_PATH", tmp_path / "gesture_bindings.json")
     monkeypatch.setattr(ab, "_GLOBAL_REGISTRY", None)
+    monkeypatch.setattr(ab, "_BINDING_PROFILE", None)
     monkeypatch.setattr(dm, "DEFAULT_PATH", tmp_path / "draw_shapes.json")
     monkeypatch.setattr(sq, "DEFAULT_PATH", tmp_path / "sequences.json")
     monkeypatch.setattr(pg, "DEFAULT_PATH", tmp_path / "path_gestures.json")
@@ -67,3 +78,36 @@ def _no_taught_shapes(tmp_path, monkeypatch):
     import src.custom_postures as custom_postures
     monkeypatch.setattr(custom_postures, "PATH", tmp_path / "custom_postures.json")
     custom_postures.register()
+
+
+@pytest.fixture(autouse=True)
+def _own_center_prefs(tmp_path, monkeypatch):
+    """The training center's per-profile options (tab left open, training options) go to a file of the test, never to
+    the settings of the person's app."""
+    monkeypatch.setenv("HAND_MOUSE_CENTER_PREFS", str(tmp_path / "center.ini"))
+
+
+_DASHBOARDS = []      # every dashboard a test made, kept to the end of the run
+
+
+@pytest.fixture(autouse=True)
+def _keep_dashboards_alive():
+    """A QtDashboard that is garbage-collected while a later test's QML is running crashes Qt on Windows (access
+    violation). Its signals are connected to its own methods, so it is freed by the collector at some later moment,
+    not when its test ends. Every dashboard made in a test is therefore kept until the run is over."""
+    import sys
+    qd = sys.modules.get("src.qt_dashboard")
+    if qd is not None and not getattr(qd.QtDashboard, "_kept_by_tests", False):
+        original = qd.QtDashboard.__init__
+
+        def init(self, *args, **kwargs):
+            _DASHBOARDS.append(self)
+            original(self, *args, **kwargs)
+
+        qd.QtDashboard.__init__ = init
+        qd.QtDashboard._kept_by_tests = True
+    yield
+    qd = sys.modules.get("src.qt_dashboard")      # imported during this test: its dashboards are in use until it ends
+    if qd is not None and not getattr(qd.QtDashboard, "_kept_by_tests", False):
+        import gc
+        _DASHBOARDS.extend(o for o in gc.get_objects() if type(o).__name__ == "QtDashboard")

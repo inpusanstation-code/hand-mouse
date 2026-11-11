@@ -29,7 +29,7 @@ from src.sequence import POSTURES as SEQ_POSTURES  # noqa: E402
 # if I want"). A new hold gesture starts at its minimum; the user can raise it (up to HOLD_MAX) in the AI list.
 HOLD_MIN = .4           # the user's upside-down V ran well at 0.4 s; below that a passing shape fires
 HOLD_MIN_EVERYDAY = 1.0  # shapes the hand is in during normal use (open hand, fist, thumb tucked): shorter fires all day
-EVERYDAY_POSTURES = ("open_hand", "fist", "thumb_tucked")
+EVERYDAY_POSTURES = ("open_hand", "open_hand_back", "fist", "thumb_tucked")
 HOLD_MAX = 3.0
 HOLD_SECONDS = HOLD_MIN  # kept for older callers
 
@@ -104,11 +104,13 @@ def schema(gesture_keys: Sequence[str]) -> Dict[str, Any]:
                             },
                         },
                         "enabled": {"type": "boolean"},
+                        "motion_only": {"type": "boolean",
+                                        "description": "only for __new__: true = the new gesture counts only in motion mode"},
                         "reason": {"type": "string", "description": "Short Korean reason"},
                     },
                     "required": ["gesture_key", "new_name", "new_posture", "new_trigger", "new_sequence", "app_match",
                                  "action_type",
-                                 "action_value", "steps", "enabled", "reason"],
+                                 "action_value", "steps", "enabled", "motion_only", "reason"],
                     "additionalProperties": False,
                 },
             },
@@ -168,6 +170,9 @@ def system_prompt(gestures: Sequence[Dict[str, Any]]) -> str:
         "For every other proposal new_name, new_posture and new_trigger are \"\". Never create a gesture that is already",
         "in the list (same posture and movement): use the existing key.",
         "Postures: " + ", ".join(f"{k} ({v})" for k, v in POSTURE_NAMES_KO.items() if k != "any"),
+        "open_hand_back is the open hand with the BACK of the hand to the camera (손등): use it only when the user says",
+        "so or the confirmed information shows it; a plain 손 펴기 is open_hand (the palm to the camera, and either side",
+        "while nothing is connected to open_hand_back).",
         "Movements: " + ", ".join(f"{k} ({v})" for k, v in TRIGGER_NAMES_KO.items()),
         "Time-series motions (motion_<direction>): one sweep of the hand in that direction while holding the posture,",
         "recognised in motion mode (the user turns motion mode on first, e.g. thumbs-up): "
@@ -183,6 +188,10 @@ def system_prompt(gestures: Sequence[Dict[str, Any]]) -> str:
         "Sequences: hand shapes done one after another (each held a moment, the next within 1 s), e.g. 'V 사인 다음 주먹'.",
         "Use gesture_key \"__new__\" with new_sequence = the shapes in order (2-3, no shape twice in a row) and",
         "new_posture/new_trigger \"\". For every other proposal new_sequence is []. Shapes: " + ", ".join(SEQ_POSTURES) + ".",
+        "motion_only: true makes a NEW gesture (posture + swipe/hold/double pinch, a sequence, or shape drawing) count",
+        "only while motion mode is on; set it only when the user asks for that ('모션 모드에서만', '모션 모드일 때만').",
+        "Otherwise false (motion_<direction> gestures are motion-mode gestures anyway). It cannot change a gesture that",
+        "already exists: tell the user in `summary` to press [모션 모드에서만] on that gesture's card in the list.",
         "",
         "app_match: \"\" applies everywhere (the default command). A non-empty app_match (process name such as",
         "chrome.exe, POWERPNT.EXE, or a window-title word such as YouTube) adds a program-specific command that is",
@@ -383,6 +392,10 @@ def check(answer: Dict[str, Any], gestures: Sequence[Dict[str, Any]]) -> Dict[st
         risky = bool(warning)
         if risky:
             warning += " · 직접 확인하고 체크하세요"
+        # "motion mode only" (2026-11-11): for a gesture being created; a motion_<direction> gesture is one anyway
+        motion_only = bool(item.get("motion_only") is True and g is not None
+                           and (g.get("new_sequence") or (g.get("new_posture")
+                                                          and not str(g.get("new_trigger", "")).startswith("motion_"))))
         current = "" if g is None else format_action_badge(str(g.get("action_type", "")), str(g.get("action_value", "")))
         if g is not None and (g.get("new_posture") or g.get("new_sequence") or key == NEW):
             current = "(새로 만듦)"
@@ -394,7 +407,9 @@ def check(answer: Dict[str, Any], gestures: Sequence[Dict[str, Any]]) -> Dict[st
             else:
                 current = "(없음)"
         rows.append({
-            "gesture_key": key, "gesture_name": str(g.get("name", key)) if g else key,
+            "gesture_key": key,
+            "gesture_name": (str(g.get("name", key)) + (" · 모션 모드에서만" if motion_only else "")) if g else key,
+            "motion_only": motion_only,
             "app_match": app, "action_type": atype, "action_value": value, "enabled": enabled,
             "type_name": TYPE_NAMES.get(atype, atype),
             "steps": steps,
@@ -418,13 +433,16 @@ def _apply_row(r: Dict[str, Any], registry, request: str, when: str, sequences, 
     entry = {"time": when, "request": request[:300], "gesture_key": key, "gesture_name": r["gesture_name"],
              "app_match": app, "action_type": r["action_type"], "action_value": r["action_value"],
              "enabled": bool(r["enabled"]), "after": r["after"], "steps": r.get("steps") or []}
+    only = bool(r.get("motion_only"))
+    only_text = " (모션 모드에서만)" if only else ""
     if r.get("new_sequence"):
         from src.sequence import SequenceStore
         store = sequences if sequences is not None else SequenceStore()
         seq_key = store.add(r.get("new_name", ""), r["new_sequence"])
         registry.set_binding(seq_key, r["action_type"], r["action_value"], track="sequence")
+        store.set_motion_only(seq_key, only)
         name = store.items[seq_key]["name"]
-        done.append(f"새 이어 하기 '{name}' 등록 → {r['after']}")
+        done.append(f"새 이어 하기 '{name}' 등록 → {r['after']}{only_text}")
         log.append({**entry, "gesture_key": seq_key, "gesture_name": name, "created": True, "sequence": True,
                     "before": {}, "before_text": "(새로 만듦)"})
         return
@@ -433,8 +451,9 @@ def _apply_row(r: Dict[str, Any], registry, request: str, when: str, sequences, 
         store = paths if paths is not None else PathStore()
         path_key = store.add(r.get("new_name", ""), r["new_posture"], r["new_trigger"])
         registry.set_binding(path_key, r["action_type"], r["action_value"], track="path")
+        store.set_motion_only(path_key, only)
         name = store.items[path_key]["name"]
-        done.append(f"새 손 모양 그리기 '{name}' 등록 → {r['after']}")
+        done.append(f"새 손 모양 그리기 '{name}' 등록 → {r['after']}{only_text}")
         log.append({**entry, "gesture_key": path_key, "gesture_name": name, "created": True, "path": True,
                     "before": {}, "before_text": "(새로 만듦)"})
         return
@@ -450,7 +469,9 @@ def _apply_row(r: Dict[str, Any], registry, request: str, when: str, sequences, 
         comp = registry.register_composite_gesture("", r.get("new_name", ""), r["new_posture"], trigger,
                                                    r["action_type"], r["action_value"],
                                                    hold_seconds=hold_minimum(r["new_posture"]) if trigger == "hold" else .55)
-        done.append(f"새 동작 '{comp['name']}' 등록 → {r['after']}")
+        if only:
+            registry.set_composite_motion_only(comp["key"], True)
+        done.append(f"새 동작 '{comp['name']}' 등록 → {r['after']}{only_text}")
         log.append({**entry, "gesture_key": comp["key"], "gesture_name": comp["name"], "created": True,
                     "before": {}, "before_text": "(새로 만듦)"})
         return
@@ -521,7 +542,7 @@ def gesture_list(registry) -> List[Dict[str, Any]]:
     for key, c in registry.composite_gestures.items():
         posture = POSTURE_NAMES_KO.get(str(c.get("base_posture", "")), str(c.get("base_posture", "")))
         trigger = TRIGGER_NAMES_KO.get(str(c.get("trigger_type", "")), str(c.get("trigger_type", "")))
-        add(key, str(c.get("name", key)), f"복합 동작: {posture} + {trigger}")
+        add(key, str(c.get("name", key)), f"복합 동작: {posture} + {trigger}" + (" (모션 모드에서만)" if c.get("motion_only") else ""))
         out[-1]["posture"], out[-1]["trigger"] = str(c.get("base_posture", "")), str(c.get("trigger_type", ""))
     try:
         from src.path_gesture import PathStore
@@ -702,10 +723,16 @@ class History:
     def rows(self, registry) -> List[Dict[str, Any]]:
         """Newest first, with whether each is still in force (a later change may have replaced it)."""
         out = []
+        modes = self._mode_holders(registry)
         for i, e in enumerate(self.load()):
             if e.get("undone"):
                 continue
             row = {**e, "index": i, "current": still_in_force(e, registry, self.sequences_path, self.paths_path)}
+            # "motion mode only" (2026-11-11): a switch on the gestures that can have it; a motion gesture always is
+            holder = modes.get(e.get("gesture_key", ""))
+            row["mode_option"] = bool(row["current"]) and holder is not None and not e.get("app_match")
+            row["motion_only"] = bool(holder.get("motion_only")) if holder is not None else (
+                e.get("gesture_key", "") in registry.custom_motions)
             comp = registry.composite_gestures.get(e.get("gesture_key", ""))    # created here or an existing hold gesture
             if comp is not None and comp.get("trigger_type") == "hold" and not e.get("motion"):
                 posture = str(comp.get("base_posture", ""))
@@ -714,6 +741,39 @@ class History:
             row["editable"] = bool(row["current"]) and e.get("enabled", True) is not False
             out.append(row)
         return list(reversed(out))
+
+    def _mode_holders(self, registry) -> Dict[str, Dict[str, Any]]:
+        """Gesture key -> its stored definition, for the gestures that can be "motion mode only": composite gestures
+        (shape + swipe / hold / double pinch), sequences and shape drawings."""
+        out: Dict[str, Dict[str, Any]] = dict(registry.composite_gestures)
+        try:
+            from src.sequence import SequenceStore
+            out.update(SequenceStore(self.sequences_path).items)
+            from src.path_gesture import PathStore
+            out.update(PathStore(self.paths_path).items)
+        except Exception:
+            pass
+        return out
+
+    def set_motion_only(self, index: int, registry, on: bool) -> str:
+        """Make the gesture of this list line count only while motion mode is on (or everywhere again)."""
+        entries = self.load()
+        if not 0 <= index < len(entries) or entries[index].get("undone"):
+            raise ValueError("바꿀 항목이 없어요.")
+        e = entries[index]
+        key = e["gesture_key"]
+        if not still_in_force(e, registry, self.sequences_path, self.paths_path):
+            raise ValueError("그 뒤에 다른 곳에서 바뀌어서 여기서는 바꾸지 않았어요.")
+        from src.path_gesture import PathStore
+        from src.sequence import SequenceStore
+        done = registry.set_composite_motion_only(key, on)
+        done = done or SequenceStore(self.sequences_path).set_motion_only(key, on)
+        done = done or PathStore(self.paths_path).set_motion_only(key, on)
+        if not done:
+            raise ValueError("이 동작은 모드를 정할 수 없어요 (손 모양으로 새로 만든 동작만 돼요).")
+        name = e.get("gesture_name", key)
+        return (f"'{name}': 이제 모션 모드에서만 동작해요 (엄지 위로 또는 [모션 모드] 버튼으로 켠 뒤)." if on
+                else f"'{name}': 다시 평소 조작 중에 동작해요.")
 
     def edit(self, index: int, registry, action_type: str, action_value: str,
              hold_seconds: Optional[float] = None) -> str:

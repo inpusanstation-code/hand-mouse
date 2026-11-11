@@ -264,40 +264,138 @@ def area_points(x: int, y: int, radius: int = AREA_PX) -> list:
     return pts
 
 
+_USER32 = None
+
+
+def _user32():
+    """This module's OWN handle on user32. 2026-11-12, from the app's trace: setting argument types on the shared
+    `ctypes.windll.user32` (GetAncestor) broke the uiautomation package's own calls to the same function - after four
+    clicks every file check ended in "ArgumentError: argument 2 ... 'c_long' object cannot be interpreted as an integer"."""
+    global _USER32
+    if _USER32 is None:
+        import ctypes
+        from ctypes import wintypes
+        user = ctypes.WinDLL("user32", use_last_error=True)
+        user.WindowFromPoint.argtypes, user.WindowFromPoint.restype = [wintypes.POINT], wintypes.HWND
+        user.GetAncestor.argtypes, user.GetAncestor.restype = [wintypes.HWND, ctypes.c_uint], wintypes.HWND
+        user.GetParent.argtypes, user.GetParent.restype = [wintypes.HWND], wintypes.HWND
+        user.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        _USER32 = user
+    return _USER32
+
+
+def window_under(x: int, y: int) -> Tuple[int, str]:
+    """(handle of the window the MOUSE would reach at that point, class of its top-level window). Windows skips what
+    lets clicks through (a transparent overlay, a tooltip); (0, "") where that cannot be asked."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user = _user32()
+        hwnd = user.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+        if not hwnd:
+            return 0, ""
+        root = user.GetAncestor(hwnd, 2) or hwnd            # GA_ROOT
+        buf = ctypes.create_unicode_buffer(256)
+        user.GetClassNameW(root, buf, 256)
+        return int(hwnd), buf.value
+    except Exception:
+        return 0, ""
+
+
+def window_parents(hwnd: int, limit: int = 4) -> list:
+    """The window and up to `limit` of its parents, nearest first (the list of files may hang one level up)."""
+    out = [int(hwnd)]
+    try:
+        user = _user32()
+        for _ in range(limit):
+            hwnd = user.GetParent(hwnd)
+            if not hwnd:
+                break
+            out.append(int(hwnd))
+    except Exception:
+        pass
+    return out
+
+
+def item_at(items: Sequence[Tuple[str, Tuple[int, int, int, int]]], x: int, y: int) -> Any:
+    """The (name, rectangle) whose rectangle holds the point, "" when none does."""
+    for name, (left, top, right, bottom) in items:
+        if left <= x < right and top <= y < bottom:
+            return (name, (left, top, right, bottom))
+    return ""
+
+
+def item_near(items: Sequence[Tuple[str, Tuple[int, int, int, int]]], x: int, y: int, radius: int) -> Any:
+    """The item the point is on or, failing that, the nearest one whose rectangle is within `radius` pixels of it."""
+    best, best_d = "", float(radius) + 1e-6
+    for name, (left, top, right, bottom) in items:
+        dx = max(left - x, 0, x - (right - 1))
+        dy = max(top - y, 0, y - (bottom - 1))
+        d = math.hypot(dx, dy)
+        if d == 0:
+            return (name, (left, top, right, bottom))
+        if d <= best_d:
+            best, best_d = (name, (left, top, right, bottom)), d
+    return best
+
+
 def uia_file_probe(radius_of: Callable[[], int] = lambda: AREA_PX) -> Callable[[int, int], Any]:
     """(x, y) -> (name, (left, top, right, bottom)) of the file / folder item at that point or, failing that, the
-    nearest one within `radius_of()` pixels of it; "" when there is none."""
+    nearest one within `radius_of()` pixels of it; "" when there is none.
+
+    How (2026-11-12, after two traces of "it worked a few times, then never"): Windows is asked which window the MOUSE
+    reaches at the point; when that is a file window (desktop, Explorer, a file dialog) the point is looked up among
+    that window's own items, listed once a second. The earlier way asked UI Automation "what is at this point" 17
+    times per check - that question stops at the first window whatever it lets through (the graphics driver's
+    full-screen overlay answered "a document" for a desktop file) and each of those answers took a fifth of a second,
+    so one check took seconds and was stale by the time it came (the label stayed at "파일 확인 중…")."""
     import uiautomation as auto
 
     auto.SetGlobalSearchTimeout(0)
+    listed: dict = {}                          # window handle -> (when, its file items): asked at most once a second
 
-    def at(x: int, y: int):
-        ctrl = auto.ControlFromPoint(x, y)
-        for _ in range(3):                     # the item's label / icon sits inside the list item
+    def items_of(hwnd: int) -> list:
+        """Every list item (file / folder) in that window, with its rectangle."""
+        hit = listed.get(hwnd)
+        if hit is not None and time.monotonic() - hit[0] < 1.0:
+            return hit[1]
+        out: list = []
+        stack = [(auto.ControlFromHandle(hwnd), 0)]
+        while stack and len(out) < 3000:
+            ctrl, depth = stack.pop()
             if ctrl is None:
-                return ""
-            if ctrl.ControlTypeName == "ListItemControl":
-                break
-            ctrl = ctrl.GetParentControl()
-        if ctrl is None or ctrl.ControlTypeName != "ListItemControl":
-            return ""
-        top = ctrl.GetTopLevelControl()
-        if top is None or top.ClassName not in FILE_WINDOWS:
-            return ""
-        r = ctrl.BoundingRectangle
-        return (str(ctrl.Name or "?"), (int(r.left), int(r.top), int(r.right), int(r.bottom)))
+                continue
+            for child in ctrl.GetChildren():
+                kind = child.ControlTypeName
+                if kind == "ListItemControl":
+                    r = child.BoundingRectangle
+                    out.append((str(child.Name or "?"), (int(r.left), int(r.top), int(r.right), int(r.bottom))))
+                elif depth < 5 and kind in ("ListControl", "PaneControl", "GroupControl", "WindowControl", "CustomControl"):
+                    stack.append((child, depth + 1))
+        if len(listed) > 8:
+            listed.clear()
+        listed[hwnd] = (time.monotonic(), out)
+        return out
 
     def probe(x: int, y: int):
-        radius = int(radius_of())
-        for px, py in (area_points(x, y, radius) if radius > 0 else [(x, y)]):
+        hwnd, cls = window_under(x, y)
+        probe.seen = "mouse reaches " + (cls or "?")
+        if not hwnd or cls not in FILE_WINDOWS:
+            return ""
+        radius = max(0, int(radius_of()))
+        for handle in window_parents(hwnd):        # the window under the point, else the one that holds the list
             try:
-                found = at(px, py)
-            except Exception:
-                found = ""
-            if found:
-                return found
+                items = items_of(handle)
+            except Exception as exc:               # a window that went away or does not answer
+                probe.seen += f" · error {type(exc).__name__}: {exc}"[:120]
+                continue
+            if items:
+                probe.seen += f" · {len(items)} items"
+                return item_near(items, int(x), int(y), radius)
+        probe.seen += " · no items"
         return ""
 
+    probe.seen = ""
     return probe
 
 
@@ -317,15 +415,35 @@ class FileTargetProbe:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # for the person and the trace (2026-11-11: "아무리 오래 파일에 검지끝을 두어도 … 작동을 안한다" and nothing said why)
+        self.error = ""                      # why the check could not start (then it never answers)
+        self.seen = ""                       # what Windows said was at the last asked point
+        self.asked = 0
+        self.answered = 0
+
+    def state(self, x: float, y: float) -> str:
+        """"off" (the check cannot run) | "file" | "none" (asked: no file / folder there) | "asking" (no answer yet)."""
+        if not self.available:
+            return "off"
+        if self.target(x, y) is not None:
+            return "file"
+        got = self.answer(x, y)
+        return "asking" if got is None else "file" if got else "none"
 
     def ask(self, x: float, y: float) -> None:
         p = (int(round(x)), int(round(y)))
         have = self._have
-        if have is not None and abs(have[0][0] - p[0]) + abs(have[0][1] - p[1]) <= self.NEAR_PX:
+        fresh = time.monotonic() - getattr(self, "_have_t", 0.0) < self.REFRESH
+        # 2026-11-11 report ("아무리 오래 파일에 검지끝을 두어도 포인팅모드 더블클릭이 작동을 안한다"): an answer for a point
+        # this near was kept for ever. A "no file here" given once - the element could not be read that moment, a window
+        # was over the file - then stood for as long as the fingertip rested there, which is exactly what the person
+        # does to click. Every answer, yes or no, is asked again after REFRESH.
+        if have is not None and fresh and abs(have[0][0] - p[0]) + abs(have[0][1] - p[1]) <= self.NEAR_PX:
             return
-        if self.target(x, y) is not None and time.monotonic() - getattr(self, "_have_t", 0.0) < self.REFRESH:
+        if self.target(x, y) is not None and fresh:
             return                             # still on / around the item that was found: no need to ask again yet
         self._want = p
+        self.asked += 1
         self._wake.set()
         if self._thread is None and self.available:
             self._thread = threading.Thread(target=self._run, name="point-target", daemon=True)
@@ -366,6 +484,7 @@ class FileTargetProbe:
                 probe = self._factory()
         except Exception as exc:                                  # no UI Automation: the dwell never clicks
             print(f"[pointing mode] file check disabled: {exc}", file=sys.stderr)
+            self.error = f"{type(exc).__name__}: {exc}"[:200]
             self.available = False
             return
         while not self._stop.is_set():
@@ -376,8 +495,11 @@ class FileTargetProbe:
                 continue
             try:
                 found = probe(*p)
-            except Exception:
+                self.seen = str(getattr(probe, "seen", ""))
+            except Exception as exc:
                 found = ""
+                self.seen = f"error {type(exc).__name__}: {exc}"[:120]
+            self.answered += 1
             self._have = (p, found)
             self._have_t = time.monotonic()
             time.sleep(.03)

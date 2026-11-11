@@ -1,5 +1,6 @@
 """Qt Quick desktop shell. Shares the existing engine loop with the Tk shell."""
 import json
+import os
 from collections import deque
 from pathlib import Path
 import copy
@@ -60,6 +61,23 @@ CLICK_LABELS = {
 }
 
 
+STUDIO_FONT = "Noto Sans KR"   # src/theme/Studio.qml
+
+
+def register_studio_font() -> bool:
+    """Register the bundled Noto Sans KR only when the PC has no font of that name (True when registered).
+
+    2026-11-11, a PC with Noto Sans KR installed (Regular, Bold, Medium and a variable font): bold Korean titles came out
+    as other Hangul ("엄지+중지 (좌클릭)" -> 엷짤+...). Qt took glyph numbers from one "Noto Sans KR" file and drew them
+    from another (the bundled variable font is a different build). Native text rendering did the same; leaving the
+    bundled copy out fixed it. A PC without the font still gets the bundled one."""
+    from PySide6.QtGui import QFontDatabase
+    if STUDIO_FONT in QFontDatabase.families():
+        return False
+    QFontDatabase.addApplicationFont(str(Path(__file__).with_name("assets") / "fonts" / "NotoSansKR.ttf"))
+    return True
+
+
 def text_input_has_focus() -> bool:
     """True while the keyboard goes into a text field, in any of the app's windows (TextField, SpinBox text, ...)."""
     item = QGuiApplication.focusObject()
@@ -96,6 +114,55 @@ def _screen_ratio() -> float:
         return 1.0
 
 
+CENTER_PREFS_ENV = "HAND_MOUSE_CENTER_PREFS"   # tests: an .ini file for the training center's per-profile options
+
+
+class ProfilePrefs:
+    """The app's saved options, per profile (2026-11-11, "프로필 없음 또는 아무것도 안 건드린 프로필 = 기본 상태").
+
+    Read: the profile's own value when it has one, else the value saved without a profile (the default state).
+    Written: into the profile when one is on, else into the default state. AI keys and the like are never per profile.
+    `own()` is where the per-profile values live (the same settings in the app, a file of their own in tests)."""
+    SHARED = ("llm", "center/", "profile/")
+
+    def __init__(self, settings, owner, own):
+        self.settings, self.owner, self.own = settings, owner, own
+
+    def _key(self, key):
+        name = getattr(self.owner, "profile", None)
+        if not name or str(key).startswith(self.SHARED):
+            return None
+        return f"profile/{name}/{key}"
+
+    def value(self, key, default=None, **kw):
+        mine = self._key(key)
+        if mine is not None and self.own().contains(mine):
+            return self.own().value(mine, default, **kw)
+        return self.settings.value(key, default, **kw)
+
+    def setValue(self, key, value):
+        mine = self._key(key)
+        if mine is not None:
+            self.own().setValue(mine, value)
+        else:
+            self.settings.setValue(key, value)
+
+    def remove(self, key):
+        mine = self._key(key)
+        if mine is not None:
+            self.own().remove(mine)
+        else:
+            self.settings.remove(key)
+
+    def contains(self, key):
+        mine = self._key(key)
+        return (mine is not None and self.own().contains(mine)) or self.settings.contains(key)
+
+    def sync(self):
+        self.settings.sync()
+        self.own().sync()
+
+
 def _virtual_hand_default() -> bool:
     """config "virtual_hand_enabled" (on unless set to false)."""
     try:
@@ -129,6 +196,7 @@ class QtDashboard(QObject):
     fingerFrameChanged = Signal()     # the fingertips drawn next to the cursor (src/FingerTracker.qml)
     pointChanged = Signal()           # pointing mode's dwell ring at the cursor (src/point_mode.py)
     toastChanged = Signal()           # a short notice over the window that goes away by itself
+    onnxCandidateChanged = Signal()   # a candidate of the exported gesture model appeared, was applied or dropped
     useCasesChanged = Signal()        # the [사례 보기] viewer's cases (src/use_view.py)
     simChanged = Signal()             # the mouse control is off: gestures and motion mode are only shown (simulation)
     llmChanged = Signal()             # gestures connected in words (src/llm_binding.py)
@@ -140,6 +208,9 @@ class QtDashboard(QObject):
     hiddenToTray = Signal()           # the window was closed into the tray
     trackingActiveChanged = Signal()  # only when the test window opens or closes
     trainingChanged = Signal()        # training center: data, scores, training job, export
+    centerPrefsChanged = Signal()     # the training center's options were read again (another profile)
+    profilesChanged = Signal()        # the list of profiles, or the note under it
+    bindingRowsChanged = Signal()     # the "동작 연결" list (follows the hand mode in use)
     motionTemplatesDone = Signal(str, object, str)   # (key, result, error) from the template worker thread
     poseTeachDone = Signal(object, str)              # (report, error) from the taught-shape trainer thread
     poseTeachProgress = Signal(str)
@@ -173,8 +244,13 @@ class QtDashboard(QObject):
         # QApplication (not QGuiApplication): the tray menu is a Qt Widgets QMenu
         self.application = QApplication.instance() or QApplication([])
         self.application.setQuitOnLastWindowClosed(False)
-        self.preferences = (QSettings(str(DEFAULT_CONFIG_PATH.parent / "tcn-ui.ini"), QSettings.IniFormat)
-                            if self.tcn_app else QSettings("MANUX", "Hand-Mouse"))
+        self.profile = profiles.get_active(self._config_dir())   # the profile in use (None = the default state)
+        self.profile_epoch = 0
+        self.profile_message = ""
+        self.settings = (QSettings(str(DEFAULT_CONFIG_PATH.parent / "tcn-ui.ini"), QSettings.IniFormat)
+                         if self.tcn_app else QSettings("MANUX", "Hand-Mouse"))
+        # read and written through the profile in use (ProfilePrefs): its own value, else the default state's
+        self.preferences = ProfilePrefs(self.settings, self, self._center_store)
         saved = self.preferences.value("controlHand", "", type=str)
         self.control_hand = saved if saved in ("Left", "Right") else ""
         self.use_index_pointer = (False if self.tcn_app
@@ -183,7 +259,7 @@ class QtDashboard(QObject):
         # "pinch": thumb + middle/ring (existing). "trigger": option A, thumb on the index side.
         # "off": cursor tracking only, no click detection at all.
         self.click_style = saved_click if saved_click in CLICK_STYLES else "pinch"
-        self.profile = profiles.get_active(DEFAULT_CONFIG_PATH.parent)   # calibration profile in use
+        self._use_profile_bindings()
         self.motion_request = 0                                 # +1 per press of the motion-mode button
         self.palm_axes_requests = [0, 0, 0]                     # start / cancel / reset presses (palm cursor direction)
         self.rec_mode = "off"                                   # dataset recording: off | guided | free
@@ -230,11 +306,17 @@ class QtDashboard(QObject):
         self.selected_sim_file = ""                             # currently selected simulator target recording file
         self._pending_sim_request = None                        # queued (filename, use_cleaned) if requested while busy
         self.aug_settings = get_augmentation_settings()         # augmentation enabled / strength / factor settings
-        saved_train_mode = self.preferences.value("trainingMode", "", type=str)
+        # the training center's options are kept per calibration profile (centerPref); the keys without a profile
+        # ("trainingMode", "trainingDevice") are what was saved before that and still count when a profile has none
+        saved_train_mode = str(self.centerPref("trainingMode", "") or "")
         self.training_mode = saved_train_mode if saved_train_mode in ("fast", "thorough") else get_training_mode()
         self._gpu_cap = detect_gpu_training_capability()
-        saved_train_dev = self.preferences.value("trainingDevice", "", type=str)
+        saved_train_dev = str(self.centerPref("trainingDevice", "") or "")
         self.training_device_pref = saved_train_dev if saved_train_dev in ("auto", "gpu", "cpu") else get_training_device()
+        self._binding_rows_cache = None
+        self.stateChanged.connect(self._sync_binding_rows)
+        self.trainingChanged.connect(self._sync_binding_rows)
+        self.drawShapesChanged.connect(self._sync_binding_rows)
         self.diag_result = {}                                   # latest app self-diagnostics result
         from tools import hub as hf_hub
         self.hub_config = hf_hub.load_hub_config()
@@ -334,9 +416,7 @@ class QtDashboard(QObject):
         self.remaining = 5
 
         QQuickStyle.setStyle("Basic")
-        # the Studio theme's font (src/theme/Studio.qml), bundled so Korean shows whatever fonts the PC has
-        from PySide6.QtGui import QFontDatabase
-        QFontDatabase.addApplicationFont(str(Path(__file__).with_name("assets") / "fonts" / "NotoSansKR.ttf"))
+        register_studio_font()
         self.engine = QQmlApplicationEngine()
         self.provider = CameraImage()
         self.engine.addImageProvider("vision", self.provider)
@@ -484,16 +564,102 @@ class QtDashboard(QObject):
         """Learning while using (docs/use-log.md): the runtime asks for a round when enough commands were logged and the hand has
         been away. `request` = (+1 per request, use log folder). The round learns from the corrections and from that log; the
         candidate still has to pass the same checks before it replaces anything."""
-        number, folder = request or (0, "")
+        number, folder, review = (tuple(request or (0, "")) + (False,))[:3]
         if folder:
             self.use_log_folder = folder       # where the simulator's "쓰면서 모은 자료" reads from (src/use_sim.py)
         if number == getattr(self, "learn_request_seen", 0):
             return
         self.learn_request_seen = number
-        if folder and self._online_job().start(use_events=folder):
+        if folder and self._online_job().start(use_events=folder, **({"require_review": True} if review else {})):
             self.learn_auto = True
             self.learn_message = "쓰면서 모은 사용 사례로 TCN 학습을 시작했어요 (자동). 카메라와 마우스는 그대로 쓸 수 있어요."
             self.learnChanged.emit()
+
+    def auto_base(self, number):
+        """The runtime found a learning round due and no base model in data/online (a fresh copy of the project): make it
+        (scripts/online_make_base.py: guided recordings -> samples -> encoder; a minute or two). Once per request."""
+        number = int(number or 0)
+        if number == getattr(self, "base_request_seen", 0):
+            return
+        self.base_request_seen = number
+        from src.online.app_job import ROOT, _python
+        from src.online.samples import DEFAULT_ROOT
+        if self.online_root and Path(self.online_root) != DEFAULT_ROOT:
+            return                             # (the script makes the default store's model only)
+        command = [_python(), "-u", str(ROOT / "scripts" / "online_make_base.py"), "--progress"]
+        if self._online_job().start(command=command):
+            self.learn_auto = True
+            self.learn_message = "학습에 필요한 기본 모델을 만드는 중이에요 (1~2분). 카메라와 마우스는 그대로 쓸 수 있어요."
+            self.learnChanged.emit()
+
+    # ---- a candidate of the exported gesture model, made from the collected uses (scripts/onnx_auto_update.py)
+    def auto_onnx(self, number):
+        """The runtime found enough new uses for a candidate of models/gesture_tcn.onnx: train one in the background.
+        A request that finds the learning process busy is tried again (the round under way comes first)."""
+        number = int(number or 0)
+        if number == getattr(self, "onnx_request_seen", 0):
+            return
+        from src.online.app_job import ROOT, _python
+        command = [_python(), "-u", str(ROOT / "scripts" / "onnx_auto_update.py"), "--progress",
+                   "--use-events", str(self._use_folder())]
+        if self.online_root:
+            command += ["--root", str(self.online_root)]
+        if self._online_job().start(command=command):
+            self.onnx_request_seen = number
+            self.learn_auto = True
+            self.learn_message = "쓰면서 모은 사례로 기본 손짓 모델 후보를 학습하기 시작했어요 (약 10분)."
+            self.learnChanged.emit()
+
+    def _candidate_dir(self):
+        return Path(__file__).resolve().parents[1] / "models" / "candidate"
+
+    @Property("QVariant", notify=onnxCandidateChanged)
+    def onnxCandidate(self):
+        """{"ready", "created", "minutes", "trained_on", "held_out", "rows": [{"what", "current", "candidate", "better"}],
+        "notes": [...], "can_rollback"}: the waiting candidate next to the model in use, in words (src/onnx_candidate.py)."""
+        from src.onnx_candidate import view
+        try:
+            return view(self._candidate_dir(), self._candidate_dir().parent)
+        except Exception as exc:
+            return {"ready": False, "rows": [], "notes": [f"후보를 읽지 못했어요: {exc}"], "can_rollback": False}
+
+    @Slot(result=bool)
+    def applyOnnxCandidate(self):
+        """The person looked at the comparison and wants the candidate: the model in use is kept in a backup folder."""
+        from src.onnx_candidate import apply
+        try:
+            backup = apply(self._candidate_dir(), self._candidate_dir().parent)
+        except Exception as exc:
+            self.notify(f"새 모델을 적용하지 못했어요: {exc}")
+            return False
+        self.model_version += 1                      # the runtime loads the gesture checker again
+        self.online_commands.append(("use_recount",))
+        self.notify(f"새 손짓 모델을 적용했어요. 이전 모델은 {backup.name}에 보관했고 [이전 모델로 되돌리기]로 돌아갈 수 있어요.")
+        self.onnxCandidateChanged.emit()
+        self.stateChanged.emit()
+        return True
+
+    @Slot()
+    def discardOnnxCandidate(self):
+        from src.onnx_candidate import discard
+        discard(self._candidate_dir())
+        self.online_commands.append(("use_recount",))
+        self.notify("새 후보를 버렸어요. 지금 쓰는 모델은 그대로예요.")
+        self.onnxCandidateChanged.emit()
+
+    @Slot(result=bool)
+    def rollbackOnnxModel(self):
+        from src.onnx_candidate import rollback
+        try:
+            name = rollback(self._candidate_dir().parent)
+        except Exception as exc:
+            self.notify(f"되돌리지 못했어요: {exc}")
+            return False
+        self.model_version += 1
+        self.notify(f"이전 손짓 모델({name})로 되돌렸어요.")
+        self.onnxCandidateChanged.emit()
+        self.stateChanged.emit()
+        return True
 
     def set_learn_note(self, note):
         """The runtime's line about the taught gestures' uses (Snapshot.learn_note), for the main screen's banner."""
@@ -542,6 +708,63 @@ class QtDashboard(QObject):
         import threading
         threading.Thread(target=work, name="use-cases", daemon=True).start()
 
+    # ---- the review session before learning (src/use_review.py, 2026-11-11): the person passes or rejects each collected use
+    @Slot(str, str)
+    def openUseReview(self, key, name):
+        """One card's uses that no learning round has taken yet, for the person to judge (통과 / 오탐지)."""
+        key, name = str(key or ""), str(name or key)
+        self.use_cases = {"key": key, "name": name, "loading": True, "error": "", "items": [], "review": True}
+        self.useCasesChanged.emit()
+        from src.online.samples import DEFAULT_ROOT
+        from src.use_view import review_cases
+        folder, root = self._use_folder(), (self.online_root or DEFAULT_ROOT)
+
+        def work():
+            try:
+                items = review_cases(folder, root, key)
+                self.use_cases = {"key": key, "name": name, "loading": False, "error": "", "items": items, "review": True}
+            except Exception as exc:
+                self.use_cases = {"key": key, "name": name, "loading": False, "error": f"읽지 못했어요: {exc}", "items": [],
+                                  "review": True}
+            self.useCasesChanged.emit()
+
+        import threading
+        threading.Thread(target=work, name="use-review", daemon=True).start()
+
+    def _judge(self, indexes, verdict):
+        from src.use_review import BAD, OK, set_verdicts
+        verdict = verdict if verdict in (OK, BAD) else ""
+        cases = dict(getattr(self, "use_cases", {}) or {})
+        items = [dict(i) for i in cases.get("items") or []]
+        changed = []
+        for n in indexes:
+            if 0 <= n < len(items) and not items[n].get("marked"):
+                items[n]["review"] = verdict
+                changed.append((items[n].get("file", ""), items[n].get("id"), verdict))
+        if not changed:
+            return
+        set_verdicts(self._use_folder(), changed)
+        cases["items"] = items
+        cases["judged"] = int(cases.get("judged", 0)) + 1     # (the list stays where it is: only the verdicts changed)
+        self.use_cases = cases
+        self.useCasesChanged.emit()
+
+    @Slot(int, str)
+    def judgeUseCase(self, index, verdict):
+        """The verdict of one row of the review session: "ok" (meant), "bad" (a false detection), "" (take it back)."""
+        self._judge([int(index)], str(verdict or ""))
+
+    @Slot(str)
+    def judgeUseRest(self, verdict):
+        """Every row without a verdict gets this one ("남은 것 모두 통과")."""
+        items = (getattr(self, "use_cases", {}) or {}).get("items") or []
+        self._judge([n for n, i in enumerate(items) if not i.get("review")], str(verdict or ""))
+
+    @Slot()
+    def finishUseReview(self):
+        """The session was closed: the runtime counts the passed uses again (enough of them start the learning round)."""
+        self.online_commands.append(("use_recount",))
+
     BANNER_KEEP_SECONDS = 300.0      # how long the result of an automatic round stays on the main screen
 
     @Property(str, notify=learnChanged)
@@ -562,7 +785,10 @@ class QtDashboard(QObject):
         self.learn_seen = job.version
         state = dict(job.state)
         phase = state.get("phase")
-        if phase == "update":
+        if phase == "onnx":
+            self.learn_message = ("기본 손짓 모델 후보를 학습 중이에요 (약 10분). 지금 쓰는 모델은 그대로예요."
+                                  if state.get("stage") == "train" else "새 후보와 지금 모델을 비교하는 중이에요…")
+        elif phase == "update":
             self.learn_message = f"학습 중… {state.get('done', 0)}/{state.get('total', 0)}"
         elif phase == "imported":
             self.learn_message = (f"사용 기록에서 가져왔어요: 가르친 자세 사용 {state.get('taught', 0)}개, "
@@ -587,6 +813,9 @@ class QtDashboard(QObject):
             if notice:
                 self.notify(notice)
             self.online_commands.append(("online_reload",))
+            if state.get("status") == "onnx_candidate":
+                self.online_commands.append(("use_recount",))     # a candidate waits: no other one is asked for
+                self.onnxCandidateChanged.emit()
             self.refreshOnlineSummary()
         self.learnChanged.emit()
 
@@ -619,7 +848,15 @@ class QtDashboard(QObject):
             line.append(text)
             notice.append(text)
         status = state.get("status")
-        if status == "promoted":
+        if status == "onnx_candidate":
+            text = "기본 손짓 모델의 새 후보가 준비됐어요. 첫 화면의 [새 모델 확인]에서 비교해 보고 적용하세요."
+            line.append(text)
+            notice.append(text)
+        elif status == "base_built":
+            text = "기본 모델을 만들었어요. 이제 모은 사용 사례로 TCN 학습을 시작해요."
+            line.append(text)
+            notice.append(text)
+        elif status == "promoted":
             line.append("새 모델을 반영했어요.")
             notice.append("자동 학습으로 만든 새 모델을 반영했어요." if getattr(self, "learn_auto", False) else "새 모델을 반영했어요.")
         elif status == "rejected":
@@ -1780,6 +2017,7 @@ class QtDashboard(QObject):
     def setSprayGestureFilter(self, gesture_key):
         norm = str(gesture_key or "all").strip() or "all"
         self.spray_gesture_filter = norm
+        self.setCenterPref("sprayFilter", norm)
         from src import training_center as tc
         try:
             self.spatial_spray = tc.compute_model_spatial_spray(
@@ -2207,6 +2445,7 @@ class QtDashboard(QObject):
             strength=str(strength),
             factor=int(factor),
         )
+        self.setCenterPref("augmentation", {"enabled": self.augEnabled, "strength": self.augStrength, "factor": self.augFactor})
         cur_file = self.sim_eval.get("file", "")
         if cur_file:
             try:
@@ -2441,9 +2680,7 @@ class QtDashboard(QObject):
     def setTrainingMode(self, mode):
         norm = str(mode) if str(mode) in ("fast", "thorough") else "fast"
         self.training_mode = norm
-        prefs = getattr(self, "preferences", None)
-        if prefs is not None:
-            prefs.setValue("trainingMode", norm)
+        self.setCenterPref("trainingMode", norm)
         try:
             from src import training_center as tc
             tc.set_training_mode(norm)
@@ -2501,9 +2738,7 @@ class QtDashboard(QObject):
         if norm == "gpu" and not self.gpuAvailable:
             norm = "cpu"
         self.training_device_pref = norm
-        prefs = getattr(self, "preferences", None)
-        if prefs is not None:
-            prefs.setValue("trainingDevice", norm)
+        self.setCenterPref("trainingDevice", norm)
         try:
             from src import training_center as tc
             tc.set_training_device(norm)
@@ -2955,59 +3190,580 @@ class QtDashboard(QObject):
     def setTrainingFilter(self, category):
         if category in self.trainingCategories:
             self.training_filter = category
+            self.setCenterPref("trainingFilter", category)
             self.trainingChanged.emit()
 
-    # ------------------------------------------------------------------ Shortcut Bindings, Composite Gestures & Temporal Motions
-    @Property("QVariantList", notify=trainingChanged)
-    def sidebarGestureMappings(self):
-        from src.action_bindings import format_action_badge, get_action_registry
-        from src.gesture_catalog import BY_KEY, DISPLAY_KEYS
+    # ------------------------------------------------------------------ profiles: make, rename, delete, export, import
+    # 2026-11-11 request. A profile holds only what differs from the default state (src/profiles.py): engine settings,
+    # gesture bindings (with composite gestures and motions), and the screen options kept in the app's settings.
+    @staticmethod
+    def _config_dir():
+        from src import gesture_engine
+        return gesture_engine.DEFAULT_CONFIG_PATH.parent      # asked each time: tests point it at their own folder
 
+    def _group(self, prefix):
+        """Every value saved under `prefix/` in the per-profile settings, as {key: value}."""
+        store = self._center_store()
+        store.beginGroup(prefix)
+        try:
+            return {k: store.value(k) for k in store.allKeys()}
+        finally:
+            store.endGroup()
+
+    def _profile_groups(self, name):
+        return {"ui": self._group(f"profile/{name}"), "center": self._group(f"center/{name}")}
+
+    def _set_profile_groups(self, name, groups):
+        store = self._center_store()
+        for part, prefix in (("ui", "profile"), ("center", "center")):
+            for key, value in (groups.get(part) or {}).items():
+                store.setValue(f"{prefix}/{name}/{key}", value)
+        store.sync()
+
+    def _drop_profile_groups(self, name):
+        store = self._center_store()
+        store.remove(f"profile/{name}")
+        store.remove(f"center/{name}")
+        store.sync()
+
+    def _profile_say(self, text):
+        self.profile_message = text
+        self.profilesChanged.emit()
+
+    @Property(str, notify=profilesChanged)
+    def profileMessage(self):
+        return getattr(self, "profile_message", "")
+
+    @Property("QVariantList", notify=profilesChanged)
+    def profileRows(self):
+        rows = [{"name": "", "title": "프로필 없음", "active": not self.profile,
+                 "note": "앱의 기본 상태 그대로 · 여기서 바꾸는 설정은 기본 상태 자체를 바꿉니다", "changed": 0}]
+        for name in profiles.list_profiles(self._config_dir()):
+            counts = profiles.changed_counts(self._config_dir(), name)
+            groups = self._profile_groups(name)
+            screen = len(groups["ui"]) + len(groups["center"])
+            total = counts["settings"] + counts["bindings"] + screen
+            parts = [f"{label} {n}개" for label, n in (("엔진 설정", counts["settings"]), ("동작 연결", counts["bindings"]),
+                                                      ("화면 옵션", screen)) if n]
+            rows.append({"name": name, "title": name, "active": self.profile == name, "changed": total,
+                         "note": ("바꾼 것: " + " · ".join(parts)) if total else "기본 상태와 같음 (아직 바꾼 것이 없어요)"})
+        return rows
+
+    def _read_ui_prefs(self):
+        """The screen options again, for the profile now in use (its own values over the default state's)."""
+        from src.gesture_engine import normalize_anchor_joints
+        from src.point_mode import clean_settings
+        p = self.preferences
+        saved = p.value("controlHand", "", type=str)
+        if saved in ("Left", "Right"):
+            self.control_hand = saved
+        if not self.tcn_app:
+            self.use_index_pointer = p.value("indexPointer", True, type=bool)
+        click = p.value("pointerClick", "pinch", type=str)
+        self.click_style = click if click in CLICK_STYLES else "pinch"
+        anchor = p.value("pointerAnchor", "index", type=str)
+        self.pointer_anchor = anchor if anchor in ("index", "palm") else "index"
+        self.anchor_joints = normalize_anchor_joints(p.value("cursorAnchorJoints", "", type=str))
+        self.hand_crop = p.value("handCrop", False, type=bool)
+        self.virtual_hand_on = p.value("virtualHand", _virtual_hand_default(), type=bool)
+        self.point_mode_on = p.value("pointMode", True, type=bool)
+        try:
+            self.point_settings = clean_settings(json.loads(str(p.value("pointModeSettings", "{}") or "{}")))
+        except Exception:
+            self.point_settings = clean_settings({})
+        self.signal_text_on = p.value("signalText", True, type=bool)
+        self.finger_overlay = p.value("fingerOverlay", False, type=bool)
+        self.virtual_box = _saved_box(p.value("virtualBox", "", type=str))
+        try:
+            self.pointer_sensitivity = max(50, min(150, p.value("pointerSensitivity", 100, type=int)))
+        except (TypeError, ValueError):
+            self.pointer_sensitivity = 100
+        self.calibration_key = ""              # the pointer's direction calibration is looked up again
+
+    def _switch_profile(self, name, said=True):
+        """Use profile `name` (None = none, the default state): bindings, screen options, training options, engine."""
+        name = name or None
+        self.commands.clear()
+        self.commands.append(27)               # pause first, like the other settings
+        self.profile = name
+        try:
+            profiles.set_active(self._config_dir(), name)
+            if profiles.RUN_OVERRIDE is not None:
+                profiles.RUN_OVERRIDE = name or ""
+        except (OSError, ValueError):
+            pass
+        self._reload_profile()
+        if said:
+            self._profile_say(f"「{name}」 프로필을 쓰고 있어요." if name else "프로필 없이 기본 상태로 쓰고 있어요.")
+
+    def _reload_profile(self):
+        """Everything the profile in use decides, read again (it was picked, reset or renamed)."""
+        try:
+            import src.action_bindings as ab
+            ab._BINDING_PROFILE = "\0"         # not a profile name: the next call always builds the registry again
+            ab.use_binding_profile(self.profile)
+        except Exception:
+            pass
+        self._read_ui_prefs()
+        self.profile_epoch = getattr(self, "profile_epoch", 0) + 1
+        self._apply_center_prefs()
+        if getattr(self, "training_rows", None):
+            self.refreshTraining()             # the training center was read: its rows show the bindings too
+        self.stateChanged.emit()
+        self.profilesChanged.emit()
+
+    @Slot(str, result=bool)
+    def selectProfile(self, name):
+        name = str(name or "").strip()
+        if self.stage_name != "main":
+            return False
+        if name and name not in profiles.list_profiles(self._config_dir()):
+            self._profile_say(f"'{name}' 프로필이 없어요.")
+            return False
+        self._switch_profile(name)
+        return True
+
+    @Slot(str, result=bool)
+    def createProfile(self, name):
+        """A new profile, used at once. Nothing is changed in it yet: it is the default state."""
+        name = str(name or "").strip()
+        if not profiles.valid_name(name):
+            self._profile_say("이름은 한글·영문·숫자·공백·- _ . 으로 32자까지 쓸 수 있어요.")
+            return False
+        try:
+            profiles.create_profile(self._config_dir(), name)
+        except (OSError, ValueError) as exc:
+            self._profile_say(str(exc))
+            return False
+        self._drop_profile_groups(name)        # options left over from an earlier profile of this name
+        if self.stage_name == "main":
+            self._switch_profile(name, said=False)
+        self._profile_say(f"「{name}」 프로필을 만들었어요. 지금은 기본 상태와 같고, 이제부터 바꾸는 설정이 이 프로필에 저장돼요.")
+        return True
+
+    @Slot(str, str, result=bool)
+    def renameProfile(self, old, new):
+        old, new = str(old or "").strip(), str(new or "").strip()
+        if not profiles.valid_name(new):
+            self._profile_say("이름은 한글·영문·숫자·공백·- _ . 으로 32자까지 쓸 수 있어요.")
+            return False
+        try:
+            profiles.rename_profile(self._config_dir(), old, new)
+        except (OSError, ValueError) as exc:
+            self._profile_say(str(exc))
+            return False
+        groups = self._profile_groups(old)
+        self._drop_profile_groups(new)
+        self._set_profile_groups(new, groups)
+        self._drop_profile_groups(old)
+        if self.profile == old:
+            self.profile = new
+            self._reload_profile()
+        self._profile_say(f"「{old}」 → 「{new}」 이름을 바꿨어요.")
+        return True
+
+    @Slot(str, result=bool)
+    def deleteProfile(self, name):
+        name = str(name or "").strip()
+        if name not in profiles.list_profiles(self._config_dir()):
+            return False
+        if self.profile == name:
+            self._switch_profile(None, said=False)
+        try:
+            profiles.delete_profile(self._config_dir(), name)
+        except (OSError, ValueError) as exc:
+            self._profile_say(str(exc))
+            return False
+        self._drop_profile_groups(name)
+        self._profile_say(f"「{name}」 프로필을 지웠어요.")
+        return True
+
+    @Slot(str, result=bool)
+    def resetProfile(self, name):
+        """Back to the default state: everything the profile changed is dropped (the profile itself stays)."""
+        name = str(name or "").strip()
+        if name not in profiles.list_profiles(self._config_dir()):
+            return False
+        try:
+            profiles.save_values(self._config_dir(), name, {})
+            profiles.bindings_file(self._config_dir(), name).unlink(missing_ok=True)
+        except (OSError, ValueError) as exc:
+            self._profile_say(str(exc))
+            return False
+        self._drop_profile_groups(name)
+        if self.profile == name:
+            self.commands.clear()
+            self.commands.append(27)
+            self._reload_profile()
+        self._profile_say(f"「{name}」 프로필을 기본 상태로 되돌렸어요.")
+        return True
+
+    def _export_extras(self, bindings):
+        """What the profile's own gestures need besides their bindings: sequences, shape drawings, named hand shapes."""
+        keys = set((bindings.get("bindings") or {}))
+        out = {"sequences": {}, "path_gestures": {}, "posture_names": {}}
+        shapes = set()
+        try:
+            from src.path_gesture import PathStore
+            from src.sequence import SequenceStore
+            seq, paths = SequenceStore(), PathStore()
+            for key in keys:
+                if key in seq.items:
+                    out["sequences"][key] = seq.items[key]
+                    shapes.update(seq.items[key].get("steps") or ())
+                if key in paths.items:
+                    out["path_gestures"][key] = paths.items[key]
+                    shapes.add(paths.items[key].get("posture"))
+        except Exception:
+            pass
+        for c in (bindings.get("composite_gestures") or {}).values():
+            shapes.add(c.get("base_posture"))
+        for m in (bindings.get("custom_motions") or {}).values():
+            shapes.add(m.get("posture"))
+        try:
+            from src import custom_postures
+            names = custom_postures.load()
+            out["posture_names"] = {k: names[k] for k in shapes if k in names}
+        except Exception:
+            pass
+        return out
+
+    @Slot(str, str, result=bool)
+    def exportProfileTo(self, name, path):
+        name = str(name or "").strip()
+        try:
+            doc = profiles.export_document(self._config_dir(), name)
+            doc.update(self._profile_groups(name))
+            doc.update(self._export_extras(doc.get("bindings") or {}))
+            target = Path(str(path))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(doc, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            self._profile_say(f"내보내지 못했어요: {exc}")
+            return False
+        self._profile_say(f"「{name}」 프로필을 내보냈어요: {target}")
+        return True
+
+    @Slot(str, result=bool)
+    def importProfileFrom(self, path):
+        try:
+            doc = json.loads(Path(str(path)).read_text(encoding="utf-8-sig"))
+            name = profiles.import_document(self._config_dir(), doc)
+        except (OSError, ValueError) as exc:
+            self._profile_say(f"가져오지 못했어요: {exc}")
+            return False
+        self._drop_profile_groups(name)
+        self._set_profile_groups(name, {"ui": doc.get("ui") if isinstance(doc.get("ui"), dict) else {},
+                                        "center": doc.get("center") if isinstance(doc.get("center"), dict) else {}})
+        notes = []
+        try:                                   # the gestures the profile's commands hang on, where this PC lacks them
+            from src.path_gesture import PathStore
+            from src.sequence import SequenceStore
+            for store, part in ((SequenceStore(), "sequences"), (PathStore(), "path_gestures")):
+                added = 0
+                for key, item in (doc.get(part) or {}).items():
+                    if key not in store.items and isinstance(item, dict):
+                        store.items[key] = item
+                        added += 1
+                if added:
+                    store.save()
+                    notes.append(f"{'이어 하기' if part == 'sequences' else '손 모양 그리기'} {added}개 추가")
+            from src import custom_postures
+            names = custom_postures.load()
+            missing = {k: v for k, v in (doc.get("posture_names") or {}).items() if k not in names}
+            if missing:
+                custom_postures._save({**names, **missing})
+                custom_postures.register()
+                notes.append(f"이름 지은 손 모양 {len(missing)}개 추가 (이 PC에서 다시 가르쳐야 인식돼요)")
+        except Exception:
+            pass
+        self.drawShapesChanged.emit()
+        self._profile_say(f"「{name}」 프로필로 가져왔어요. 목록에서 골라 쓰세요." + (" · " + " · ".join(notes) if notes else ""))
+        return True
+
+    @Slot(str)
+    def exportProfile(self, name):
+        from PySide6.QtWidgets import QFileDialog
+        start = str(Path.home() / "Documents" / f"{name}.handmouse-profile.json")
+        path, _ = QFileDialog.getSaveFileName(None, "프로필 내보내기", start, "프로필 파일 (*.json)")
+        if path:
+            self.exportProfileTo(name, path)
+
+    @Slot()
+    def importProfile(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(None, "프로필 가져오기", str(Path.home() / "Documents"), "프로필 파일 (*.json)")
+        if path:
+            self.importProfileFrom(path)
+
+    # ------------------------------------------------------------------ training center options, kept per profile
+    # 2026-11-11 request: "학습센터에서 설정을 변경하면 그걸 저장해놓고 … (프로필별로)". What the person chose in the training
+    # center (how to train, on which device, augmentation, filters, the tab left open, the simulator's view switches) is
+    # stored under the calibration profile in use ("_none" without one = the default state) and read again when the
+    # profile changes. A profile that has no value of its own uses the default state's.
+    CENTER_LEGACY = ("trainingMode", "trainingDevice")      # saved without a profile before 2026-11-11
+
+    def _use_profile_bindings(self):
+        """The gesture -> command bindings of the profile in use (src/action_bindings.use_binding_profile)."""
+        try:
+            from src.action_bindings import use_binding_profile
+            use_binding_profile(self.profile)
+        except Exception:
+            pass
+
+    def _center_store(self):
+        path = os.environ.get(CENTER_PREFS_ENV, "")
+        if not path:
+            return getattr(self, "settings", None)
+        if getattr(self, "_center_ini", (None, None))[0] != path:
+            self._center_ini = (path, QSettings(path, QSettings.IniFormat))
+        return self._center_ini[1]
+
+    def _center_key(self, name):
+        return f"center/{getattr(self, 'profile', None) or '_none'}/{name}"
+
+    @Slot(str, "QVariant", result="QVariant")
+    def centerPref(self, name, default=None):
+        """A saved training-center option of this profile; `default` when there is none or it is of another kind."""
+        prefs = self._center_store()
+        if prefs is None:
+            return default
+        raw = prefs.value(self._center_key(str(name)), None)
+        if raw is None and getattr(self, "profile", None):
+            raw = prefs.value(f"center/_none/{name}", None)      # a profile that did not touch it: the default state
+        if raw is None:
+            if name in self.CENTER_LEGACY and not os.environ.get(CENTER_PREFS_ENV):
+                return str(self.settings.value(name, "", type=str) or "") or default
+            return default
+        try:
+            value = json.loads(str(raw))
+        except ValueError:
+            return default
+        if default is None:
+            return value
+        if isinstance(default, bool) or isinstance(value, bool):
+            return value if isinstance(default, bool) and isinstance(value, bool) else default
+        if isinstance(default, (int, float)):
+            return value if isinstance(value, (int, float)) else default
+        return value if isinstance(value, type(default)) else default
+
+    @Slot(str, "QVariant")
+    def setCenterPref(self, name, value):
+        prefs = self._center_store()
+        if prefs is None:
+            return
+        if hasattr(value, "toVariant"):          # a JS value from QML
+            value = value.toVariant()
+        try:
+            prefs.setValue(self._center_key(str(name)), json.dumps(value, ensure_ascii=False))
+        except (TypeError, ValueError):
+            pass
+
+    def _apply_center_prefs(self):
+        """Another profile was picked: its saved training options replace the ones in use (QML reads its own again)."""
+        from src import training_center as tc
+        mode = self.centerPref("trainingMode", "")
+        if mode in ("fast", "thorough") and mode != self.training_mode:
+            self.setTrainingMode(mode)
+        device = self.centerPref("trainingDevice", "")
+        if device in ("auto", "gpu", "cpu") and device != self.training_device_pref:
+            self.setTrainingDevice(device)
+        aug = self.centerPref("augmentation", {})
+        if isinstance(aug, dict) and aug:
+            try:
+                self.aug_settings = tc.set_augmentation_settings(
+                    enabled=bool(aug.get("enabled", self.augEnabled)), strength=str(aug.get("strength", self.augStrength)),
+                    factor=int(aug.get("factor", self.augFactor)))
+            except Exception:
+                pass
+        category = self.centerPref("trainingFilter", "")
+        if category in self.trainingCategories:
+            self.training_filter = category
+        spray = self.centerPref("sprayFilter", "")
+        if spray:
+            self.spray_gesture_filter = spray           # the picture is drawn again when the simulator next asks
+        self.trainingChanged.emit()
+        self.centerPrefsChanged.emit()
+
+    @Property(str, notify=stateChanged)
+    def centerProfileName(self):
+        return self.profile or "프로필 없음"
+
+    @Property(str, notify=stateChanged)
+    def bindingProfileNote(self):
+        return (f"「{self.profile}」 프로필의 연결" if self.profile else "프로필 없음 · 공통 연결")
+
+    # ------------------------------------------------------------------ "동작 연결": what each hand signal runs NOW
+    # 2026-11-11 report ("학습센터의 단축키 설정들이 지금 앱 상황과 안맞게 따로 놀고 있다"): the list showed palm mode's
+    # recording catalogue only ("엄지+중지 (좌클릭)" ...) whatever hand mode was on, let the person edit bindings the app
+    # never reads (thumb + index scroll, the drags) and left out what the app does react to (the hand on the screen,
+    # pointing mode, composites, sequences, drawings). It is now built from the mode in use.
+    @Property(str, notify=bindingRowsChanged)
+    def handModeName(self):
+        return {"virtual": "가상 손 모드", "palm": "손바닥 모드", "index": "검지 포인터 모드"}[self._hand_mode()]
+
+    def _hand_mode(self):
+        if getattr(self, "use_index_pointer", False):
+            return "index"
+        return "virtual" if getattr(self, "virtual_hand_on", False) else "palm"
+
+    def _binding_rows(self):
+        from src import default_moves
+        from src.action_bindings import (DEFAULT_GESTURE_BINDINGS, POSTURE_NAMES_KO, TRIGGER_NAMES_KO, VIRTUAL_GESTURE_NAMES,
+                                         format_action_badge, get_action_registry)
+        from src.gesture_catalog import BY_KEY, DISPLAY_KEYS
         reg = get_action_registry()
-        items = [
-            {"key": "move_cursor", "gesture": "반주먹 / 손 이동", "badge": "포인터 이동", "track": "static"},
-        ]
-        for k in DISPLAY_KEYS:
-            t = BY_KEY.get(k)
-            if t is None or t.free or k == "thumb_middle_drag":
+        mode = self._hand_mode()
+        rows = []
+        try:                                   # the hand shapes the person named ("옆따봉") by their names
+            from src import custom_postures
+            custom_postures.register()
+        except Exception:
+            pass
+
+        def plain(key):
+            name = BY_KEY[key].name if key in BY_KEY else key
+            name = name.split(" (")[0].strip()                 # "엄지+중지 (좌클릭)": the command is shown beside it
+            return name.replace("모션 · ", "", 1)
+
+        def bound(key, name, section, how="", active=True, why=""):
+            b = reg.get_binding(key)
+            atype, value = str(b.get("action_type", "mouse_action")), str(b.get("action_value", "none"))
+            default = DEFAULT_GESTURE_BINDINGS.get(key)
+            on = bool(b.get("enabled", True))
+            if key in default_moves.HELD:
+                held = "스크롤" if default_moves.HELD[key] == "scroll_grab" else "끌기"
+                how = "  ·  ".join(p for p in (how, f"다른 명령을 연결하면 시작할 때 한 번 실행하고 {held}는 하지 않아요") if p)
+            rows.append({
+                # 2026-11-11 ("기본 동작 명령이라는 걸 알 수 있게 태그"): the app's own moves and signs carry a "기본" tag
+                "builtin": default is not None,
+                "default_badge": format_action_badge(default.get("action_type", ""), default.get("action_value", ""))
+                                 if default is not None else "",
+                "key": key, "name": name, "section": section, "how": how, "editable": True, "active": bool(active), "why": why,
+                "shortcut_badge": str(b.get("badge") or "미지정") if on else "꺼짐",
+                "shortcut_detail": str(b.get("detail") or ""), "action_type": atype, "action_value": value,
+                "app_overrides": list(b.get("app_overrides") or []), "binding_enabled": on,
+                "same_action_elsewhere": reg.others_with_action(key, atype, value),
+                "can_reset": default is not None,
+                "changed": default is not None and (atype, value) != (default.get("action_type"), default.get("action_value")),
+                "track": str(b.get("track", "static")), "training_format_badge": section})
+
+        def fixed(key, name, section, does, how=""):
+            rows.append({"key": "fixed:" + key, "builtin": True, "default_badge": does,
+                         "name": name, "section": section, "how": how, "editable": False, "active": True,
+                         "why": "", "shortcut_badge": does, "shortcut_detail": does, "action_type": "mouse_action",
+                         "action_value": "none", "app_overrides": [], "binding_enabled": True, "same_action_elsewhere": [],
+                         "can_reset": False, "changed": False, "track": "fixed", "training_format_badge": section})
+
+        now = f"기본 조작 · {self.handModeName} (지금 쓰는 방식)"
+        other = "지금 방식에서는 쓰이지 않음"
+        if mode == "virtual":
+            fixed("vh_move", "손바닥 움직이기", now, "커서 이동", "카메라의 상자 안 손 위치가 곧 화면 위치")
+            bound("vh_pinch", VIRTUAL_GESTURE_NAMES["vh_pinch"], now, "집었다 바로 떼면 한 번 실행")
+            # 2026-11-12 ("드래그 동작 설정은 왜 없음?"): the drag and the double click are the same two fingers used
+            # another way; they were only a note under the click, so the list looked as if the app had no drag
+            bound("vh_drag", "엄지+검지 붙인 채 유지", now,
+                  "0.45초 넘게 붙이고 있으면 시작 · 끌기는 손가락을 떼면 놓기 · 다른 명령을 연결하면 그 명령을 한 번 실행하고 끌지 않아요")
+            fixed("vh_double", "엄지+검지 빠르게 두 번", now, "더블클릭", "첫 클릭 뒤 0.7초 안에 한 번 더")
+            bound("vh_triple", VIRTUAL_GESTURE_NAMES["vh_triple"], now, "0.6초 붙이고 있으면 실행")
+            bound("vh_fist", VIRTUAL_GESTURE_NAMES["vh_fist"], now, "가로·세로 주먹 모두, 쥔 채 움직이면 페이지가 넘어감")
+            bound("vh_switch", VIRTUAL_GESTURE_NAMES["vh_switch"], now)
+        elif mode == "palm":
+            fixed("palm_move", "반주먹·주먹으로 움직이기", now, "커서 이동", "주먹에 가까울수록 빠르게")
+            bound("thumb_middle", plain("thumb_middle"), now)
+            bound("thumb_middle_drag", plain("thumb_middle_drag"), now)
+            bound("thumb_ring", plain("thumb_ring"), now)
+            bound("thumb_index", plain("thumb_index"), now)
+            bound("thumb_index_middle", plain("thumb_index_middle"), now, "누른 채 유지")
+            bound("thumb_pinky", plain("thumb_pinky"), now)
+            bound("palm_side", plain("palm_side"), now)
+        else:
+            fixed("index_move", "검지 끝 움직이기", now, "커서 이동")
+            fixed("index_click", "클릭", now, self.clickStyleLabel, "메인 화면의 클릭 방식 단추로 바꿔요")
+        hands = mode != "index"          # the signs, composites and the rest need a hand mode (not the index pointer)
+        off_index = "" if hands else "검지 포인터 모드에서는 쓰이지 않아요"
+        signs = "손 신호 (손 모드 공통)"
+        bound("v_sign", plain("v_sign"), signs if hands else other, "위로 바짝 편 V를 잠깐 유지", hands, off_index)
+        bound("rock_sign", plain("rock_sign"), signs if hands else other, "유지한 뒤 4초 안에 한 번 더", hands, off_index)
+        bound("thumbs_up", plain("thumbs_up"), signs, "엄지만 위로 세워 잠깐 유지")
+        if hands and getattr(self, "point_mode_on", False):
+            point = "포인팅 모드 ([설정]에서 켜고 끔)"
+            wait = float((getattr(self, "point_settings", None) or {}).get("dwell", 1.0))
+            bound("point_double", "엄지 위로 + 검지 비스듬히", point, f"파일·폴더를 가리킨 채 {wait:g}초")
+            if (getattr(self, "point_settings", None) or {}).get("right_click", True):
+                bound("point_right", "엄지 위로 + 검지·중지 붙여 비스듬히", point, f"파일·폴더를 가리킨 채 {wait:g}초")
+        motion = "모션 모드에서 쓸기 (엄지 위로 켠 뒤)"
+        for key in DISPLAY_KEYS:
+            task = BY_KEY.get(key)
+            if task is not None and task.track == "motion" and not task.free:
+                bound(key, plain(key), motion)
+        comp = "복합 동작 (손 모양 + 유지·쓸기·두 번 집기)"
+        for key, c in reg.composite_gestures.items():
+            posture, trigger = str(c.get("base_posture", "")), str(c.get("trigger_type", ""))
+            bound(key, str(c.get("name") or key), comp if hands else other,
+                  f"{POSTURE_NAMES_KO.get(posture, posture)} · {TRIGGER_NAMES_KO.get(trigger, trigger)}"
+                  + (" · 모션 모드에서만" if c.get("motion_only") else ""), hands, off_index)
+        try:
+            from src.path_gesture import PathStore
+            from src.sequence import SequenceStore
+            chained = [*SequenceStore().rows(), *PathStore().rows()]
+        except Exception:
+            chained = []
+        for row in chained:
+            bound(row["key"], str(row.get("name") or row["key"]), "이어 하기 · 손 모양으로 그리기" if hands else other,
+                  str(row.get("steps_text", "")) + (" · 모션 모드에서만" if row.get("motion_only") else ""), hands, off_index)
+        try:
+            shapes = self._shapes().shapes()
+        except Exception:
+            shapes = []
+        for shape in shapes:
+            if shape.get("enabled", True):
+                bound(shape["key"], str(shape.get("name") or shape["key"]), "그리기 모드에서 그린 모양" if hands else other,
+                      "", hands, off_index)
+        for key in reg.bindings:
+            if str(key).startswith("user:"):
+                bound(key, str(key)[5:], "내가 등록한 동작" if hands else other, "", hands, off_index)
+        if mode != "virtual":
+            for key, name in VIRTUAL_GESTURE_NAMES.items():
+                bound(key, name, other, "", False, "가상 손 모드에서만 쓰여요")
+        if mode != "palm":
+            for key in ("thumb_middle", "thumb_ring", "thumb_pinky", "palm_side"):
+                bound(key, plain(key), other, "", False, "손바닥 모드에서만 쓰여요")
+        return [r for r in rows if r["section"] != other] + [r for r in rows if r["section"] == other]
+
+    def _sync_binding_rows(self):
+        try:
+            rows = self._binding_rows()
+        except Exception:
+            return
+        if rows != getattr(self, "_binding_rows_cache", None):
+            self._binding_rows_cache = rows
+            self.bindingRowsChanged.emit()
+
+    @Property("QVariantList", notify=bindingRowsChanged)
+    def bindingRows(self):
+        if getattr(self, "_binding_rows_cache", None) is None:
+            self._sync_binding_rows()
+        return getattr(self, "_binding_rows_cache", None) or []
+
+    # ------------------------------------------------------------------ Shortcut Bindings, Composite Gestures & Temporal Motions
+    @Property("QVariantList", notify=bindingRowsChanged)
+    def sidebarGestureMappings(self):
+        """The main screen's short list: what the hand signals run in the hand mode in use (the same rows as the
+        training center's "동작 연결"; it used to list palm mode's gestures whatever the mode was)."""
+        items = []
+        for row in self.bindingRows:
+            if not row["active"] or not row["binding_enabled"] or row["key"] in ("point_double", "point_right"):
                 continue
-            b = reg.get_binding(k)
-            if not b.get("enabled", True):
-                continue
-            short_name = t.name.split("(")[0].strip() if "(" in t.name else t.name
-            if short_name.startswith("모션 · "):
-                short_name = short_name.replace("모션 · ", "", 1).strip()
-            raw_badge = format_action_badge(str(b.get("action_type", "")), str(b.get("action_value", "")), None)
-            if raw_badge.startswith("단축키: "):
-                raw_badge = raw_badge.replace("단축키: ", "", 1)
-            if raw_badge.startswith("마우스 "):
-                raw_badge = raw_badge.replace("마우스 ", "", 1)
-            ov_list = b.get("app_overrides") or []
-            if ov_list:
-                raw_badge = f"{raw_badge} (+앱{len(ov_list)})"
-            items.append(
-                {
-                    "key": k,
-                    "gesture": short_name,
-                    "badge": raw_badge,
-                    "track": t.track,
-                }
-            )
-        for c_key, c_def in reg.composite_gestures.items():
-            if not c_def.get("enabled", True):
-                continue
-            b = reg.get_binding(c_key)
-            raw_badge = format_action_badge(str(b.get("action_type", "")), str(b.get("action_value", "")), None)
-            if raw_badge.startswith("단축키: "):
-                raw_badge = raw_badge.replace("단축키: ", "", 1)
-            items.append(
-                {
-                    "key": c_key,
-                    "gesture": str(c_def.get("name", c_key)),
-                    "badge": raw_badge,
-                    "track": "composite",
-                }
-            )
+            section = row["section"]
+            badge = str(row["shortcut_badge"])
+            for lead in ("단축키: ", "마우스 "):
+                if badge.startswith(lead):
+                    badge = badge[len(lead):]
+            extra = len(row["app_overrides"])
+            items.append({"key": row["key"], "gesture": row["name"], "badge": badge + (f" (+앱{extra})" if extra else ""),
+                          "track": "motion" if section.startswith("모션") else "composite" if section.startswith("복합")
+                          else "static"})
         return items
 
     @Property("QVariantList", notify=trainingChanged)
@@ -3114,6 +3870,16 @@ class QtDashboard(QObject):
     def compositeTriggerPresets(self):
         from src.action_bindings import TRIGGER_NAMES_KO
         return [{"value": k, "label": v} for k, v in TRIGGER_NAMES_KO.items()]
+
+    @Slot(str, str, str, result=str)
+    def bindingRefusal(self, gesture_key, action_type, action_value):
+        """Why this command cannot be connected to that hand signal ("" = it can). 2026-11-12: a drag picked for a
+        pointing click was refused on [저장] and the screen said nothing - the list just kept the old command."""
+        try:
+            from src import default_moves
+            return str(default_moves.check(str(gesture_key or ""), str(action_type or ""), str(action_value or "")) or "")
+        except Exception:
+            return ""
 
     @Slot(str, str, str, bool, result=bool)
     def saveGestureBinding(self, gesture_key, action_type, action_value, enabled=True):
@@ -3774,6 +4540,19 @@ class QtDashboard(QObject):
         self._llm_set(message=message)
         return ok
 
+    @Slot(int, bool)
+    def setLlmMotionOnly(self, index, on):
+        """The card's [모션 모드에서만] switch: the gesture counts only while motion mode is on (src/llm_binding)."""
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History
+        try:
+            message = History().set_motion_only(int(index), get_action_registry(), bool(on))
+        except ValueError as exc:
+            message = str(exc)
+        self.online_commands.append(("seq_reload",))
+        self.stateChanged.emit()
+        self._llm_set(message=message)
+
     @Slot(int)
     def forgetLlmConnection(self, index):
         from src.llm_binding import History
@@ -4273,22 +5052,19 @@ class QtDashboard(QObject):
 
     @Property(int, notify=stateChanged)
     def profileCount(self):
-        return len(profiles.list_profiles(DEFAULT_CONFIG_PATH.parent))
+        return len(profiles.list_profiles(self._config_dir()))
 
     @Slot()
     def cycleProfile(self):
         """none -> first profile -> next ... -> none. Pauses control like the other settings."""
         if self.stage_name != "main":
             return
-        names = [None] + profiles.list_profiles(DEFAULT_CONFIG_PATH.parent)
+        names = [None] + profiles.list_profiles(self._config_dir())
         try:
             i = names.index(self.profile)
         except ValueError:
             i = -1
-        self.commands.clear()
-        self.commands.append(27)
-        self.profile = names[(i + 1) % len(names)]
-        self.stateChanged.emit()
+        self._switch_profile(names[(i + 1) % len(names)])
 
     @Property(str, notify=stateChanged)
     def anchorLabel(self):
@@ -4443,7 +5219,8 @@ class QtDashboard(QObject):
             use_index_pointer=self.use_index_pointer, click_style=self.click_style,
             anchor=self.pointer_anchor, anchor_joints=self.anchor_joints, hand_crop=self.hand_crop, axes=self.axes,
             calibrating=self.calibrating, sensitivity=self.pointer_sensitivity,
-            show_fingertips=self.show_fingertips, profile=self.profile, motion_request=self.motion_request,
+            show_fingertips=self.show_fingertips, profile=self.profile, profile_epoch=getattr(self, "profile_epoch", 0),
+            motion_request=self.motion_request,
             palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
             palm_axes_reset=self.palm_axes_requests[2],
             rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate, gate_model=self.gate_model,
@@ -4519,6 +5296,12 @@ class QtDashboard(QObject):
         self.throttle_learning(getattr(snap, "fps", 0.0))
         self.auto_learn(getattr(snap, "learn_request", None))
         self.set_learn_note(getattr(snap, "learn_note", ""))
+        self.auto_base(getattr(snap, "base_request", 0))
+        self.auto_onnx(getattr(snap, "onnx_request", 0))
+        advice = str(getattr(snap, "learn_advice", "") or "")
+        if advice and advice != getattr(self, "learn_advice_seen", ""):
+            self.learn_advice_seen = advice       # said once, as a notice (rounds cut off: src/online/round_marker.advice)
+            self.notify(advice)
         items = list(getattr(snap, "learn_items", None) or [])
         if items != getattr(self, "learn_items", []):
             self.learn_items = items
@@ -4842,8 +5625,32 @@ class QtDashboard(QObject):
         g = screen.availableGeometry()
         return [g.x(), g.y(), g.width(), g.height()]
 
+    MAIN_TOPMOST_CHECK = 1.0     # s between looks at the main window's "always on top" flag
+
+    def _keep_main_window_ordinary(self):
+        """The main window is never meant to be "always on top"; Windows sometimes leaves that flag on it (2026-11-11:
+        the window then stayed above every other program). Looked at once a second and taken off (src/topmost_guard.py);
+        each time is written to logs/topmost_fixes.log, to see later what set it."""
+        import time
+        now = time.monotonic()
+        if now - getattr(self, "_main_topmost_checked", 0.0) < self.MAIN_TOPMOST_CHECK:
+            return
+        self._main_topmost_checked = now
+        try:
+            from src.topmost_guard import clear_if_topmost
+            if clear_if_topmost(int(self.window.winId())):
+                self.main_topmost_fixes = getattr(self, "main_topmost_fixes", 0) + 1
+                log = Path(__file__).resolve().parents[1] / "logs" / "topmost_fixes.log"
+                log.parent.mkdir(parents=True, exist_ok=True)
+                with log.open("a", encoding="utf-8") as fh:
+                    fh.write(time.strftime("%Y-%m-%d %H:%M:%S") + f" main window was topmost: cleared"
+                             f" (visible={self.window.isVisible()}, state={self.window.visibility()})\n")
+        except Exception:
+            pass
+
     def poll(self):
         self.application.processEvents()
+        self._keep_main_window_ordinary()
         return self.commands.popleft() if self.commands else -1
 
     def show(self, frame, detected, paused, action, fps, detect_ms, status="", contacts=()):

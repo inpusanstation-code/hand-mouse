@@ -23,25 +23,57 @@ def _box(detection):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def merge_duplicates(detections):
+SCORE_TIE = .2           # scores this close do not decide between two readings of one hand
+PART_RATIO = 1.5         # one reading this many times the other's size: the small one is a part of the hand
+
+
+def merge_duplicates(detections, last=None):
     """MediaPipe sometimes returns one hand twice (2026-11-11 failure logs: 'Left,Left' 206 and 'Right,Right' 93 frames out
     of 5248, each time dropping the control hand because two candidates matched). Of two boxes that mostly cover each other
-    the higher score stays. Two real hands do not overlap that much."""
+    one stays. Two real hands do not overlap that much.
+
+    Which one (2026-11-11 evening, "가상 손이 위로 점프 튀었다가 제자리로 2번 정도 반복"): the higher score used to stay, but the
+    second reading is a small hand found inside the real one (a third of its size, at the fingers: above its centre) and
+    the two scores are .97-1.00 each - so every few frames the small one won, and the drawn hand jumped up by half a hand
+    and back (failure logs of that evening: one hand returned twice in 494 frames, the small reading used in 130, 48
+    switches from one frame to the next). Now, with scores within SCORE_TIE: a reading PART_RATIO times the other's size
+    stays (the small one is a part of the hand); of two of about one size the one most like the hand of the frame before
+    (`last` = its box centre and longer side), else the higher score."""
     if len(detections) < 2:
         return list(detections)
+    import math
+
+    def score(d):
+        return float(getattr(d, "score", 0.0) or 0.0)
+
+    def better(a, b):
+        """Does reading `a` stay instead of `b` (two readings of one hand)?"""
+        if abs(score(a) - score(b)) > SCORE_TIE:
+            return score(a) > score(b)
+        (ca, sa), (cb, sb) = _center_and_size(a), _center_and_size(b)
+        if max(sa, sb) >= PART_RATIO * max(1e-9, min(sa, sb)):
+            return sa > sb
+        if last is not None and last[1] > 0:
+            def far(c, size):
+                return abs(math.log(max(size, 1e-9) / last[1])) + math.hypot(c[0] - last[0][0], c[1] - last[0][1]) / last[1]
+            return far(ca, sa) < far(cb, sb)
+        return score(a) > score(b)
+
     kept = []
-    for d in sorted(detections, key=lambda d: -float(getattr(d, "score", 0.0) or 0.0)):
+    for d in detections:
         ax0, ay0, ax1, ay1 = _box(d)
         a_area = max(1e-9, (ax1 - ax0) * (ay1 - ay0))
-        same = False
-        for k in kept:
+        same = None
+        for n, k in enumerate(kept):
             bx0, by0, bx1, by1 = _box(k)
             inter = max(0.0, min(ax1, bx1) - max(ax0, bx0)) * max(0.0, min(ay1, by1) - max(ay0, by0))
             if inter / min(a_area, max(1e-9, (bx1 - bx0) * (by1 - by0))) >= SAME_HAND_OVERLAP:
-                same = True
+                same = n
                 break
-        if not same:
+        if same is None:
             kept.append(d)
+        elif better(d, kept[same]):
+            kept[same] = d
     return kept
 
 
@@ -89,7 +121,8 @@ class HandFollower:
             self.reset()
             self._side = side
         self.followed = False
-        detections = merge_duplicates(detections)
+        recent = self._center is not None and self._seen_at is not None and now - self._seen_at <= self.max_gap
+        detections = merge_duplicates(detections, (self._center, self._size) if recent else None)
         chosen = selected_detection(detections, side, mirrored)
         if chosen is not None:
             self._remember(*_center_and_size(chosen), now)

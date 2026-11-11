@@ -86,3 +86,11 @@ def test_focus_check_sees_fields_in_the_window_and_in_popups_but_not_buttons():
     assert focused_on("popup") is True
     window.close()
     engine.deleteLater()
+
+
+def test_f8_marks_from_any_window():
+    from src.hotkeys import VK_F8, mark_key_pressed
+    keys = FakeKeys()
+    assert not mark_key_pressed(keys)
+    keys.down = {VK_F8}
+    assert mark_key_pressed(keys) and keys.read[-1] == VK_F8

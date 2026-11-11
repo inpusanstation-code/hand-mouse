@@ -255,8 +255,33 @@ DEFAULT_GESTURE_BINDINGS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# The hand on the screen (virtual hand mode, src/virtual_hand.py) makes its clicks with other hand shapes than palm mode:
+# thumb + index = left click, thumb + index + middle = right click, thumb folded with four fingers up = window switcher.
+# They used to borrow palm mode's bindings (thumb + middle, thumb + ring, thumb + little finger), so a command connected to
+# a palm-mode pinch ran from a different hand shape here (2026-11-11: thumb + little finger -> Ctrl+W closed a tab from the
+# switcher shape). Their own keys now; what they do by default is unchanged.
+VIRTUAL_ACTION_KEYS: Dict[str, str] = {"left_click": "vh_pinch", "right_click": "vh_triple", "task_switcher": "vh_switch"}
+PALM_ACTION_KEYS: Dict[str, str] = {"left_click": "thumb_middle", "right_click": "thumb_ring", "show_desktop": "palm_side",
+                                    "task_switcher": "thumb_pinky"}
+VIRTUAL_GESTURE_NAMES: Dict[str, str] = {
+    "vh_pinch": "엄지+검지 집었다 떼기",
+    "vh_triple": "엄지+검지+중지 함께 집기",
+    "vh_switch": "엄지 접고 네 손가락 위로 (잠깐 유지)",
+}
+for _action, _key in VIRTUAL_ACTION_KEYS.items():
+    DEFAULT_GESTURE_BINDINGS[_key] = {"gesture_key": _key, "track": "virtual", "action_type": "mouse_action",
+                                      "action_value": _action, "enabled": True, "app_overrides": []}
+# the moves that used to be fixed (fist scroll, pointing clicks; src/default_moves.py)
+from src import default_moves as _default_moves  # noqa: E402
+DEFAULT_GESTURE_BINDINGS.update(_default_moves.DEFAULTS)
+VIRTUAL_GESTURE_NAMES["vh_fist"] = _default_moves.NAMES["vh_fist"]
+# which keys belong to one hand mode only (others_with_action: the same command in the other mode never runs together)
+PALM_ONLY_KEYS = frozenset(PALM_ACTION_KEYS.values()) | {"thumb_index", "thumb_middle_drag", "thumb_index_middle"}
+VIRTUAL_ONLY_KEYS = frozenset(VIRTUAL_ACTION_KEYS.values()) | {"vh_fist"}
+
 POSTURE_NAMES_KO: Dict[str, str] = {
     "open_hand": "손 펴기 (엄지 포함)",
+    "open_hand_back": "손등 보이게 손 펴기",
     "thumb_tucked": "엄지 접고 네 손가락 펴기",
     "thumb_index": "엄지+검지 핀치",
     "thumb_middle": "엄지+중지 핀치",
@@ -500,49 +525,57 @@ def format_action_detail(action_type: str, action_value: str, app_overrides: Opt
 class ActionBindingRegistry:
     """Manages persistent gesture/motion -> OS action bindings, composite gestures, and custom temporal motions."""
 
-    def __init__(self, path: Optional[Path | str] = None) -> None:
+    def __init__(self, path: Optional[Path | str] = None, base_path: Optional[Path | str] = None) -> None:
         self.path = Path(path) if path is not None else DEFAULT_BINDINGS_PATH
+        self.base_path = Path(base_path) if base_path is not None else None    # a profile: the default state under it
+        self._base_state = None
+        self._base_mtime: float = -1.0
         self.bindings: Dict[str, Dict[str, Any]] = {}
         self.composite_gestures: Dict[str, Dict[str, Any]] = {}
         self.custom_motions: Dict[str, Dict[str, Any]] = {}
         self._mtime: float = -1.0
         self.load()
 
-    def load(self) -> None:
-        """Load bindings, composite gestures, and custom motions from disk, merging with defaults."""
-        base_bindings = copy.deepcopy(DEFAULT_GESTURE_BINDINGS)
-        comp: Dict[str, Dict[str, Any]] = {}
-        motions: Dict[str, Dict[str, Any]] = {}
-        if self.path.is_file():
-            try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    loaded_b = raw.get("bindings", {})
-                    if isinstance(loaded_b, dict):
-                        for k, v in loaded_b.items():
-                            if isinstance(v, dict):
-                                merged = dict(base_bindings.get(k, {"gesture_key": k, "track": "static", "enabled": True}))
-                                merged.update(v)
-                                merged["gesture_key"] = k
-                                merged["app_overrides"] = list(v.get("app_overrides") or [])
-                                base_bindings[k] = merged
-                    loaded_c = raw.get("composite_gestures", {})
-                    if isinstance(loaded_c, dict):
-                        for k, v in loaded_c.items():
-                            if isinstance(v, dict):
-                                comp[k] = dict(v, key=k)
-                    loaded_m = raw.get("custom_motions", {})
-                    if isinstance(loaded_m, dict):
-                        for k, v in loaded_m.items():
-                            if isinstance(v, dict):
-                                motions[k] = dict(v, key=k)
-                self._mtime = self.path.stat().st_mtime
-            except Exception:
-                pass
-        # Ensure custom motions and composite gestures also have entries in self.bindings
+    @staticmethod
+    def _read(path: Optional[Path]) -> Tuple[Dict[str, Any], float]:
+        """A bindings file's content and its time stamp ({} and -1 when it is missing or unreadable)."""
+        if path is None or not Path(path).is_file():
+            return {}, -1.0
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+            return (raw if isinstance(raw, dict) else {}), Path(path).stat().st_mtime
+        except Exception:
+            return {}, -1.0
+
+    @staticmethod
+    def _layer(bindings: Dict[str, Any], comp: Dict[str, Any], motions: Dict[str, Any], raw: Dict[str, Any]) -> None:
+        """Put one file's content on top of what is there, then make sure every motion / composite has a binding."""
+        loaded_b = raw.get("bindings", {})
+        if isinstance(loaded_b, dict):
+            for k, v in loaded_b.items():
+                if isinstance(v, dict):
+                    merged = dict(bindings.get(k, {"gesture_key": k, "track": "static", "enabled": True}))
+                    merged.update(v)
+                    merged["gesture_key"] = k
+                    merged["app_overrides"] = list(v.get("app_overrides") or [])
+                    bindings[k] = merged
+        loaded_c = raw.get("composite_gestures", {})
+        if isinstance(loaded_c, dict):
+            for k, v in loaded_c.items():
+                if isinstance(v, dict):
+                    comp[k] = dict(v, key=k)
+        loaded_m = raw.get("custom_motions", {})
+        if isinstance(loaded_m, dict):
+            for k, v in loaded_m.items():
+                if isinstance(v, dict):
+                    motions[k] = dict(v, key=k)
+        for k in raw.get("deleted") or ():          # a profile removed something the default state has
+            for group in (bindings, comp, motions):
+                group.pop(k, None)
+        # Ensure custom motions and composite gestures also have entries in the bindings
         for m_key, m_def in motions.items():
-            if m_key not in base_bindings:
-                base_bindings[m_key] = {
+            if m_key not in bindings:
+                bindings[m_key] = {
                     "gesture_key": m_key,
                     "track": "motion",
                     "action_type": str(m_def.get("action_type", "hotkey")),
@@ -551,8 +584,8 @@ class ActionBindingRegistry:
                     "app_overrides": list(m_def.get("app_overrides") or []),
                 }
         for c_key, c_def in comp.items():
-            if c_key not in base_bindings:
-                base_bindings[c_key] = {
+            if c_key not in bindings:
+                bindings[c_key] = {
                     "gesture_key": c_key,
                     "track": "composite",
                     "action_type": str(c_def.get("action_type", "hotkey")),
@@ -560,31 +593,65 @@ class ActionBindingRegistry:
                     "enabled": bool(c_def.get("enabled", True)),
                     "app_overrides": list(c_def.get("app_overrides") or []),
                 }
-        self.bindings = base_bindings
+
+    def load(self) -> None:
+        """Load bindings, composite gestures, and custom motions from disk, merging with defaults.
+
+        With `base_path` (a profile): the default state (built-in defaults + the shared file) first, then this file on
+        top, which holds only what the profile changed."""
+        bindings = copy.deepcopy(DEFAULT_GESTURE_BINDINGS)
+        comp: Dict[str, Dict[str, Any]] = {}
+        motions: Dict[str, Dict[str, Any]] = {}
+        self._base_state = None
+        if self.base_path is not None:
+            raw, self._base_mtime = self._read(self.base_path)
+            self._layer(bindings, comp, motions, raw)
+            self._base_state = copy.deepcopy((bindings, comp, motions))
+        raw, self._mtime = self._read(self.path)
+        self._layer(bindings, comp, motions, raw)
+        self.bindings = bindings
         self.composite_gestures = comp
         self.custom_motions = motions
         self._sync_catalog()
 
     def reload_if_changed(self) -> bool:
         try:
-            if self.path.is_file():
-                mtime = self.path.stat().st_mtime
-                if mtime != self._mtime:
-                    self.load()
-                    return True
+            changed = self.path.is_file() and self.path.stat().st_mtime != self._mtime
+            if not changed and self.base_path is not None and self.base_path.is_file():
+                changed = self.base_path.stat().st_mtime != self._base_mtime     # the default state was changed
+            if changed:
+                self.load()
+                return True
         except Exception:
             pass
         return False
 
     def save(self) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 1,
-            "bindings": self.bindings,
-            "composite_gestures": self.composite_gestures,
-            "custom_motions": self.custom_motions,
-        }
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if self._base_state is None:
+            payload = {
+                "version": 1,
+                "bindings": self.bindings,
+                "composite_gestures": self.composite_gestures,
+                "custom_motions": self.custom_motions,
+            }
+        else:
+            # a profile: only what differs from the default state, so a later change to the defaults reaches
+            # everything the profile did not touch
+            base_b, base_c, base_m = self._base_state
+            payload = {
+                "version": 1,
+                "overlay": True,
+                "bindings": {k: v for k, v in self.bindings.items() if base_b.get(k) != v},
+                "composite_gestures": {k: v for k, v in self.composite_gestures.items() if base_c.get(k) != v},
+                "custom_motions": {k: v for k, v in self.custom_motions.items() if base_m.get(k) != v},
+                "deleted": sorted(k for k in set(base_b) | set(base_c) | set(base_m)
+                                  if k not in self.bindings and k not in self.composite_gestures
+                                  and k not in self.custom_motions),
+            }
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
         try:
             self._mtime = self.path.stat().st_mtime
         except Exception:
@@ -632,9 +699,12 @@ class ActionBindingRegistry:
         except Exception:
             BY_KEY = {}
         out: List[str] = []
+        palm, virtual = PALM_ONLY_KEYS, VIRTUAL_ONLY_KEYS
         for key, b in self.bindings.items():
             if key == gesture_key or not b.get("enabled", True):
                 continue
+            if (gesture_key in palm and key in virtual) or (gesture_key in virtual and key in palm):
+                continue        # the same click in the other hand mode: the two never run at the same time
             if (str(b.get("action_type", "")), str(b.get("action_value", ""))) != (action_type, action_value):
                 continue
             comp = self.composite_gestures.get(key)
@@ -647,7 +717,8 @@ class ActionBindingRegistry:
                 out.append(f"{motion.get('name') or key} (모션)")
             else:
                 task = BY_KEY.get(key)
-                out.append(task.name if task is not None else key)
+                out.append(task.name if task is not None
+                           else f"{VIRTUAL_GESTURE_NAMES[key]} (가상 손)" if key in VIRTUAL_GESTURE_NAMES else key)
         return out
 
     def set_binding(
@@ -663,8 +734,11 @@ class ActionBindingRegistry:
         key = str(gesture_key or "").strip()
         if not key:
             raise ValueError("동작 키(gesture_key)가 비어 있습니다.")
+        why = _default_moves.check(key, str(action_type or "").strip(), str(action_value or "").strip())
+        if why:
+            raise ValueError(why)
         existing = self.bindings.get(key, {})
-        resolved_track = track or existing.get("track") or ("motion" if key.startswith("swipe_") or key in self.custom_motions else ("composite" if key in self.composite_gestures else "static"))
+        resolved_track = track or existing.get("track") or DEFAULT_GESTURE_BINDINGS.get(key, {}).get("track") or ("motion" if key.startswith("swipe_") or key in self.custom_motions else ("composite" if key in self.composite_gestures else "static"))
         norm_overrides: List[Dict[str, Any]] = []
         raw_overrides = app_overrides if app_overrides is not None else existing.get("app_overrides", [])
         for ov in raw_overrides or []:
@@ -753,7 +827,11 @@ class ActionBindingRegistry:
         )
 
     def reset_binding(self, gesture_key: str) -> Dict[str, Any]:
-        if gesture_key in DEFAULT_GESTURE_BINDINGS:
+        base = self._base_state[0].get(gesture_key) if self._base_state is not None else None
+        if base is not None:                     # a profile goes back to the default state, not the built-in value
+            self.bindings[gesture_key] = copy.deepcopy(base)
+            self.save()
+        elif gesture_key in DEFAULT_GESTURE_BINDINGS:
             self.bindings[gesture_key] = copy.deepcopy(DEFAULT_GESTURE_BINDINGS[gesture_key])
             self.save()
         return self.get_binding(gesture_key)
@@ -827,6 +905,19 @@ class ActionBindingRegistry:
             track="composite",
         )
         return comp_def
+
+    def set_composite_motion_only(self, key: str, on: bool) -> bool:
+        """A composite gesture that counts only while motion mode is on (2026-11-11 request: "특정 모드(모션 모드)에서만
+        작동하는 동작으로 만들 수 있는 옵션"). Off = as before: in the ordinary hand controls, not in motion mode."""
+        comp = self.composite_gestures.get(str(key or "").strip())
+        if comp is None:
+            return False
+        if on:
+            comp["motion_only"] = True
+        else:
+            comp.pop("motion_only", None)
+        self.save()
+        return True
 
     def delete_composite_gesture(self, key: str) -> bool:
         clean_key = str(key or "").strip()
@@ -980,6 +1071,11 @@ class ActionBindingRegistry:
             if not keys:
                 return False, "잘못된 단축키"
             if keys == ["alt", "f4"] and mouse_controller is not None:
+                if not dry_run and hasattr(mouse_controller, "close_foreground_window"):
+                    # asked of the window itself and watched (mouse_controller.close_foreground_window), not blind keys
+                    if not mouse_controller.close_foreground_window():
+                        return False, "보호된 창 (닫기 거부)"
+                    return True, badge
                 if not dry_run and hasattr(mouse_controller, "_safe_to_close_foreground") and not mouse_controller._safe_to_close_foreground():
                     return False, "보호된 창 (닫기 거부)"
             if mouse_controller is not None and hasattr(mouse_controller, "event_log"):
@@ -1121,8 +1217,9 @@ class CompositeGestureDetector:
     def _detect_base_posture(landmarks: Sequence[Any], active_gesture: str, pinched_fingers: set) -> str:
         """The rules' posture, replaced by a shape the user taught when that model is sure (src/posture_teach.py)."""
         rule = CompositeGestureDetector._detect_base_posture_rules(landmarks, active_gesture, pinched_fingers)
+        from src.pose_probe import faced
         from src.posture_teach import override
-        return override(landmarks, rule)
+        return faced(override(landmarks, rule), landmarks, .5625)     # an open hand showing its back: its own shape
 
     @staticmethod
     def _detect_base_posture_rules(landmarks: Sequence[Any], active_gesture: str, pinched_fingers: set) -> str:
@@ -1181,8 +1278,10 @@ class CompositeGestureDetector:
             if ratios[0] >= 1.55 and ratios[3] >= 1.45 and ratios[1] <= 1.25 and ratios[2] <= 1.25:
                 return "rock_sign"
             if min(ratios) >= 1.55:
-                from src.pose_probe import KNIFE, palm_sideways
-                return "knife_hand" if palm_sideways(landmarks, .5625) >= KNIFE else "open_hand"
+                from src.pose_probe import KNIFE, fingers_straight, palm_sideways
+                if palm_sideways(landmarks, .5625) >= KNIFE:
+                    return "knife_hand"
+                return "open_hand" if fingers_straight(landmarks, .5625) else ""   # both joints of every finger straight
         except Exception:
             pass
         return ""
@@ -1196,6 +1295,12 @@ class CompositeGestureDetector:
 
     def _open_goes_on(self, landmarks: Sequence[Any], posture: str, composites: List[Dict[str, Any]]) -> bool:
         if self.OPEN_KEEP <= 0:
+            return False
+        try:
+            from src.pose_probe import fingers_straight
+            if not fingers_straight(landmarks, .5625, keep=True):
+                return False                           # the fingers bent at their joints: the open hand has ended
+        except Exception:
             return False
         if posture == "knife_hand":
             return not any(c.get("base_posture") == "knife_hand" for c in composites)
@@ -1215,7 +1320,8 @@ class CompositeGestureDetector:
         posture = self._active_posture
         if posture in self.MOVING_HANDS:
             return False
-        return any(c.get("enabled", True) and c.get("base_posture") == posture for c in self.registry.composite_gestures.values())
+        return any(c.get("enabled", True) and not c.get("motion_only") and c.get("base_posture") == posture
+                   for c in self.registry.composite_gestures.values())
 
     def step(
         self,
@@ -1224,14 +1330,26 @@ class CompositeGestureDetector:
         active_gesture: str,
         pinched_fingers: set,
         aspect: float = 0.5625,
+        scope: Optional[str] = None,
+        posture: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Evaluate composite gestures on the current frame. Returns triggered composite info or None."""
-        composites = [c for c in self.registry.composite_gestures.values() if c.get("enabled", True)]
+        """Evaluate composite gestures on the current frame. Returns triggered composite info or None.
+
+        `scope`: "normal" = the gestures of the ordinary hand controls, "motion" = only those marked "motion mode only"
+        (the runtime keeps one detector for each), None = every gesture. `posture`: the hand shape when the caller
+        already knows it (motion mode: the rule engine does not run there, so the shape comes from the joints alone)."""
+        composites = [c for c in self.registry.composite_gestures.values() if c.get("enabled", True)
+                      and (scope is None or bool(c.get("motion_only")) == (scope == "motion"))]
         if not composites or not landmarks or len(landmarks) < 21:
             self.reset()
             return None
 
-        posture = self._detect_base_posture(landmarks, active_gesture, pinched_fingers)
+        if posture is None:
+            posture = self._detect_base_posture(landmarks, active_gesture, pinched_fingers)
+        # the back of an open hand is a shape of its own only once a gesture is bound to it (2026-11-11): until then it
+        # is the open hand, as before the two were told apart
+        from src.pose_probe import unless_bound
+        posture = unless_bound(posture, {c.get("base_posture") for c in composites})
         if self._active_posture == "open_hand" and posture != "open_hand" and self._open_goes_on(landmarks, posture, composites):
             posture = "open_hand"
         self.trace.append((now, posture, active_gesture, landmarks))
@@ -1365,12 +1483,50 @@ class CompositeGestureDetector:
 
 
 _GLOBAL_REGISTRY: Optional[ActionBindingRegistry] = None
+# 2026-11-11 (the person's choice, "프로필별로"): each calibration profile has its own gesture -> command bindings
+# (with its composite gestures and registered motions, which live in the same file). No profile = the default state,
+# config/gesture_bindings.json; a profile's file is config/profiles/bindings/<name>.json (that folder is git-ignored: a
+# profile name can be a person's name) and holds only what the profile changed ("a profile nothing was changed in is
+# the default state"), laid over the default file when it is read.
+_BINDING_PROFILE: Optional[str] = None
+
+
+def bindings_path(profile: Optional[str] = None) -> Path:
+    name = str(profile or "").strip()
+    if not name:
+        return DEFAULT_BINDINGS_PATH
+    from src import profiles
+    if not profiles.valid_name(name):
+        raise ValueError(f"사용할 수 없는 프로필 이름입니다: {name!r}")
+    return DEFAULT_BINDINGS_PATH.parent / profiles.PROFILES_DIR / "bindings" / f"{name}.json"
+
+
+def use_binding_profile(profile: Optional[str]) -> ActionBindingRegistry:
+    """Switch the bindings in use to those of `profile` (None / "" = the common ones). Asking for the profile already
+    in use changes nothing, so the dashboard and both engines may all call it."""
+    global _GLOBAL_REGISTRY, _BINDING_PROFILE
+    name = str(profile or "").strip() or None
+    if name == _BINDING_PROFILE:
+        return get_action_registry()
+    try:
+        path = bindings_path(name)
+    except ValueError:
+        return get_action_registry()
+    _BINDING_PROFILE = name
+    _GLOBAL_REGISTRY = ActionBindingRegistry(path, base_path=DEFAULT_BINDINGS_PATH if name else None)
+    return _GLOBAL_REGISTRY
 
 
 def get_action_registry(path: Optional[Path | str] = None) -> ActionBindingRegistry:
     global _GLOBAL_REGISTRY
+    if _GLOBAL_REGISTRY is None and path is None:
+        try:
+            path = bindings_path(_BINDING_PROFILE)
+        except ValueError:
+            path = None
     if _GLOBAL_REGISTRY is None or (path is not None and Path(path) != _GLOBAL_REGISTRY.path):
-        _GLOBAL_REGISTRY = ActionBindingRegistry(path)
+        _GLOBAL_REGISTRY = ActionBindingRegistry(
+            path, base_path=DEFAULT_BINDINGS_PATH if _BINDING_PROFILE and path == bindings_path(_BINDING_PROFILE) else None)
     else:
         _GLOBAL_REGISTRY.reload_if_changed()
     return _GLOBAL_REGISTRY

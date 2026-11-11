@@ -223,6 +223,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "fist_curl_exit": 1.2,
     "fist_confirm_time": 0.12,
     "index_tuck_ratio": 1.15,
+    "fist_upright": True,         # a fist turned on its side (thumb on top) also counts as a fist (upright_fist)
     "pinch_fistlike_confirm": 0.12,
     "fling_strength": 1.0,
     "record_gain_min": 1.0,
@@ -481,6 +482,22 @@ def describe_anchor_joints(joints: Sequence[int]) -> str:
 PROFILE_ONLY_KEYS = {"calibrated_hand_size"}
 
 
+def _profile_value_ok(key: str, value: Any, cfg: Dict[str, Any]) -> bool:
+    """A profile may change a setting the app knows, to a value of the same kind (number, switch, word, list, group)."""
+    if key in PROFILE_ONLY_KEYS:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if key not in cfg:
+        return False
+    have = cfg[key]
+    if isinstance(have, bool) or isinstance(value, bool):
+        return isinstance(have, bool) and isinstance(value, bool)
+    if isinstance(have, (int, float)):
+        return isinstance(value, (int, float))
+    if have is None:
+        return True
+    return isinstance(value, type(have))
+
+
 class GestureEngine:
     """
     Processes 21 hand landmarks to detect pinch gestures with hysteresis
@@ -611,20 +628,34 @@ class GestureEngine:
         self._profile_base: Dict[str, Any] = {}
         self._profile_applied: Dict[str, Any] = {}
         self.profile_name: Optional[str] = None
+        # the default state (built-in defaults + gestures.json), before any profile: what a profile's changes are
+        # measured against when they are saved
+        self._base_config: Dict[str, Any] = copy.deepcopy(cfg)
         try:
             name = profiles.get_active(target.parent)
-            overlay = profiles.load_profile(target.parent, name, set(DEFAULT_CONFIG) | PROFILE_ONLY_KEYS) if name else None
+            overlay = profiles.load_values(target.parent, name) if name else None
         except ValueError:
             name, overlay = None, None
         if name and overlay is not None:
-            # defaults < gestures.json < profile; remember what the file said so a later save can
-            # keep the profile's numbers out of gestures.json
+            # defaults < gestures.json < profile: the profile holds only what differs from the default state
             self.profile_name = name
             for key, value in overlay.items():
-                self._profile_base[key] = cfg.get(key)
-                self._profile_applied[key] = value
-                cfg[key] = value
+                if not _profile_value_ok(key, value, cfg):
+                    continue                 # an unknown key or a value of another kind (a hand-edited file)
+                self._profile_base[key] = copy.deepcopy(cfg.get(key))
+                if isinstance(value, dict) and isinstance(cfg.get(key), dict):
+                    self._deep_merge(cfg[key], value)
+                elif isinstance(cfg.get(key), int) and not isinstance(cfg.get(key), bool) and float(value).is_integer():
+                    cfg[key] = int(value)
+                else:
+                    cfg[key] = copy.deepcopy(value)
+                self._profile_applied[key] = copy.deepcopy(cfg[key])
         self.config = cfg
+        try:                                   # the profile's own gesture -> command bindings go with it
+            from src.action_bindings import use_binding_profile
+            use_binding_profile(self.profile_name)
+        except Exception:
+            pass
         return cfg
 
     def set_profile(self, name: Optional[str]) -> bool:
@@ -644,6 +675,15 @@ class GestureEngine:
         them since: the profile is not copied into the shared base config."""
         target = Path(path) if path is not None else self.config_path
         target.parent.mkdir(parents=True, exist_ok=True)
+        if path is None and self.profile_name:
+            # 2026-11-11 (the person's rule): with a profile on, what is changed belongs to the profile. Only what
+            # differs from the default state is written, into the profile; gestures.json (the default) stays as it is.
+            base = getattr(self, "_base_config", {})
+            changed = {k: v for k, v in self.config.items() if k not in base or base[k] != v}
+            try:
+                return profiles.save_values(target.parent, self.profile_name, changed)
+            except (OSError, ValueError):
+                return target                # the profile is gone (renamed / deleted): never into the default file
         out = dict(self.config)
         for key, applied in self._profile_applied.items():
             if out.get(key) == applied:
@@ -848,6 +888,38 @@ class GestureEngine:
             ratios.append(self._dist_3d(pts[tip_i], wrist) / base if base > 1e-6 else 9.9)
         return tuple(ratios)
 
+    # A fist turned on its side, thumb on top (2026-11-11, user: "세로 주먹도 스크롤브라우징 가능하게"). Measured on a 15 s
+    # capture of the user's own upright fist (pc-rtx3060 webcam, held 139 frames): finger_curl_ratios was 0.96-1.46 (tips about
+    # as far from the wrist as the knuckles, and swinging with the depth estimate while the hand moved), so not one frame was a
+    # fist. What stays put is each finger's own bend - tip->knuckle over the finger's length (straight ~1.0; index 0.56-0.74,
+    # the others <= 0.62 here) - the knuckle line standing upright (pinky knuckle under the index knuckle, 0.91-0.96), and the
+    # thumb tip lying on the index / middle finger (0.15-0.35 knuckle spans; a half fist 0.86 median). Replayed over the 42
+    # recordings these add fist frames: half-fist moving ("none") 135 of 47,256, thumb + index 21 of 12,654, idle 96 of 15,855;
+    # the upright fist itself 123 of 139. KEEP: looser, once the fist is held (the bend wobbles while the hand moves).
+    UPRIGHT_FIST = {"steep": .85, "index": .75, "others": .65, "thumb": .35}
+    UPRIGHT_FIST_KEEP = {"steep": .7, "index": .82, "others": .75, "thumb": .5}
+
+    def upright_fist(self, pts: Sequence[Point3D], keep: bool = False) -> Optional[Dict[str, float]]:
+        """The measures of a fist on its side when they pass (see UPRIGHT_FIST), else None."""
+        asp = max(0.2, min(5.0, float(self.frame_aspect or 0.5625)))
+        p = [(q.x, q.y * asp, q.z) for q in pts]
+        d = lambda a, b: math.dist(p[a], p[b])   # noqa: E731
+        span = d(5, 17)
+        if span < 1e-6:
+            return None
+        bend = []
+        for mcp, pip, dip, tip in ((5, 6, 7, 8), (9, 10, 11, 12), (13, 14, 15, 16), (17, 18, 19, 20)):
+            length = d(mcp, pip) + d(pip, dip) + d(dip, tip)
+            bend.append(d(tip, mcp) / length if length > 1e-6 else 1.0)
+        m = {"steep": (p[17][1] - p[5][1]) / max(1e-9, math.hypot(p[17][0] - p[5][0], p[17][1] - p[5][1])),
+             "index": bend[0], "others": max(bend[1:]),
+             "thumb": min(d(self.THUMB_TIP, j) for j in (6, 7, 10, 11)) / span,
+             "curl": max(self.finger_curl_ratios(pts))}
+        lim = self.UPRIGHT_FIST_KEEP if keep else self.UPRIGHT_FIST
+        ok = (m["steep"] >= lim["steep"] and m["index"] <= lim["index"] and m["others"] <= lim["others"]
+              and m["thumb"] <= lim["thumb"] and m["curl"] <= 1.5)
+        return m if ok else None
+
     def anchor_joints(self) -> Tuple[int, ...]:
         """Joints the cursor follows: the user's pick, else `cursor_anchor_points` in the config, else ()."""
         return self.cursor_anchor_override or normalize_anchor_joints(self.config.get("cursor_anchor_points"))
@@ -982,8 +1054,11 @@ class GestureEngine:
         index_tucked = ratios[0] <= float(self.config.get("index_tuck_ratio", 1.15))
         # Other three fingers at least half closed (on the way to a fist, or an "OK" pinch)
         others_curled = max(ratios[1:]) <= 1.35
+        upright = bool(self.config.get("fist_upright", True))
         if not self._fist:
-            if (not self._index_pinched or not index_active) and index_tucked and curl <= fist_enter:
+            plain = index_tucked and curl <= fist_enter
+            side = (not plain) and upright and self.upright_fist(pts) is not None
+            if (not self._index_pinched or not index_active) and (plain or side):
                 # every finger curled INTO the palm, held for fist_confirm_time
                 if self._fist_candidate_since is None:
                     self._fist_candidate_since = now
@@ -993,7 +1068,7 @@ class GestureEngine:
                     self._pinch_candidate_since = None
             else:
                 self._fist_candidate_since = None
-        elif curl > float(self.config.get("fist_curl_exit", 1.2)):
+        elif curl > float(self.config.get("fist_curl_exit", 1.2)) and not (upright and self.upright_fist(pts, keep=True)):
             self._fist = False
             self._index_released_at = now  # no click from the fingers opening
         if self._fist and self._is_enabled("fist"):

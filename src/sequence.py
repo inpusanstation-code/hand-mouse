@@ -22,7 +22,7 @@ COOLDOWN = 1.0           # s after a sequence fired before another can
 MIN_STEPS, MAX_STEPS = 2, 3
 POSTURES = ["thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle", "v_sign", "two_fingers", "v_sign_down",
             "rock_sign", "index_point", "l_sign", "pinky_up", "shaka", "thumbs_down",
-            "thumbs_up", "fist", "fingers_bent", "open_hand", "knife_hand", "thumb_tucked"]     # + the shapes the user named (src/custom_postures.register)
+            "thumbs_up", "fist", "fingers_bent", "open_hand", "open_hand_back", "knife_hand", "thumb_tucked"]     # + the shapes the user named (src/custom_postures.register)
 
 
 def steps_text(steps: Sequence[str]) -> str:
@@ -102,12 +102,26 @@ class SequenceStore:
             self.items[key]["enabled"] = bool(on)
             self.save()
 
+    def set_motion_only(self, key: str, on: bool) -> bool:
+        """Only while motion mode is on (2026-11-11 request). Off = in every mode, as before."""
+        if key not in self.items:
+            return False
+        if on:
+            self.items[key]["motion_only"] = True
+        else:
+            self.items[key].pop("motion_only", None)
+        self.save()
+        return True
+
     def rows(self) -> List[Dict[str, Any]]:
         return [{"key": k, "name": v["name"], "steps": list(v["steps"]), "steps_text": steps_text(v["steps"]),
-                 "enabled": bool(v.get("enabled", True))} for k, v in self.items.items()]
+                 "enabled": bool(v.get("enabled", True)), "motion_only": bool(v.get("motion_only"))}
+                for k, v in self.items.items()]
 
-    def active(self) -> Dict[str, Tuple[str, ...]]:
-        return {k: tuple(v["steps"]) for k, v in self.items.items() if v.get("enabled", True)}
+    def active(self, motion: Optional[bool] = None) -> Dict[str, Tuple[str, ...]]:
+        """`motion`: is motion mode on? False leaves out the "motion mode only" ones; None = all of them."""
+        return {k: tuple(v["steps"]) for k, v in self.items.items()
+                if v.get("enabled", True) and (motion is not False or not v.get("motion_only"))}
 
 
 class SequenceDetector:
@@ -124,7 +138,9 @@ class SequenceDetector:
         self.cooldown_until = float("-inf")
 
     def step(self, t: float, posture: Optional[str], sequences: Dict[str, Tuple[str, ...]]) -> Optional[str]:
-        posture = posture or ""
+        from src.pose_probe import unless_bound
+        # the back of an open hand counts as the open hand unless a sequence asks for it
+        posture = unless_bound(posture or "", {s for seq in sequences.values() for s in seq})
         if posture != self.current:
             self.current, self.since, self.counted = posture, t, False
         if self.counted:

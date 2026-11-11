@@ -91,10 +91,24 @@ class PathStore:
         from src.action_bindings import POSTURE_NAMES_KO
         return [{"key": k, "name": v["name"], "posture": v["posture"], "shape": v["shape"],
                  "steps_text": f"{POSTURE_NAMES_KO.get(v['posture'], v['posture'])} 유지한 채 {shape_name(v['shape'])}",
-                 "enabled": bool(v.get("enabled", True))} for k, v in self.items.items()]
+                 "enabled": bool(v.get("enabled", True)), "motion_only": bool(v.get("motion_only"))}
+                for k, v in self.items.items()]
 
-    def active(self) -> Dict[str, Tuple[str, str]]:
-        return {k: (v["posture"], v["shape"]) for k, v in self.items.items() if v.get("enabled", True)}
+    def set_motion_only(self, key: str, on: bool) -> bool:
+        """Only while motion mode is on (2026-11-11 request). Off = in every mode, as before."""
+        if key not in self.items:
+            return False
+        if on:
+            self.items[key]["motion_only"] = True
+        else:
+            self.items[key].pop("motion_only", None)
+        self.save()
+        return True
+
+    def active(self, motion: Optional[bool] = None) -> Dict[str, Tuple[str, str]]:
+        """`motion`: is motion mode on? False leaves out the "motion mode only" ones; None = all of them."""
+        return {k: (v["posture"], v["shape"]) for k, v in self.items.items()
+                if v.get("enabled", True) and (motion is not False or not v.get("motion_only"))}
 
 
 class PathDetector:
@@ -155,7 +169,9 @@ class PathDetector:
              gestures: Dict[str, Tuple[str, str]], shapes, angle: Optional[float] = None) -> Optional[str]:
         """One frame (posture None / palm None = no hand). The gesture key when one is drawn or turned, else None.
         `angle`: the hand's direction in degrees (a thumbs-up: the thumb's), for rotations."""
+        from src.pose_probe import unless_bound
         postures = {p for p, _ in gestures.values()}
+        posture = unless_bound(posture, postures)      # the back of an open hand: the open hand unless one asks for it
         here = posture if posture in postures else ""
         if self.posture and here != self.posture:
             if self.off_since is None:

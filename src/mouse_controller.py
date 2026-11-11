@@ -105,6 +105,26 @@ class ScrollPump:
 
 
 
+_USER32 = None
+
+
+def _user32():
+    """user32 with the window-handle types declared (a handle is pointer-sized; the default int could cut it), kept
+    apart from ctypes.windll.user32 so the declarations do not change what other code gets from it."""
+    global _USER32
+    if _USER32 is None:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.WinDLL("user32", use_last_error=True)
+        u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        u.PostMessageW.restype = wintypes.BOOL
+        u.IsWindow.argtypes = u.IsWindowVisible.argtypes = [wintypes.HWND]
+        u.IsWindow.restype = u.IsWindowVisible.restype = wintypes.BOOL
+        u.GetForegroundWindow.restype = ctypes.c_void_p
+        _USER32 = u
+    return _USER32
+
+
 class MouseController:
     """Controls the OS mouse cursor based on GestureResult and gesture configuration."""
 
@@ -219,6 +239,7 @@ class MouseController:
         self.interpolation: bool = False
         self._rel_carry: Tuple[float, float] = (0.0, 0.0)   # cursor distance held back by cursor_max_step, paid out in the next frames
         self.last_close_info: Dict[str, Any] = {}      # the window the last Alt+F4 request met (see foreground_info)
+        self.close_outcome: Optional[Dict[str, Any]] = None   # what became of the last close (close_foreground_window)
         self._interp: Optional[CursorInterpolator] = None if dry_run else CursorInterpolator()
 
         # Hand-tremor stabilization (One Euro filter + deadband) for cursor movement
@@ -1874,12 +1895,13 @@ class MouseController:
             import ctypes
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
-            hwnd = user32.GetForegroundWindow()
+            hwnd = _user32().GetForegroundWindow()      # the whole handle (see _user32)
             if not hwnd:
                 return info
             buf = ctypes.create_unicode_buffer(512)
             user32.GetClassNameW(hwnd, buf, 512)
             info["cls"] = buf.value
+            info["hwnd"] = int(hwnd)
             user32.GetWindowTextW(hwnd, buf, 512)
             info["title_full"] = buf.value
             info["title"] = buf.value[:40]
@@ -1908,6 +1930,67 @@ class MouseController:
         (Alt+F4 on the desktop opens Windows' shut-down dialog)."""
         self.last_close_info = self.foreground_info()
         return bool(self.last_close_info["ok"])
+
+    # 2026-11-11 report ("'창닫기 보냄'이라고는 하는데 창을 닫지 않는 경우가 잦다"): the close was four key events
+    # (Alt down, F4 down, F4 up, Alt up) sent within a millisecond to whatever had the keyboard, and nobody looked at
+    # what happened. Now the window in front is asked to close directly (the same request Alt+F4 ends in), the keys
+    # follow only if it did not react, and `close_outcome` says what became of it.
+    CLOSE_WAIT = .7          # s the window gets to close (or to ask something) before the next step
+
+    def close_foreground_window(self) -> bool:
+        """Close the window in front. False = refused (this app, the desktop, the taskbar: `last_close_info`).
+        `close_outcome` is None while it is being watched, then {"result": "closed" | "changed" | "still", ...}."""
+        if not self._safe_to_close_foreground():
+            self.event_log.append("close_window_refused")
+            return False
+        info = self.last_close_info
+        hwnd = int(info.get("hwnd") or 0)
+        posted = False
+        if sys.platform == "win32" and hwnd:
+            try:
+                posted = bool(_user32().PostMessageW(hwnd, 0x0112, 0xF060, 0))      # WM_SYSCOMMAND, SC_CLOSE
+            except Exception:
+                posted = False
+        if not posted:
+            pyautogui.hotkey("alt", "f4", _pause=False)
+        self.event_log.append("close_window:" + ("message" if posted else "keys"))
+        self.close_outcome = None
+        if sys.platform == "win32" and hwnd:
+            threading.Thread(target=self._watch_close, args=(hwnd, posted, dict(info)), daemon=True).start()
+        else:
+            self.close_outcome = {"result": "unknown", "how": "keys", "title": info.get("title", "")}
+        return True
+
+    def _watch_close(self, hwnd: int, posted: bool, info: Dict[str, Any]) -> None:
+        """Did the window go? "closed" = it is gone; "changed" = it is still there but something else came to the
+        front (a "save?" question, the next window); "still" = it is in front as before."""
+        u = _user32()
+        how = "message" if posted else "keys"
+
+        def state() -> str:
+            if not u.IsWindow(hwnd) or not u.IsWindowVisible(hwnd):
+                return "closed"
+            return "still" if int(u.GetForegroundWindow() or 0) == hwnd else "changed"
+
+        def wait() -> str:
+            end = time.perf_counter() + self.CLOSE_WAIT
+            while time.perf_counter() < end:
+                if state() == "closed":
+                    break
+                time.sleep(.05)
+            return state()
+
+        try:
+            result = wait()
+            if result == "still" and posted:
+                # it did not take the request: the keys, once, while it is still the window in front
+                pyautogui.hotkey("alt", "f4", interval=.03, _pause=False)
+                how = "message+keys"
+                result = wait()
+        except Exception:
+            result = "unknown"
+        self.close_outcome = {"result": result, "how": how, "title": info.get("title", ""),
+                              "cls": info.get("cls", ""), "process": info.get("process", "")}
 
     def send_motion_action(self, action_id: str) -> bool:
         """Send one command of motion mode (back / forward / tab_prev / tab_next or custom motion binding)."""
@@ -1946,6 +2029,8 @@ class MouseController:
 
         if keys is not None:
             if not self.dry_run:
+                if action_id == "close_window":
+                    return self.close_foreground_window()
                 pyautogui.hotkey(*keys, _pause=False)
             return True
         return False

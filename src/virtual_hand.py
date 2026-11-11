@@ -263,6 +263,17 @@ class BoxMapper:
         self._last_t = None
         self._offset, self._last_n = (0.0, 0.0), None
 
+    def resume_at(self, pos: Tuple[float, float], now: float) -> None:
+        """Something else moved the cursor (pointing mode follows the index tip) and hands it back at `pos` (0..1 on
+        the monitor): it stays there and the offset to the palm is given back as the hand moves, like after a fist
+        scroll (see JUMP) - not a jump to where the palm is."""
+        self.pos = (min(1.0, max(0.0, pos[0])), min(1.0, max(0.0, pos[1])))
+        self._held, self._keep = True, True
+        self._ease_from = None
+        self._last_t = now
+        self._last_n = None
+        self._history.clear()
+
     def target(self, landmarks: Sequence[Any], box, hold: bool = False, now: float = 0.0, aim: bool = True,
                keep: bool = False) -> Tuple[float, float]:
         """`keep` (with `hold`): this hold is one the hand travels during (a fist scrolling the page) - when it ends

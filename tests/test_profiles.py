@@ -89,15 +89,47 @@ def test_saving_the_config_does_not_copy_the_profile_into_the_base_file(tmp_path
     profiles.save_profile(tmp_path, "민수", {"pinch_threshold": 0.018, "tremor_deadzone": 0.004})
     profiles.set_active(tmp_path, "민수")
     e = GestureEngine(config_path=cfg)
-    e.config["smoothing"] = 0.4                                   # the user tuned an unrelated setting
+    before = cfg.read_text(encoding="utf-8")
+    e.config["smoothing"] = 0.4                                   # the user tuned a setting with the profile on
+    e.config["scroll_invert"] = True                              # ... and a switch
     e.save_config()
-    saved = json.loads(cfg.read_text(encoding="utf-8"))
-    assert saved["smoothing"] == 0.4
-    assert saved["pinch_threshold"] == 0.025                      # base value kept, not the profile's
-    assert saved["tremor_deadzone"] == DEFAULT_CONFIG["tremor_deadzone"]
-    e.config["pinch_threshold"] = 0.02                            # the user changed a profile-owned key
+    # 2026-11-11 (the person's rule): it belongs to the profile; the shared file is the default state and stays
+    assert cfg.read_text(encoding="utf-8") == before
+    assert profiles.load_values(tmp_path, "민수") == {"pinch_threshold": 0.018, "tremor_deadzone": 0.004,
+                                                     "smoothing": 0.4, "scroll_invert": True}
+    again = GestureEngine(config_path=cfg)
+    assert again.config["smoothing"] == 0.4 and again.config["scroll_invert"] is True
+    again.config["smoothing"] = 0.5                               # back to the default value: no longer a difference
+    again.save_config()
+    assert "smoothing" not in profiles.load_values(tmp_path, "민수")
+    assert again.set_profile(None) and again.config["smoothing"] == 0.5 and again.config["scroll_invert"] is False
+    again.config["smoothing"] = 0.3                               # no profile: the default state itself is changed
+    again.save_config()
+    assert json.loads(cfg.read_text(encoding="utf-8"))["smoothing"] == 0.3
+
+
+def test_a_new_profile_is_the_default_state_and_can_be_renamed_exported_and_deleted(tmp_path):
+    cfg = make_config(tmp_path, pinch_threshold=0.025)
+    profiles.create_profile(tmp_path, "새 사람")
+    with pytest.raises(ValueError):
+        profiles.create_profile(tmp_path, "새 사람")
+    profiles.set_active(tmp_path, "새 사람")
+    e = GestureEngine(config_path=cfg)
+    plain = dict(e.config)
+    assert e.profile_name == "새 사람" and e.set_profile(None) and e.config == plain      # same as no profile at all
+    assert e.set_profile("새 사람")
+    assert profiles.changed_counts(tmp_path, "새 사람") == {"settings": 0, "bindings": 0}
+    e.config["pinch_threshold"] = 0.03
     e.save_config()
-    assert json.loads(cfg.read_text(encoding="utf-8"))["pinch_threshold"] == 0.02
+    profiles.rename_profile(tmp_path, "새 사람", "민수")
+    assert profiles.list_profiles(tmp_path) == ["민수"] and profiles.get_active(tmp_path) == "민수"
+    doc = profiles.export_document(tmp_path, "민수")
+    assert doc["format"] == profiles.EXPORT_FORMAT and doc["profile"]["updates"] == {"pinch_threshold": 0.03}
+    assert profiles.import_document(tmp_path, doc) == "민수 2"                 # the name is taken: numbered
+    assert profiles.load_values(tmp_path, "민수 2") == {"pinch_threshold": 0.03}
+    with pytest.raises(ValueError):
+        profiles.import_document(tmp_path, {"name": "x"})
+    assert profiles.delete_profile(tmp_path, "민수") and profiles.get_active(tmp_path) is None
 
 
 def test_a_config_file_notepad_saved_is_read_and_an_unreadable_one_is_kept(tmp_path):

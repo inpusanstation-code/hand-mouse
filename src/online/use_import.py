@@ -48,6 +48,19 @@ CLICK_GESTURES = {"thumb_index": ("가상 손", "엄지+검지"), "thumb_index_m
                   "thumb_middle": ("손바닥 모드", "엄지+중지"), "thumb_ring": ("손바닥 모드", "엄지+약지")}
 
 
+# 2026-11-11 (the person: "F8 이전 기록은 우클릭 학습에서 빼줘"): until F8 could mark a click from any window, a stray right
+# click went unmarked (F only reaches the app's own window) - and once it could, 33 of an hour's 40 right clicks were
+# marked as not meant. An unmarked right click from before that is therefore no example of a meant one: it is left out
+# of the learning (neither a yes nor a no), unless the person passed it in the review (src/use_review.py).
+RIGHT_CLICK_MARKABLE_FROM = "2026-11-11 21:30:00"     # wall time of the first run with the F8 key
+
+
+def unmarkable_right_click(rec: Dict[str, Any]) -> bool:
+    """A right click logged when it could not yet be marked from another window (see RIGHT_CLICK_MARKABLE_FROM)."""
+    wall = str(rec.get("wall") or "")
+    return str(rec.get("key", "")) == "right_click" and bool(wall) and wall < RIGHT_CLICK_MARKABLE_FROM
+
+
 def click_key(source: str, key: str, label: str, kind: str = "") -> str:
     """The checking model's key of a left / right click made by a hand gesture, or "":
 
@@ -248,9 +261,16 @@ def _state(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def import_events(store: SampleStore, folder: Path | str, classes: Sequence[str], *, new_min: int = NEW_MIN) -> Dict[str, Any]:
+def import_events(store: SampleStore, folder: Path | str, classes: Sequence[str], *, new_min: int = NEW_MIN,
+                  require_review: bool = False) -> Dict[str, Any]:
     """Adds the commands logged since the last import. Returns {"negatives", "weak", "taught", "waiting", "skipped", "new_classes"}:
-    `taught` = uses of taught gestures taken, `waiting` = uses of taught gestures still short of `new_min`."""
+    `taught` = uses of taught gestures taken, `waiting` = uses of taught gestures still short of `new_min`.
+
+    The person's verdicts (src/use_review.py, 2026-11-11): a use judged a false detection is taken like one marked with F
+    (the stretch that set it off is "none"). `require_review`: a taught gesture's use or a click without a verdict stays in
+    the log ("unreviewed" in the result), so only the uses the person passed are learned as examples."""
+    from src import use_review
+    reviews = use_review.load(folder)
     folder = Path(folder)
     state_path = store.root / STATE_FILE
     state = _state(state_path)
@@ -262,6 +282,7 @@ def import_events(store: SampleStore, folder: Path | str, classes: Sequence[str]
         have[s.label] = have.get(s.label, 0) + 1
     ready: List[Dict[str, Any]] = []               # cut and labelled, not stored yet
     done_by_file: Dict[str, set] = {}
+    held_files: set = set()                        # files with uses still waiting for the person's verdict: read again
     for path in sorted(folder.glob("*.jsonl")):
         size = path.stat().st_size
         seen = state.get(path.name) or {}
@@ -293,8 +314,21 @@ def import_events(store: SampleStore, folder: Path | str, classes: Sequence[str]
                     marks[rec["id"]] = str(rec.get("reason") or "f_key")
         for eid, ev in events.items():
             ev["marked"] = marks.get(eid, "")
+            judged = use_review.verdict(reviews, path.name, eid)
+            if judged == use_review.BAD and not ev["marked"]:
+                ev["marked"] = use_review.MARK         # the person called it a false detection: what the gesture is NOT
+            if not ev["marked"] and judged != use_review.OK and unmarkable_right_click(ev):
+                done.add(eid)                          # from before F8: nobody could say whether it was meant
+                counts["skipped"] += 1
+                counts["old_right_clicks"] = counts.get("old_right_clicks", 0) + 1
+                continue
             label = label_for(ev, classes)
             taught = not ev["marked"] and learnable(str(ev.get("source", "")), str(ev.get("key", "")))
+            if (require_review and not ev["marked"] and judged != use_review.OK
+                    and (taught or click_key(str(ev.get("source", "")), str(ev.get("key", "")), str(ev.get("label") or "")))):
+                counts["unreviewed"] = counts.get("unreviewed", 0) + 1     # waits in the log for the person's look
+                held_files.add(path.name)
+                continue
             before = BEFORE_MARKED if ev["marked"] else BEFORE_TAUGHT if taught else BEFORE_RULE
             cut = _cut(ev, before) if label is not None else None
             if cut is None:
@@ -338,7 +372,7 @@ def import_events(store: SampleStore, folder: Path | str, classes: Sequence[str]
             counts["weak"] += 1
     for path in folder.glob("*.jsonl"):
         state[path.name] = {"size": path.stat().st_size, "ids": sorted(done_by_file.get(path.name, ())),
-                            "waiting": path.name in waiting_files, "clicks": True}
+                            "waiting": path.name in waiting_files or path.name in held_files, "clicks": True}
     for name in [n for n in state if not (folder / n).is_file()]:
         del state[name]                            # the log dropped that file (its size limit)
     tmp = state_path.with_suffix(".tmp")
@@ -348,10 +382,19 @@ def import_events(store: SampleStore, folder: Path | str, classes: Sequence[str]
 
 
 def pending_counts(folder: Path | str, root: Path | str) -> Dict[str, int]:
-    """Per taught gesture: its unmarked uses in the log that no learning round has taken yet. Reads the small index files only."""
+    """Per taught gesture: its unmarked uses in the log that no learning round has taken yet (the ones the person judged a
+    false detection are not uses). Reads the small index files only."""
+    return {k: v["ok"] + v["new"] for k, v in pending_detail(folder, root).items() if v["ok"] + v["new"]}
+
+
+def pending_detail(folder: Path | str, root: Path | str) -> Dict[str, Dict[str, int]]:
+    """Like pending_counts, told apart by the person's verdict (src/use_review.py): {"ok": passed, "new": not looked at
+    yet, "bad": judged a false detection} per gesture."""
+    from src import use_review
     folder = Path(folder)
     state = _state(Path(root) / STATE_FILE)
-    out: Dict[str, int] = {}
+    reviews = use_review.load(folder)
+    out: Dict[str, Dict[str, int]] = {}
     for path in sorted(folder.glob("*.jsonl")):
         index = path.with_suffix(INDEX_SUFFIX)
         if not index.is_file():
@@ -360,6 +403,7 @@ def pending_counts(folder: Path | str, root: Path | str) -> Dict[str, int]:
         events: Dict[int, str] = {}
         marked: set = set()
         no_dir: set = set()
+        old_right: set = set()
         kinds = _file_click_kinds(path)
         for line in index.read_text(encoding="utf-8").splitlines():
             try:
@@ -371,6 +415,8 @@ def pending_counts(folder: Path | str, root: Path | str) -> Dict[str, int]:
                     marked.add(rec.get("id"))
                 continue
             source, key = str(rec.get("source", "")), str(rec.get("key", ""))
+            if unmarkable_right_click(rec):
+                old_right.add(rec["id"])
             if learnable(source, key):
                 events[rec["id"]] = split(key, str(rec.get("dir") or ""))      # counted per direction (2026-11-11)
                 if not rec.get("dir"):
@@ -383,7 +429,10 @@ def pending_counts(folder: Path | str, root: Path | str) -> Dict[str, int]:
                 events[eid] = split(events[eid], dirs.get(eid, ""))
         for eid, key in events.items():
             if eid not in marked:
-                out[key] = out.get(key, 0) + 1
+                kind = {use_review.OK: "ok", use_review.BAD: "bad"}.get(use_review.verdict(reviews, path.name, eid), "new")
+                if kind == "new" and eid in old_right:
+                    continue                           # a right click from before F8: not counted as a use
+                out.setdefault(key, {"ok": 0, "new": 0, "bad": 0})[kind] += 1
     return out
 
 

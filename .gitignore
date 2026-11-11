@@ -65,3 +65,7 @@ config/tcn-ui.ini
 data/posture_examples/
 models/posture_teach.json
 models/posture_teach.candidate.json
+
+# A candidate of the exported gesture model made by the app, and the models it replaced
+models/candidate/
+models/backup-auto-*/

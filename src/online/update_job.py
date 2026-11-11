@@ -61,7 +61,7 @@ def _model(info: Dict[str, Any], classes: int, state: Optional[Dict[str, torch.T
 def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None, emit: Callable[..., None] = lambda *a, **k: None,
                passes: int = PASSES, min_updates: int = MIN_UPDATES, buffer_size: int = BUFFER, seed: int = 0, augment: Any = None,
                lr: float = None, encoder_lr: float = None, balanced: bool = False,
-               use_events: Optional[Path | str] = None, weak: bool = True) -> Dict[str, Any]:
+               use_events: Optional[Path | str] = None, weak: bool = True, require_review: bool = False) -> Dict[str, Any]:
     """`use_events` = the use log folder (logs/use_events): its commands are imported first and learned from as well: marked ones
     as "none", unmarked rule commands as thinned-out weak examples (`weak=False` leaves those out). Uses of a taught hand shape
     are imported too but not learned here: src/online/verifier.py trains a checking model of its own for each (the caller,
@@ -80,7 +80,7 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
     imported: Dict[str, int] = {}
     if use_events is not None:
         from src.online.use_import import import_events, use_sources
-        imported = import_events(store, use_events, classes)
+        imported = import_events(store, use_events, classes, require_review=require_review)
         sources += use_sources()
         emit("imported", **imported)
     pruned = store.prune()                     # duplicates and hand-mostly-missing unchecked samples (spec 11)
@@ -149,6 +149,7 @@ def run_update(root: Path | str = DEFAULT_ROOT, *, device: Optional[str] = None,
     batches = math.ceil(len(new_rows) / BATCH)
     rounds = max(passes, math.ceil(min_updates / batches))
     total, done = rounds * batches, 0
+    emit("update", done=0, total=total)        # the update steps begin (the round's stages are timed by these events)
     for _ in range(rounds):
         stream = rng.permutation(new_rows)
         for i in range(0, len(stream), BATCH):

@@ -176,6 +176,8 @@ class TaughtModel:
         self.b2 = np.array(data["b2"], np.float32)
         self.threshold = float(data.get("threshold", THRESHOLD))
         self.replaces: Dict[str, set] = {k: set(v) for k, v in (data.get("replaces") or {}).items()}
+        # each shape's taught thumb (thumb_stats); None = a model trained before 2026-11-11 (read from the examples)
+        self.thumb: Optional[Dict[str, Dict[str, float]]] = data.get("thumb") if isinstance(data.get("thumb"), dict) else None
 
     def probs(self, x: np.ndarray) -> np.ndarray:
         h = np.maximum(0.0, ((x - self.mean) / self.std) @ self.w1.T + self.b1)
@@ -197,16 +199,67 @@ class TaughtModel:
         label, p = self.predict(landmarks, aspect)
         if label == OTHER or p < self.threshold or label == rule:
             return rule
-        if rule not in self.replaces.get(label, ()) or not plausible(label, landmarks, aspect):
+        if rule not in self.replaces.get(label, ()) or not plausible(label, landmarks, aspect, (self.thumb or {}).get(label)):
             return rule
         return label
 
 
-def plausible(label: str, landmarks: Any, aspect: float = ASPECT) -> bool:
-    """A taught LISTED shape must still look like it in the roughest way: a V (upright or upside down) has index and
-    middle straight in 3D, an upside-down one has them pointing down. The model saw a few looks of each taught shape;
-    a hand it never saw (another taught shape at a new angle) must not be told as a V on its say alone
-    (2026-11-11: "옆따봉을 했는데 거꾸로 V로 등록한 명령이 나오거나"). Shapes the user named have no such check."""
+# 2026-11-11 report ("뒤집은 주먹(손등이 바닥을 향하는 상태)을 오른쪽으로 따봉을 하는 것으로 인식한다. 엄지를 펴 올리지도
+# 않았음. 엄지를 충분히 폈을 때 우따봉으로 판정해야 함"): the model's features are relative to the palm, so a fist turned
+# over looks to it much like the fist of a taught thumb-out shape, and nothing asked whether the thumb was out. A shape
+# that was taught WITH the thumb out (its examples' thumbs: straight, long, the tip away from the fingers) is now told
+# only when the hand's thumb is out about as far. No recording of the reported hand exists on this PC: the numbers are
+# starting points (pose_probe calls a thumb "stuck out" at straight .9 / length .65).
+THUMB_OUT = {"straight": .85, "len": .55, "reach": .4}   # a shape's examples at or over these: taught with the thumb out
+THUMB_KEEP = .75         # share of the taught thumb's length and reach the hand must show
+THUMB_STRAIGHT_MIN = .8  # ... with the thumb about straight
+
+
+def thumb_measure(landmarks: Any) -> Dict[str, float]:
+    """How far the thumb is out: straight (1 = stretched), len (tip from its base, in palm lengths) and reach (the
+    tip's distance to the nearest joint of the four fingers, in palm lengths: small when it lies on a fist)."""
+    from src.motion_mode import hand_features
+    pts = [_xyz(p) for p in landmarks[:21]]
+    f = hand_features(pts)
+    palm = max(1e-6, math.hypot(pts[9][0] - pts[0][0], pts[9][1] - pts[0][1]))
+    reach = min(math.hypot(pts[4][0] - pts[i][0], pts[4][1] - pts[i][1]) for i in range(5, 21)) / palm
+    return {"straight": float(f["thumb_straight"]), "len": float(f["thumb_len"]), "reach": float(reach)}
+
+
+def thumb_stats(examples: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
+    """Per taught shape: the median thumb of its example frames ({} for a shape without usable frames)."""
+    rows: Dict[str, List[Dict[str, float]]] = {}
+    for ex in examples:
+        for frame in ex.get("frames") or ():
+            if len(frame) >= 21:
+                try:
+                    rows.setdefault(str(ex["label"]), []).append(thumb_measure(frame))
+                except Exception:
+                    pass
+    return {label: {k: round(float(np.median([m[k] for m in ms])), 3) for k in ("straight", "len", "reach")}
+            for label, ms in rows.items()}
+
+
+def thumb_ok(taught: Optional[Dict[str, float]], landmarks: Any) -> bool:
+    """False when the shape was taught with the thumb out and this hand's thumb is not (see THUMB_OUT)."""
+    if not taught or any(float(taught.get(k, 0.0)) < v for k, v in THUMB_OUT.items()):
+        return True                          # taught with the thumb in (or nothing known): the thumb decides nothing
+    try:
+        now = thumb_measure(landmarks)
+    except Exception:
+        return True
+    return (now["straight"] >= THUMB_STRAIGHT_MIN and now["len"] >= THUMB_KEEP * float(taught["len"])
+            and now["reach"] >= THUMB_KEEP * float(taught["reach"]))
+
+
+def plausible(label: str, landmarks: Any, aspect: float = ASPECT, thumb: Optional[Dict[str, float]] = None) -> bool:
+    """A taught shape must still look like it in the roughest way. A LISTED V (upright or upside down) has index and
+    middle straight in 3D, an upside-down one has them pointing down: the model saw a few looks of each taught shape,
+    and a hand it never saw (another taught shape at a new angle) must not be told as a V on its say alone
+    (2026-11-11: "옆따봉을 했는데 거꾸로 V로 등록한 명령이 나오거나"). Any shape taught with the thumb out needs the thumb
+    out (`thumb`: that shape's taught thumb, see thumb_ok)."""
+    if not thumb_ok(thumb, landmarks):
+        return False
     if label not in ("v_sign", "v_sign_down"):
         return True
     from types import SimpleNamespace
@@ -355,6 +408,7 @@ def train(examples: Optional[List[Dict[str, Any]]] = None, neg: Optional[Dict[st
     report["can_apply"] = report["false_rate"] is not None and report["false_rate"] <= MAX_FALSE
     data = {"version": "posture-teach-v1", "classes": classes, "threshold": THRESHOLD,
             "replaces": {k: sorted(v) for k, v in replaces.items()}, "report": report,
+            "thumb": thumb_stats(examples),
             **{a: b.tolist() for a, b in fit.items()}}
     out = Path(out or CANDIDATE_PATH)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -475,6 +529,8 @@ def active_model() -> Optional[TaughtModel]:
             _cache["mtime"] = mtime
             try:
                 _cache["model"] = TaughtModel(json.loads(MODEL_PATH.read_text(encoding="utf-8")))
+                if _cache["model"].thumb is None:      # trained before the thumb was kept: from the saved examples
+                    _cache["model"].thumb = thumb_stats(load_examples())
             except Exception:
                 _cache["model"] = None
         return _cache["model"]

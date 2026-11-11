@@ -525,6 +525,9 @@ def test_thumb_index_and_middle_together_right_click_and_no_left_click(tmp_path)
     hand[4] = type(tip)(tip.x, tip.y, tip.z)
     hand[12] = type(tip)(tip.x + .004, tip.y, tip.z)       # middle tip next to the index tip: all three together
     rt._step(); rt._step()
+    assert "right_click" not in rt.mouse.event_log         # 2026-11-11: held first ("virtual_right_hold", 0.6 s)
+    time.sleep(.65)
+    rt._step()
     assert "right_click" in rt.mouse.event_log
     assert list(rt.mouse.last_screen_pos) == rt._snap.virtual_hand["screen"]    # at the cursor (no jump)
     time.sleep(.5)
@@ -545,6 +548,9 @@ def test_index_first_then_middle_is_a_right_click_not_a_left_click(tmp_path):
     tip = rt.tracker.hand[TIPS["index"]]
     rt.tracker.hand[12] = type(tip)(tip.x + .004, tip.y, tip.z)
     rt._step(); rt._step()
+    import time
+    time.sleep(.65)                                        # the three stay together ("virtual_right_hold", 0.6 s)
+    rt._step()
     rt.tracker.hand[:] = opened
     for _ in range(3):
         rt._step()

@@ -25,7 +25,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 
-from src.action_bindings import CompositeGestureDetector, DEFAULT_GESTURE_BINDINGS, get_action_registry
+from src.action_bindings import (CompositeGestureDetector, DEFAULT_GESTURE_BINDINGS, PALM_ACTION_KEYS, VIRTUAL_ACTION_KEYS,
+                                 get_action_registry, use_binding_profile)
+from src import default_moves
 from src.failure_log import FailureRecorder
 from src.finger_kinematics import CausalFingerTracker
 from src.close_sign import CloseSign
@@ -54,7 +56,7 @@ from src.virtual_hand import (ACTION_NAMES as HAND_ACTION_NAMES, BoxMapper, DEFA
                               palm_centre, valid_box, view as virtual_hand_view)
 from src.online.collector import OnlineCollector
 from src.finger_overlay import overlay_frame, preview_hand
-from src.pose_probe import PoseProbe, hand_posture, hand_shot, relabelled
+from src.pose_probe import PoseProbe, arm_label, hand_posture, hand_shot, relabelled, set_hand_label
 from src.macro import cancel_all as cancel_macros
 from src.sequence import SequenceDetector, SequenceStore
 from src.path_gesture import PathDetector, PathStore
@@ -76,6 +78,8 @@ from src.tracking_test import TrackingTest, result_line
 
 ONE_SHOT = ("left_click", "right_click", "drag_toggle", "alt_tab", "show_desktop", "task_switcher")
 USE_ACTIONS = ONE_SHOT + ("scroll_grab", "drag_hold")     # written to the use log when they start (src/use_log.py)
+POINT_LIKE = frozenset({"index_point", "l_sign", "two_fingers"})   # hand shapes the pointing hand passes through
+RIGHT_HOLD = .6          # s thumb + index + middle stay together before the virtual hand right-clicks (see _step)
 POINT_QUIET = 1.5        # s after pointing mode (src/point_mode.py) before the V sign may switch the control
 RETRY_SECONDS = 8.0      # a taught gesture its checking model keeps refusing: tries this close together count as one wish
 RETRY_PASS = 3           # ... and the third one goes through
@@ -121,6 +125,7 @@ class UiState:
     sensitivity: int = 100              # percent
     show_fingertips: bool = False
     profile: Optional[str] = None       # calibration profile the user picked (None = no profile)
+    profile_epoch: int = 0              # +1 when the profile in use was reset / renamed: read its settings again
     motion_request: int = 0             # +1 each time the user presses the motion-mode button
     palm_axes_request: int = 0          # +1 per press of "cursor direction" (palm / fist cursor): start the wizard
     palm_axes_cancel: int = 0           # +1 per press of its cancel button
@@ -181,8 +186,11 @@ class Snapshot:
     hand_lost: bool = False               # no hand for `hand_lost_alert` seconds: the screen shows it big
     arm_lost: bool = False                # Pose has not seen the arm for `arm_lost_alert` seconds (only when Pose runs)
     admin_blocked: bool = False           # an admin window (Task Manager) is in front and this app is not admin: input is dropped
-    learn_request: Tuple[int, str] = (0, "")  # (+1 per request, use log folder): start a learning round from the use log
-    learn_note: str = ""                  # the main screen's line: taught gestures' uses being collected / learned
+    learn_request: Tuple = (0, "")  # (+1 per request, use log folder): start a learning round from the use log
+    onnx_request: int = 0                 # +1 = the UI thread should train a candidate of models/gesture_tcn.onnx
+    base_request: int = 0                 # +1 = the UI thread should make the base model (scripts/online_make_base.py)
+    learn_advice: str = ""                # what the app makes of learning rounds that were cut off (round_marker.advice)
+    learn_note: str = ""               # the main screen's line: taught gestures' uses being collected / learned
     learn_items: List[Dict[str, Any]] = field(default_factory=list)   # the same, one card per gesture
 
 
@@ -262,6 +270,7 @@ class QtRuntime:
         self._learn_note = ""                          # the main screen's line about collecting / learning
         self._learn_items: List[Dict[str, Any]] = []   # the same as cards: key, name, state, n, need, text, hint
         self._use_rounds = 0
+        self._use_new: Dict[str, int] = {}             # per gesture: collected uses the person has not judged yet
         self._learn_request = 0                        # +1 = the UI thread should start a learning round from the use log
         self._use_t = 0.0
         self._use_prev_action = "none"
@@ -275,6 +284,7 @@ class QtRuntime:
         self.point_probe = FileTargetProbe()           # is a file / folder under the cursor (UI Automation, own thread)
         self._point_view: Optional[Dict[str, Any]] = None
         self.grip = Grip()                             # what the virtual hand holds: a file (drag) or the page (scroll)
+        self.holds = default_moves.HoldRemap()         # fist scroll / drags connected to another command (src/default_moves.py)
         self.ratchet = Ratchet()                       # a fist scrolls one way: bringing the hand back is not a scroll
         self._fist_y: Optional[float] = None           # where the page is held: follows the palm only while the hand is a fist
         self._palm_trail: List[Tuple[float, float, float]] = []   # (time, palm x, palm y) of the last moments: how fast the hand travels
@@ -346,6 +356,8 @@ class QtRuntime:
         self.toggle_sign = ToggleSign(engine.config)
         self.finger_tracker = CausalFingerTracker()
         self.composite_detector = CompositeGestureDetector(get_action_registry())
+        # the composite gestures marked "motion mode only": judged while motion mode is on, by their own detector
+        self.motion_composite_detector = CompositeGestureDetector(get_action_registry())
         self._guided_rep_token = None
         self._close_notice, self._close_notice_until = "", 0.0
         self._motion_seen = 0
@@ -499,6 +511,15 @@ class QtRuntime:
             elif kind == "tracking_close":
                 self.test = None
                 self._pause()
+            elif kind == "mark_recent":
+                # F8 (any window): only "the click or command of the last 5 seconds was not meant" - never the wider
+                # failure record or the "what was it?" question, which belong to the F key in the app's own window
+                if not self._virtual_click_mark(now):
+                    hit = self.use_log.mark_last(now, "f8_key") if self.use_log is not None else None
+                    if hit is not None:
+                        self._say(f"방금 {self._use_name(str(hit.get('key') or ''))}: '원하지 않음'으로 기록했어요", 1.5)
+                    else:
+                        self._say("최근 5초 안에 표시할 클릭·명령이 없어요", 1.5)
             elif kind == "failure_mark" and self._virtual_click_mark(now):
                 pass
             elif kind == "failure_mark":
@@ -524,6 +545,8 @@ class QtRuntime:
                 self._register_cancel()
             elif kind == "draw_mode":
                 self._set_draw(not self.draw.active if cmd[1] is None else bool(cmd[1]))
+            elif kind == "use_recount":
+                self._use_decide(recount=True)         # the person judged collected uses (src/use_review.py): count again
             elif kind == "seq_reload":
                 self.seq_store.load()
                 self.sequences.reset()
@@ -640,12 +663,23 @@ class QtRuntime:
             # the user picked other skeleton points as the cursor reference (both engines use it)
             self.engine.cursor_anchor_override = tuple(ui.anchor_joints)
             self.pointer.gestures.cursor_anchor_override = tuple(ui.anchor_joints)
-        if ui.profile != self._applied_profile:
+        if ui.profile != self._applied_profile or ui.profile_epoch != getattr(self, "_profile_epoch", 0):
+            self._profile_epoch = ui.profile_epoch
             # the user picked another calibration profile: both engines reload their config
             self._applied_profile = ui.profile
             self.engine.set_profile(ui.profile)
             self.pointer.gestures.set_profile(ui.profile)
-            self._say(f"프로필: {ui.profile or '없음'}", 2.0)
+            # ... and the profile's own bindings (the engines switched the registry): the detectors that read the
+            # composite gestures start again on it, and a binding's remembered on/off is asked again
+            reg = use_binding_profile(self.engine.profile_name)
+            self.composite_detector = CompositeGestureDetector(reg)
+            self.motion_composite_detector = CompositeGestureDetector(reg)
+            self._binding_cache = {}
+            try:
+                ensure_draw_bindings(reg, self.draw_store)
+            except Exception:
+                pass
+            self._say(f"프로필: {ui.profile or '없음'} (동작 연결도 이 프로필 것으로)", 2.0)
         should_detect = not camera.is_phone_web or (camera.phone_server is not None and camera.phone_server.has_client)
         roi = self.hand_crop.roi if ui.hand_crop else None
         if should_detect:
@@ -687,8 +721,21 @@ class QtRuntime:
                 self._hand_seen_t = t0
         self.mouse.hand_size = self._hand_width_fraction(detections[0].landmarks, frame.shape[1], frame.shape[0]) if detections else None
         live = ui.stage == "main" and not self.paused and not self.draw.active and not ui.calibrating
-        sequences = self.seq_store.active() if live else {}
-        path_gestures = self.path_store.active() if live else {}
+        # which hand the shapes of this frame are judged for: an open hand showing its back is told from its palm by it
+        # (and the arm it sits on, from the last Pose look: shoulder - elbow - wrist say which hand it is by themselves)
+        pose_now = self._pose_raw[1] if self._pose_raw is not None and t0 - self._pose_raw[0] < .5 else None
+        set_hand_label(detections[0].handedness if detections else "",
+                       arm_label(pose_now, detections[0].landmarks, frame.shape[0] / max(1, frame.shape[1])) if detections else "")
+        in_motion = bool(self.motion.active)       # gestures marked "motion mode only" count only now
+        # 2026-11-11 report ("드래그 … 중간에 스크롤이나 다른 신호들의 간섭이 많아서 중간에 끊어지는 경우가 많다. 엄지검지가
+        # 떨어지기 전에는 웬만하면 간섭들은 무시하고 드래그 상태가 유지"): a hand that drags is a hand with its other
+        # fingers curled, moving - it reads as a fist (the page scroll took the drag over), as the thumb + index + middle
+        # right click, as a taught pose, a hand shape of a sequence or a composite gesture, as the pointing hand. While
+        # the thumb + index drag is on (the virtual hand's, src/virtual_hand.ShapePinch) none of those count: only the
+        # fingers parting (or the hand lost) ends it.
+        drag_on = bool(self._pinch_drag and self.shape_pinch.closed)
+        sequences = self.seq_store.active(in_motion) if live and not drag_on else {}
+        path_gestures = self.path_store.active(in_motion) if live and not drag_on else {}
         posture = None
         if detections and (self.pose_probe.active or sequences or path_gestures):
             # the hand shape from the landmarks alone, in every mode (index pointer, motion mode, a held sign, paused)
@@ -787,7 +834,11 @@ class QtRuntime:
         self._engine_raw = None     # what the rule engine itself said this frame (guided capture overwrites result.action)
         toggle_hold = (not palm_calibrating) and self._toggle_sign(t0, ui, detections)
         motion_active = (not toggle_hold) and self._motion(t0, ui, detections)
-        close_hold = (not motion_active) and (not toggle_hold) and self._close_sign(t0, ui, detections)
+        if motion_active and detections and not guided_recording:
+            self._motion_composites(t0, detections[0])
+        else:
+            self.motion_composite_detector.reset()
+        close_hold =(not motion_active) and (not toggle_hold) and self._close_sign(t0, ui, detections)
         if self._had_hand and not detections:
             mouse.close_switcher(confirm=False)
             mouse.release_all()
@@ -817,7 +868,7 @@ class QtRuntime:
         self._point_view = None
         if (getattr(ui, "point_mode", True) and not index_mode and not motion_active and not draw_active and not toggle_hold
                 and not close_hold and not palm_calibrating and not guided_recording and ui.stage == "main"
-                and not self.paused and not ui.calibrating):
+                and not self.paused and not ui.calibrating and not drag_on):
             self.point.configure(getattr(ui, "point_settings", None))
             self.point_probe.area_px = int(self.point.settings["area_px"])
             point_active = self.point.step(t0, detections[0].landmarks if detections else None, mouse.frame_aspect)
@@ -833,6 +884,15 @@ class QtRuntime:
                           + ("더블클릭" if self.point.kind == "double" else "우클릭"), 2.0)
         elif self.point.active:
             self.point.reset()
+        if getattr(self, "_point_drag", False) and not point_active:
+            self._point_drop()                 # the pointing hand was let go (or the control went off): drop what it held
+        if getattr(self, "_point_was", False) and not point_active and getattr(ui, "virtual_hand", False):
+            # pointing mode ended: the cursor is where the index tip took it, the box would put it at the palm. It
+            # stays, and the difference is given back as the hand moves (no jump across the screen).
+            m = mouse.absolute_monitor
+            self.box_mapper.resume_at(((mouse.last_screen_pos[0] - m.left) / max(1, m.width - 1),
+                                       (mouse.last_screen_pos[1] - m.top) / max(1, m.height - 1)), t0)
+        self._point_was = point_active
         tracking_only = self.test is not None
         contacts: Tuple[int, ...] = ()
         tip_xy = None
@@ -966,15 +1026,25 @@ class QtRuntime:
                 early = virtual_guides(pinch_guides(result.distances, engine.config, draw_pinched, action=result.action,
                                                     gesture=result.active_gesture))
                 switching = bool(mouse.switcher_open)    # the task switcher: no page scroll, no drag; the box still places the cursor
-                grip = self.grip.step("fist" if result.active_gesture == "fist" and not command_hold and not switching else None, t0)
+                # (a dragging hand curls its other fingers: it is not a fist that grabs the page)
+                fist_seen = result.active_gesture == "fist" and not command_hold and not switching and not drag_on
+                fist_mode, fist_fire = self.holds.step("vh_fist", fist_seen, self._move_binding("vh_fist") if fist_seen else None,
+                                                       t0, Grip.START)
+                if fist_fire:
+                    self._run_default_move("vh_fist")
+                grip = self.grip.step("fist" if fist_seen and fist_mode == "native" else None, t0)
                 fist_released, self._was_grip = (getattr(self, "_was_grip", None) == "scroll" and grip is None), grip
                 check = self._click_check(engine.config)
                 if check is not None:
                     check.step(t0, hand, frame.shape[0] / max(1, frame.shape[1]))
                 pinch_evt = None
-                if grip is None and not command_hold:
+                if grip is None and (drag_on or not command_hold):
                     quick = self._last_tap is not None and t0 - self._last_tap[0] <= DOUBLE_TAP   # a second tap: no waiting
-                    right_evt = self.shape_right.step(hand.landmarks, frame.shape[1], frame.shape[0])
+                    if drag_on:
+                        self.shape_right.reset()           # the middle finger nearing the thumb is not a right click now
+                        right_evt = None
+                    else:
+                        right_evt = self.shape_right.step(hand.landmarks, frame.shape[1], frame.shape[0])
                     if right_evt == "down" or (self.shape_right.closed and self.shape_pinch.closed):
                         self._pinch_triple = True          # the index got there first: that press is the right click now
                     if right_evt == "up":
@@ -1019,7 +1089,16 @@ class QtRuntime:
                 if (self.shape_pinch.closed and self._pinch_since is not None and t0 - self._pinch_since >= PINCH_HOLD
                         and not switching and not self._pinch_triple and not self.shape_right.closed
                         and self._checked(check, t0)):
-                    self._pinch_drag = True                # held closed: it is a drag, not a click
+                    # 2026-11-12 ("끌기 바꾸기 만들기"): the held pinch is a move of its own now ("vh_drag"). Left at its
+                    # default it drags; switched off it does nothing; connected to another command that runs once
+                    # when the hold begins. Either way the held press is no click when the fingers part.
+                    held_mode = default_moves.plan("vh_drag", self._move_binding("vh_drag"))
+                    if held_mode == "native":
+                        self._pinch_drag = True            # held closed: it is a drag, not a click
+                    elif not self._pinch_rejected:
+                        self._pinch_rejected = True
+                        if held_mode == "command":
+                            self._run_default_move("vh_drag")
                 dragging = self.shape_pinch.closed and self._pinch_drag
                 tap = pinch_evt == "up" and not self._pinch_drag and not self._pinch_double and not self._pinch_triple \
                     and not self._pinch_rejected and not self._pinch_moving and self._checked(check, t0)
@@ -1030,7 +1109,31 @@ class QtRuntime:
                     self._pinch_triple = False
                     self._pinch_rejected = False
                     self._pinch_moving = False
-                aiming = (self.shape_pinch.closed and not dragging and not self._pinch_moving) or tap or self.shape_right.closed
+                if right_evt == "down":
+                    # 2026-11-11 report ("그냥 움직이기만 해도 우클릭 간섭이 심하다"): the three fingertips come together
+                    # in the picture while the hand only travels (the camera sees them along one line). This PC's click
+                    # log: the 37 left clicks were made with the palm at 0.02 frame widths a second (median; 92 % under
+                    # 0.1), the 16 right clicks at 0.14 - 8 of them at 0.1 or more, which no meant click reaches. As with
+                    # the thumb + index pinch: fingers that meet on a travelling hand hold nothing and click nothing.
+                    limit = float(engine.config.get("virtual_right_moving_speed", .1))
+                    self._triple_moving = limit > 0 and palm_speed >= limit
+                elif not self.shape_right.closed:
+                    self._triple_moving = False
+                triple_moving = getattr(self, "_triple_moving", False)
+                # 2026-11-11 (the person, after marking 5 stray right clicks made with a still hand: "0.15초 유지 규칙
+                # 넣어줘"): the three fingers must stay together for "virtual_right_hold" seconds (0 = at once) before
+                # it is a right click. Fingers that only pass each other are none. Then the person marked an hour of use
+                # with F8: 33 of 40 right clicks were not meant, all with a still hand, held 0.04-1.01 s (median 0.22);
+                # no measure of the hand shape told them from the rest. 0.15 s would have stopped 9 of them, 0.6 s 28 -
+                # the person chose 0.6 ("일단 1번으로 하자"): a right click is three fingers held for 0.6 s.
+                if right_evt == "down":
+                    self._triple_since, self._triple_fired = t0, False
+                elif not self.shape_right.closed:
+                    self._triple_since = None
+                right_fire = (self.shape_right.closed and not triple_moving and not getattr(self, "_triple_fired", True)
+                              and getattr(self, "_triple_since", None) is not None
+                              and t0 - self._triple_since >= float(engine.config.get("virtual_right_hold", RIGHT_HOLD)))
+                aiming = (self.shape_pinch.closed and not dragging and not self._pinch_moving) or tap                     or (self.shape_right.closed and not triple_moving)
                 # fast while the hand only moves, smooth while it makes a command (setting "auto", virtual_hand.Responder)
                 vh_mode = self._vh_respond(t0, bool(
                     grip is not None or command_hold or switching or dragging or self.shape_pinch.closed
@@ -1039,11 +1142,13 @@ class QtRuntime:
                 # frames the cursor goes back to the hand, so the box and the monitor stay lined up)
                 nx, ny = self.box_mapper.target(hand.landmarks, ui.virtual_box, now=t0, aim=grip is None,
                                                 keep=grip == "scroll" and self.grip.solid,
-                                                hold=command_hold or grip == "scroll" or aiming
-                                                or (grip is None and holds_still(early, result.action, result.active_gesture)))
+                                                hold=(command_hold and not dragging) or grip == "scroll" or aiming
+                                                or (grip is None and not dragging
+                                                    and holds_still(early, result.action, result.active_gesture)))
                 if (tap or second is not None) and result.action in PASSIVE_ACTIONS:
                     result.action = "left_click"          # thumb + index closed and opened again: click between them
-                elif right_evt == "down" and result.action in PASSIVE_ACTIONS:
+                elif right_fire and result.action in PASSIVE_ACTIONS:
+                    self._triple_fired = True
                     result.action = "right_click"         # thumb, index and middle together: right click there
                 switch_now = grip is None and not command_hold and not self.shape_pinch.closed and not self.shape_right.closed                     and self.shape_switch.step(hand.landmarks, frame.shape[1], frame.shape[0], t0)
                 if switch_now and result.action in PASSIVE_ACTIONS:
@@ -1055,7 +1160,7 @@ class QtRuntime:
                     log.frame(t0, hand)
                     kind = ("double" if second is not None and result.action == "left_click"
                             else "left" if tap and result.action == "left_click"
-                            else "right" if right_evt == "down" and result.action == "right_click"
+                            else "right" if right_fire and result.action == "right_click"
                             else "drag" if dragging and not was_drag else None)
                     if kind is not None:
                         pressed = press_t if kind in ("left", "drag") else t0
@@ -1129,8 +1234,15 @@ class QtRuntime:
                         mouse._hold_dragging = True
                         mouse._mouse_down()
                 comp_hit = self.composite_detector.step(
-                    t0, hand.landmarks, result.active_gesture, draw_pinched, mouse.frame_aspect
+                    t0, hand.landmarks, result.active_gesture, draw_pinched, mouse.frame_aspect, scope="normal"
                 )
+                if comp_hit is not None and screen_point is not None and result.action == "drag_hold":
+                    comp_hit = None                        # a drag is on: its hand shape is not a composite gesture
+                if comp_hit is not None and t0 - self._point_seen < POINT_QUIET and str(
+                        (get_action_registry().composite_gestures.get(comp_hit["key"]) or {}).get("base_posture")) in POINT_LIKE:
+                    # the pointing hand (thumb up + index out) is one thumb away from "index only" / "ㄴ자": a hold of
+                    # those shapes right after pointing mode is the same hand relaxing, not a command (as with the V sign)
+                    comp_hit = None
                 if comp_hit is not None:
                     self._log_composite_fire(comp_hit)
                     reg = get_action_registry()
@@ -1143,13 +1255,9 @@ class QtRuntime:
                         self._recent_action, self._recent_until = comp_hit["key"], time.perf_counter() + 0.8
                         result.action = "none"
                 elif result.action in ("left_click", "right_click", "show_desktop", "task_switcher"):
-                    action_to_key = {
-                        "left_click": "thumb_middle",
-                        "right_click": "thumb_ring",
-                        "show_desktop": "palm_side",
-                        "task_switcher": "thumb_pinky",
-                    }
-                    gkey = action_to_key[result.action]
+                    # the hand on the screen clicks with its own hand shapes: its own bindings, not palm mode's
+                    action_to_key = VIRTUAL_ACTION_KEYS if screen_point is not None else PALM_ACTION_KEYS
+                    gkey = action_to_key.get(result.action, PALM_ACTION_KEYS[result.action])
                     reg = get_action_registry()
                     fg = mouse.foreground_info() if not mouse.dry_run else {}
                     resolved = reg.resolve_effective_action(gkey, fg)
@@ -1165,6 +1273,8 @@ class QtRuntime:
                             self._say(f"매핑 실행: {badge}", 1.2)
                         self._recent_action, self._recent_until = result.action, time.perf_counter() + 0.8
                         result.action = "none"
+                if screen_point is None:
+                    self._palm_held(t0, result)      # palm mode's grab scroll / drags connected to another command
                 mouse.apply(result, apply_cfg)
                 if fist_released:
                     mouse._stop_scroll_inertia()           # a fist that let go leaves the page where it is: no coasting on
@@ -1233,6 +1343,15 @@ class QtRuntime:
                     if key in self._vh_last:
                         vh[key] = self._vh_last[key]
                 vh["lost"] = True
+                if point_active:
+                    # 2026-11-11 report ("포인팅 모드가 한번 되더니 그 이후로 안된다", a picture of the drawn index tip on a
+                    # file's name and an empty ring beside it): in pointing mode the cursor follows the index tip, but
+                    # the hand was drawn with its thumb-index point on the cursor (the anchor left from before the
+                    # mode) - the drawn fingertip was half a hand away from the cursor, so a file "pointed at" in the
+                    # picture was outside the cursor's reach. While pointing, the drawn INDEX TIP is on the cursor.
+                    vh["anchor"] = [vh["pts"][2 * GestureEngine.INDEX_TIP], vh["pts"][2 * GestureEngine.INDEX_TIP + 1]]
+                    vh["click"] = list(vh["anchor"])
+                    vh["lost"] = False                     # the hand is doing something: drawn fully, not faded
                 self._virtual_hand = self._vh_last = vh
 
         if roi is not None:
@@ -1291,8 +1410,13 @@ class QtRuntime:
             finger=self._finger,
             point=self._point_view,
             admin_blocked=self._admin_window_in_front(t0),
-            learn_request=(self._learn_request, str(self.log_dir / "use_events")),
+            # (+ True when only the uses the person passed may be learned: src/use_review.py)
+            learn_request=(self._learn_request, str(self.log_dir / "use_events"),
+                           *([True] if self.engine.config.get("use_review_required", True) else [])),
             learn_note=self._learn_note,
+            learn_advice=getattr(self, "_learn_advice", ""),
+            base_request=getattr(self, "_base_request", 0),
+            onnx_request=getattr(self, "_onnx_request", 0),
             learn_items=list(self._learn_items),
             hand_lost=(t0 - self._hand_seen_t) > float(self.engine.config.get("hand_lost_alert", 0.35)),
             arm_lost=bool(self.pose is not None and not ui.use_index_pointer
@@ -1479,11 +1603,16 @@ class QtRuntime:
         """One frame of pointing mode: the index tip moves the cursor; resting on a file / folder for PointMode.DWELL
         double-clicks (thumb + index) or right-clicks (thumb + index and middle together) it."""
         mouse = self.mouse
+        # 2026-11-11 report ("이 자세에서 중지를 폈다 접었다 하면 가상손이 크게 튄다"): with the right-click shape the cursor
+        # followed the point between the index and middle tips. While the middle finger folds or comes out that point
+        # travels half the finger's way (the shape stays "right" for a few frames, and loosely once the mode is on) and
+        # the cursor went with it: 78 px a frame in a replay of the pose. The cursor follows the index tip in both
+        # shapes; the middle finger only says which click it is. (With the fingers together the two points are half a
+        # finger's width apart, and the click goes to the file around the tip anyway.)
         tip = hand.landmarks[GestureEngine.INDEX_TIP]
-        if self.point.kind == "right":         # two fingers together: the point between their tips
-            other = hand.landmarks[GestureEngine.MIDDLE_TIP]
-            tip = SimpleNamespace(x=(tip.x + other.x) / 2, y=(tip.y + other.y) / 2)
-        result = GestureResult(action="move_cursor", active_gesture="point", cursor_point=(tip.x, tip.y), is_moving=True)
+        point_drag = bool(getattr(self, "_point_drag", False))     # holding a file taken by a pointing dwell (see below)
+        result = GestureResult(action="drag_hold" if point_drag else "move_cursor", active_gesture="point",
+                               cursor_point=(tip.x, tip.y), is_moving=True)
         mouse.apply(result, self.engine.config, index_tip=(tip.x, tip.y),
                     index_sensitivity=ui.sensitivity / 100 * float(self.point.settings.get("speed", 1.0)),
                     pointer_source="index")
@@ -1492,7 +1621,7 @@ class QtRuntime:
         # the file / folder at or around the fingertip (2026-11-11: the wait is on the item, the tip may tremble)
         item = self.point_probe.target(*cur)
         on_file = True if item is not None else self.point_probe.answer(*cur)
-        fire = self.point.dwell(t0, cur, on_file, item=item)
+        fire = "" if point_drag else self.point.dwell(t0, cur, on_file, item=item)   # while it drags nothing else is clicked
         centre = None
         if item is not None:
             left, top, right, bottom = item[1]
@@ -1500,18 +1629,73 @@ class QtRuntime:
         if fire:
             if centre is not None and not mouse.dry_run:
                 mouse._move_os_cursor(*centre, immediate=True)     # the click lands on the item, not where the tip shook to
-            mouse.point_click(fire)
-            done = "double_click" if fire == "double" else "right_click"
-            self._recent_action, self._recent_until = done, time.perf_counter() + .8
-            self._say(("더블클릭" if fire == "double" else "우클릭") + (f": {self.point_probe.name}" if self.point_probe.name else ""), 1.2)
-            self._use_action(t0, done, "point", source="point")
+            key = "point_double" if fire == "double" else "point_right"
+            mode = default_moves.plan(key, self._move_binding(key))
+            if mode == "native":
+                mouse.point_click(fire)
+                done = "double_click" if fire == "double" else "right_click"
+                self._recent_action, self._recent_until = done, time.perf_counter() + .8
+                self._say(("더블클릭" if fire == "double" else "우클릭") + (f": {self.point_probe.name}" if self.point_probe.name else ""), 1.2)
+                self._use_action(t0, done, "point", source="point")
+            elif mode == "command":
+                self._run_default_move(key)          # connected to another command in the training center
+            elif mode == "drag":
+                # connected to the drag (2026-11-12): the button goes down on the file; it follows the fingertip
+                # until the pointing hand is let go (see _point_drop, called when the mode ends)
+                self._point_drag = True
+                mouse._hold_dragging = True
+                mouse._mouse_down()
+                self._recent_action, self._recent_until = "drag_hold", time.perf_counter() + .8
+                self._say("끌기 시작" + (f": {self.point_probe.name}" if self.point_probe.name else "")
+                          + " · 손 모양을 풀면 놓아요", 2.0)
+                self._use_action(t0, "drag_hold", "point", source="point")
         if self._vh_last is not None:
             self._vh_last = {**self._vh_last, "screen": [int(cur[0]), int(cur[1])]}   # the faded hand follows the cursor
         self._preview_hand = preview_hand(hand.landmarks, (), None, True)
+        # why the ring is (not) filling, in words on the label and in logs/point_trace.jsonl (2026-11-11: the person held
+        # the fingertip on a file and nothing happened, and nothing on the screen or in the logs said why)
+        state = self.point_probe.state(*cur) if hasattr(self.point_probe, "state") else ("file" if on_file else "none")
+        spent = item is not None and item == getattr(self.point, "_spent_item", None)
+        why = ("끄는 중 · 손 모양을 풀면 놓아요" if getattr(self, "_point_drag", False)
+               else "파일 확인을 쓸 수 없어요" if state == "off" else "방금 누른 파일 · 다른 곳을 가리켰다 오세요" if spent
+               else str(item[0]) if item is not None else "파일 확인 중…" if state == "asking"
+               else "파일·폴더 위가 아니에요" if state == "none" else "")
         self._point_view = {"kind": self.point.kind, "progress": round(self.point.progress, 3),
                             "on_file": bool(on_file), "screen": list(centre) if centre is not None else [int(cur[0]), int(cur[1])],
-                            "name": item[0] if item is not None else ""}     # the ring sits on the item being waited on
+                            "name": item[0] if item is not None else "", "why": why}   # the ring sits on the item being waited on
+        self._point_trace(t0, cur, state, item, on_file, spent, fire)
         return result
+
+    def _point_drop(self) -> None:
+        """End of a drag started by a pointing dwell: the button comes up where the cursor is."""
+        self._point_drag = False
+        self.mouse._mouse_up()
+        self.mouse._hold_dragging = False
+        self._say("놓았어요", 1.2)
+
+    def _point_trace(self, t0: float, cur, state: str, item, on_file, spent: bool, fire: str) -> None:
+        """Five lines a second while pointing (and every click) into logs/point_trace.jsonl: where the cursor is, what the
+        file check answered and what Windows said was there, how full the wait is. Kept to the last ~2000 lines."""
+        if not fire and t0 - getattr(self, "_point_trace_t", -1e9) < .2:
+            return
+        self._point_trace_t = t0
+        probe = self.point_probe
+        rec = {"wall": time.strftime("%H:%M:%S"), "t": round(t0, 2), "cursor": [int(cur[0]), int(cur[1])],
+               "kind": self.point.kind, "state": state, "item": list(item) if item is not None else None,
+               "on_file": on_file, "spent": spent, "progress": round(self.point.progress, 2), "fire": fire or "",
+               "seen": str(getattr(probe, "seen", "")), "error": str(getattr(probe, "error", "")),
+               "asked": int(getattr(probe, "asked", 0)), "answered": int(getattr(probe, "answered", 0)),
+               "area_px": int(getattr(probe, "area_px", 0))}
+        try:
+            path = self.log_dir / "point_trace.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_file() and path.stat().st_size > 600_000:
+                lines = path.read_text(encoding="utf-8").splitlines()[-1000:]
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     def _motion_blocked(self, t0: float) -> bool:
         """A pinch, scroll or drag is going on or has just ended: the entry pose does not count then."""
@@ -1587,10 +1771,31 @@ class QtRuntime:
             self.pointer.reset()
         return holding
 
+    def _close_result(self, t0: float) -> None:
+        """What became of the last close request (mouse.close_outcome, set about a second after it was sent, from the
+        rock sign or any gesture bound to Alt+F4). A window that stayed is said on the screen and kept in the failure
+        log: "창 닫기 보냄" used to be the last word whether the window closed or not (2026-11-11 report)."""
+        out = getattr(self.mouse, "close_outcome", None)
+        if not out or out is getattr(self, "_close_seen", None):
+            return
+        self._close_seen = out
+        title = str(out.get("title") or out.get("process") or "").strip()
+        if out.get("result") == "still":
+            self._close_notice = "창이 닫히지 않았어요" + (f": {title}" if title else "") + " · 그 창이 닫기 요청을 받지 않아요"
+            self._close_notice_until = time.perf_counter() + 4.0
+            self._say(self._close_notice, 4.0)
+        try:
+            self.failures.trigger(t0, "close_result", note=json.dumps(out, ensure_ascii=False))
+        except Exception:
+            pass
+
     def _close_sign(self, t0: float, ui, detections) -> bool:
         """The rock sign held still asks to close the window; once more within a few seconds sends Alt+F4.
         True while the sign is held (the pinch controls are suspended then, so the folded fingers do not run the cursor)."""
+        self._close_result(t0)
         ready = ui.stage == "main" and not self.paused and not ui.calibrating and not ui.use_index_pointer
+        # switched off on the action screen: the sign does nothing (it used to keep closing windows whatever the screen said)
+        ready = ready and self._binding_on("rock_sign", t0)
         if not ready or not detections:
             if self.close_sign.progress(t0) > 0 or self.close_sign.last_pose:
                 self.close_sign.update(t0, None)
@@ -1605,7 +1810,17 @@ class QtRuntime:
         blocked = blocked or bool(self.mouse.is_dragging or self.mouse.scroll_coasting)
         was_holding = self.close_sign.holding(t0)
         event = self.close_sign.update(t0, detections[0].landmarks, blocked=blocked)
-        if event is not None:
+        custom = self._sign_override("rock_sign") if event is not None else None
+        if event is not None and isinstance(custom, dict):
+            # another command was connected to the sign: asked for twice like the close, then that command runs
+            if event.kind == "ask":
+                self._say(f"{custom.get('badge') or '연결한 명령'}: 4초 안에 같은 손(검지·새끼만 펴기)을 한 번 더 하면 실행합니다", 4.0)
+            elif event.kind == "close":
+                ok, badge = self._run_resolved(get_action_registry(), custom)
+                event.info.update({"sent": bool(ok), "command": str(badge)})
+                if ok:
+                    self._say(f"검지·새끼 펴기 → {badge}", 2.0)
+        elif event is not None:
             if event.kind == "ask":
                 self._say("창을 닫을까요? 4초 안에 같은 손(검지·새끼만 펴기)을 한 번 더 하면 닫습니다", 4.0)
             elif event.kind == "close":
@@ -1613,7 +1828,9 @@ class QtRuntime:
                 info = dict(getattr(self.mouse, "last_close_info", {}) or {})
                 event.info.update({"sent": bool(sent), "window": info})
                 if sent:
-                    self._close_notice, self._close_notice_until = "창 닫기 보냄 (Alt+F4)", time.perf_counter() + 2.0
+                    title = str(info.get("title") or info.get("process") or "").strip()
+                    self._close_notice = "창 닫기 보냄" + (f": {title}" if title else "")     # which window it went to
+                    self._close_notice_until = time.perf_counter() + 2.0
                 elif info.get("own"):
                     self._close_notice, self._close_notice_until = "이 앱이 앞에 있어 닫지 않음: 닫을 창을 앞에 두세요", time.perf_counter() + 3.0
                 else:
@@ -1721,7 +1938,7 @@ class QtRuntime:
         if kind is None:
             return False
         self._use_mark(now, "f_key")
-        self._say(f"방금 {CLICK_NAMES.get(kind, kind)}은 '클릭 아님'으로 기록했어요", 1.5)
+        self._say(f"방금 {CLICK_NAMES.get(kind, kind)}: '클릭 아님'으로 기록했어요", 1.5)
         return True
 
     # ------------------------------------------------------------------ use log: joints around every command (src/use_log.py)
@@ -1935,12 +2152,31 @@ class QtRuntime:
         def work() -> None:
             try:
                 if recount and config.get("online_learning_enabled", False):
-                    from src.online.use_import import pending_counts
+                    from src.online.use_import import pending_detail
                     from src.online.verifier import read_status
                     composites = get_action_registry().composite_gestures      # a deleted gesture's old uses do not count
-                    self._use_pending = {k: n for k, n in pending_counts(folder, root).items()
-                                         if not k.startswith("comp_") or hand_dir.base(k) in composites}
+                    detail = {k: v for k, v in pending_detail(folder, root).items()
+                              if not k.startswith("comp_") or hand_dir.base(k) in composites}
+                    # only the uses the person passed count towards a learning round (src/use_review.py, 2026-11-11);
+                    # the ones not looked at yet are counted apart, for the "검토 필요" card
+                    review = bool(config.get("use_review_required", True))
+                    self._use_pending = {k: v["ok"] + (0 if review else v["new"]) for k, v in detail.items()}
+                    self._use_new = {k: v["new"] for k, v in detail.items()} if review else {}
                     self._use_status = read_status(root)
+                if recount:
+                    # the uses the exported gesture model (models/gesture_tcn.onnx) has not been trained on yet: enough
+                    # of them and the app makes a candidate by itself (scripts/onnx_auto_update.py, src/use_training.py)
+                    try:
+                        from src import use_training
+                        from src.gesture_catalog import CLASSES as GESTURE_CLASSES
+                        state = use_training.read_state(root)
+                        total = sum(use_training.counts(folder, GESTURE_CLASSES).values())
+                        self._onnx_fresh = total - int(state.get("events", 0))
+                        self._onnx_done = int(state.get("events", 0))
+                        self._onnx_last = float(state.get("when", 0.0))
+                        self._onnx_waiting = (Path(__file__).resolve().parents[1] / "models" / "candidate" / "summary.json").is_file()
+                    except Exception:
+                        self._onnx_fresh = 0
                 if config.get("use_gate_auto", True):
                     decision = use_gate.decide(read_use_events(folder, frames=False), pc, models)
                     use_gate.save(folder / "gate.json", decision)
@@ -1993,28 +2229,56 @@ class QtRuntime:
         known = set(getattr(self._watchers.get("online"), "classes", ()) or ())
         parts = []
         items: List[Dict[str, Any]] = []         # the same, one card per gesture (2026-11-11: the line was hard to read)
-        for key, n in sorted(self._use_pending.items(), key=lambda kv: (self._is_click(kv[0]), -kv[1])):
+        fresh_all = getattr(self, "_use_new", {})    # uses the person has not looked at yet (review required)
+        base_ready = self._use_base_ready()
+        total = {k: self._use_pending.get(k, 0) + fresh_all.get(k, 0) for k in set(self._use_pending) | set(fresh_all)}
+        for key, n in sorted(total.items(), key=lambda kv: (self._is_click(kv[0]), -kv[1])):
             if n <= 0 or len(parts) >= 2:
                 continue
             name = self._use_name(key)
             need = self._use_need(key)
+            fresh, passed = fresh_all.get(key, 0), self._use_pending.get(key, 0)
+            if fresh and passed < need <= n and not ((self._use_status.get(key) or {}).get("status") == "waiting"):
+                # enough were collected: the person looks through them first, and only the passed ones are learned
+                parts.append(f"'{name}' 사용 사례 {n}개가 모였어요 · 오탐지를 골라내면 TCN 학습을 시작해요")
+                items.append({"key": key, "name": name, "state": "review", "n": n, "need": need, "review": fresh,
+                              "text": f"검토하면 통과한 사례로 학습해요 (안 본 것 {fresh}개)", "hint": ""})
+                continue
+            if fresh:
+                n = passed + fresh                   # still collecting: everything gathered so far
+            else:
+                n = passed
             again = " 다시" if key in known else ""
             if (self._use_status.get(key) or {}).get("status") == "waiting" and key not in known:
                 continue                           # said below: it waits for another day, not for more uses today
             # a click's model learns what is NOT a click from the ones the person marks: say how, where it is collected
-            how = " · 잘못 눌린 클릭은 5초 안에 F를 누르면 '아님'으로 배워요" if self._is_click(key) else ""
+            how = " · 잘못 눌린 클릭은 5초 안에 F8(어느 창에서든)을 누르면 '아님'으로 배워요" if self._is_click(key) else ""
+            if n >= need and not base_ready:
+                # enough passed, but there is no base model to learn on: said, instead of "곧 학습" that never comes
+                parts.append(f"'{name}' 사용 사례 {n}개가 모였어요 · 기본 모델이 없어 아직 학습을 시작하지 못해요")
+                items.append({"key": key, "name": name, "state": "nobase", "n": n, "need": need,
+                              "text": "기본 모델을 만든 뒤 학습을 시작해요 (자동, 1~2분)" if getattr(self, "_base_asked", False)
+                              else "기본 모델이 없어 아직 학습을 시작하지 못해요", "hint": ""})
+                continue
             parts.append(f"'{name}' 사용 사례 {n}개가 모였어요 · 곧 TCN 학습을{again} 시작해요" if n >= need
                          else f"'{name}' 사용 사례를 모으는 중 {n}/{need} · {need}번이 되면 TCN 학습을{again} 자동으로 시작해요{how}")
             items.append({"key": key, "name": name, "state": "ready" if n >= need else "collecting", "n": n, "need": need,
                           "text": (f"곧 TCN 학습을{again} 시작해요" if n >= need else f"{need}번이 되면 TCN 학습을{again} 자동으로 시작"),
-                          "hint": "잘못 눌린 클릭은 5초 안에 F" if self._is_click(key) else ""})
+                          "hint": "잘못 눌린 클릭은 5초 안에 F8 (어느 창에서든)" if self._is_click(key) else ""})
         for key, state in self._use_status.items():
             if key.startswith("comp_") and not hand_dir.of_key(key):
                 continue                           # made before uses were split by direction: replaced by the per-direction ones
             if state.get("status") == "waiting" and key not in known and len(parts) < 3:
                 today = self._use_pending.get(key, 0)
+                fresh = fresh_all.get(key, 0)
                 total = int(state.get('uses', 0)) + today
                 one_day = state.get("reason") == "one_day"
+                if fresh and today < WAITING_USES <= today + fresh and self._use_waiting(key):
+                    parts.append(f"'{self._use_name(key)}' 새 사용 사례 {today + fresh}개 · 오탐지를 골라내면 검사를 시작해요")
+                    items.append({"key": key, "name": self._use_name(key), "state": "review", "n": today + fresh,
+                                  "need": WAITING_USES, "review": fresh,
+                                  "text": f"검토하면 통과한 사례로 검사해요 (안 본 것 {fresh}개)", "hint": ""})
+                    continue
                 parts.append(f"'{self._use_name(key)}' 사용 사례 {total}개 저장됨 · "
                              + ("다른 날에도 쓰면 그날 사용으로 검사한 뒤 TCN 확인을 시작해요" if one_day
                                 else f"최근 날의 사용이 {WAITING_USES}번 모이면 검사해요"))
@@ -2030,6 +2294,9 @@ class QtRuntime:
             for k in learned[:4]:
                 items.append({"key": k, "name": self._use_name(k), "state": "learned", "n": 0, "need": 0,
                               "text": f"TCN이 {does} 중", "hint": ""})
+        onnx = self._onnx_item()
+        if onnx is not None:
+            items.append(onnx)
         self._learn_note = "   ·   ".join(parts)
         self._learn_items = items
 
@@ -2049,6 +2316,68 @@ class QtRuntime:
         return state.get("status") == "waiting" and (state.get("reason") == "few_recent"
                                                      or state.get("newest_day") != time.strftime("%Y%m%d"))
 
+    ONNX_KEY = "__onnx__"        # the card of the exported gesture model among the learning cards
+
+    def _onnx_need(self) -> int:
+        """Judged uses (passed clicks, rejected or marked commands) that start a candidate of the exported gesture model.
+        The first time 50: every fifth is kept out to compare the old and the new model, and ten of those are the least
+        that says anything (the first candidate of 2026-11-12 had 54 and 10). After that 30 new ones each time.
+        Starting points, not measured: the person sees them on the card."""
+        config = self.engine.config
+        first = int(getattr(self, "_onnx_done", 0)) <= 0
+        return int(config.get("onnx_auto_first_events", 50)) if first else int(config.get("onnx_auto_min_events", 30))
+
+    def _onnx_item(self) -> Optional[Dict[str, Any]]:
+        """The exported gesture model's card: how many judged uses of how many, or that a candidate waits."""
+        if not self.engine.config.get("onnx_auto", True):
+            return None
+        fresh, need = max(0, int(getattr(self, "_onnx_fresh", 0))), self._onnx_need()
+        if getattr(self, "_onnx_waiting", False):
+            return {"key": self.ONNX_KEY, "name": "기본 손짓 모델 (onnx)", "state": "candidate", "n": 0, "need": 0,
+                    "text": "새 후보가 준비됐어요 · 비교해 보고 적용하세요", "hint": ""}
+        if fresh <= 0 and int(getattr(self, "_onnx_done", 0)) <= 0:
+            return None
+        return {"key": self.ONNX_KEY, "name": "기본 손짓 모델 (onnx)", "state": "ready" if fresh >= need else "collecting",
+                "n": fresh, "need": need,
+                "text": ("곧 후보를 학습해요 (약 10분)" if fresh >= need
+                         else f"통과·오탐지로 판정한 사례가 {need}개 모이면 후보를 자동 학습 (약 10분)"), "hint": ""}
+
+    def _onnx_auto(self, config) -> None:
+        """Ask the UI thread for a candidate of the exported gesture model (Snapshot.onnx_request) once enough new uses
+        were passed or rejected by the person, none is waiting to be looked at, and the last one is an hour old. The
+        candidate replaces nothing: the person applies it in the app (2026-11-12, "내가 확인 후 교체")."""
+        fresh = int(getattr(self, "_onnx_fresh", 0))
+        if not config.get("onnx_auto", True):
+            return
+        if not getattr(self, "_onnx_cut_checked", False):
+            # a candidate training the app was closed in the middle of (its mark is there, its process is gone): asked
+            # for again once, whatever the counts say; the training reuses the parts it had finished
+            self._onnx_cut_checked = True
+            try:
+                from src.online.round_marker import _alive
+                mark = json.loads((Path(__file__).resolve().parents[1] / "models" / "candidate" / "running.json")
+                                  .read_text(encoding="utf-8"))
+                if not _alive(int(mark.get("pid", 0) or 0)):
+                    self._onnx_request = getattr(self, "_onnx_request", 0) + 1
+                    self._say("지난번에 끝나지 못한 기본 손짓 모델 후보 학습을 이어서 해요", 5.0)
+                    return
+            except (OSError, ValueError):
+                pass
+        if fresh == getattr(self, "_onnx_asked", None):
+            return
+        if fresh < self._onnx_need() or getattr(self, "_onnx_waiting", False):
+            return
+        if time.time() - float(getattr(self, "_onnx_last", 0.0)) < float(config.get("onnx_auto_cooldown_seconds", 3600.0)):
+            return
+        self._onnx_asked = fresh
+        self._onnx_request = getattr(self, "_onnx_request", 0) + 1
+        self._say(f"쓰면서 모은 사례 {fresh}개로 기본 손짓 모델 후보를 학습해요 (약 10분, 끝나면 확인 후 적용)", 5.0)
+
+    def _use_base_ready(self) -> bool:
+        """Is there a base model for the learning rounds (data/online: made by scripts/online_make_base.py)?"""
+        root = self._online_root or ONLINE_DEFAULT_ROOT
+        return (root / "encoder.json").is_file() or (root / "versions" / "production.pt").is_file()
+
     def _use_auto(self, t0: float) -> None:
         """A learning round is asked for (the UI thread owns the learning process: Snapshot.learn_request) when a taught gesture
         has been used often enough, or enough commands were marked as not meant; a few seconds after the last command, so its
@@ -2066,14 +2395,43 @@ class QtRuntime:
         ready = [k for k, n in self._use_pending.items()
                  if n >= self._use_need(k) or (n >= WAITING_USES and self._use_waiting(k))]
         marks = log.marks - self._use_round_marks >= int(config.get("auto_learn_min_marks", 5))
-        if not (ready or marks) or (self._use_rounds and t0 - self._use_round_t < float(config.get("auto_learn_cooldown_seconds", 600.0))):
+        # a round the app was closed in the middle of (src/online/round_marker.py): looked for once, when the app starts,
+        # and started again - its uses were already taken out of the log, so nothing else would ask for it
+        if not getattr(self, "_use_cut_checked", False):
+            self._use_cut_checked = True
+            try:
+                from src.online import round_marker
+                marker_root = self._online_root or ONLINE_DEFAULT_ROOT
+                self._use_cut_off = round_marker.unfinished(marker_root)
+                # the cut-off round goes into the times record, and the app says what it makes of the last rounds:
+                # leave the app open that long / saving in the middle would help / keep the prepared data instead
+                if round_marker.note_cut(marker_root):
+                    self._learn_advice = str(round_marker.advice(marker_root).get("text") or "")
+                    if self._learn_advice:
+                        self._say(self._learn_advice, 8.0)
+            except Exception:
+                self._use_cut_off = False
+        cut_off = getattr(self, "_use_cut_off", False)
+        self._onnx_auto(config)
+        if not (ready or marks or cut_off) or (self._use_rounds and t0 - self._use_round_t < float(config.get("auto_learn_cooldown_seconds", 600.0))):
             return
-        root = self._online_root or ONLINE_DEFAULT_ROOT
-        if not (config.get("online_learning_enabled", False) and config.get("auto_learn", True)
-                and ((root / "encoder.json").is_file() or (root / "versions" / "production.pt").is_file())):
-            return                                 # (no base model yet: scripts/online_train_base.py comes first)
+        if not (config.get("online_learning_enabled", False) and config.get("auto_learn", True)):
+            return
+        if not self._use_base_ready():
+            # No base model (a fresh copy of the project: data/ is not in git). The round cannot start, and the card used
+            # to say "곧 학습" for good (2026-11-11). The app makes the base model itself, once per run
+            # (scripts/online_make_base.py, a minute or two), and the cards say so meanwhile.
+            if not getattr(self, "_base_asked", False):
+                self._base_asked = True
+                self._base_request = getattr(self, "_base_request", 0) + 1
+                self._say("학습에 필요한 기본 모델이 없어 먼저 만들어요 (1~2분)", 5.0)
+                self._use_note()
+            return
         self._use_round_t, self._use_round_marks = t0, log.marks
         self._use_rounds += 1
+        if cut_off and not (ready or marks):
+            self._say("지난번에 앱을 끄면서 끝나지 못한 TCN 학습을 다시 시작해요", 5.0)
+        self._use_cut_off = False
         for key in ready:
             self._use_pending[key] = 0             # handed to the round (counted again from the log when it ends)
         self._learn_request += 1
@@ -2535,12 +2893,12 @@ class QtRuntime:
             reg = get_action_registry()
             if self._inspect_detector is None or self._inspect_detector.registry is not reg:
                 self._inspect_detector = CompositeGestureDetector(reg)
-            hit = self._inspect_detector.step(t0, lm, result.active_gesture, pinched, aspect)
+            hit = self._inspect_detector.step(t0, lm, result.active_gesture, pinched, aspect, scope="normal")
             if hit is not None:                                # a gesture the person connected (hold / swipe / double pinch)
                 badge = str(reg.resolve_effective_action(hit["key"], {}).get("badge") or "")
                 fired = f"{hit.get('name') or hit['key']}" + (f" → {badge}" if badge else "")
             posture = hand_posture(lm, aspect)
-            sequences = self.seq_store.active()
+            sequences = self.seq_store.active(bool(self.motion.active))
             if sequences:
                 done = self.sequences.step(t0, posture, sequences)
                 if done is not None:
@@ -2567,6 +2925,38 @@ class QtRuntime:
         ok, badge = self._run_resolved(reg, resolved)
         self._recent_action, self._recent_until = "none", time.perf_counter() + .8
         self._say(f"{kind} [{name}] → {badge}", 1.5)
+
+    # palm mode's held moves, by what the rule engine reports (src/default_moves.py)
+    PALM_HELD = {("scroll_grab", "thumb_index_pinch"): "thumb_index",
+                 ("drag_hold", "thumb_middle_pinch"): "thumb_middle_drag",
+                 ("drag_hold", "thumb_index_middle_pinch"): "thumb_index_middle"}
+
+    def _move_binding(self, key: str) -> Dict[str, Any]:
+        """What a default move is connected to now. The foreground window is asked only when the move has app commands
+        (this runs every frame of a held move)."""
+        reg = get_action_registry()
+        fg = (self.mouse.foreground_info() if reg.get_binding(key).get("app_overrides") and not self.mouse.dry_run else {})
+        return reg.resolve_effective_action(key, fg)
+
+    def _run_default_move(self, key: str) -> None:
+        """A default move connected to another command: run it (once) and say so."""
+        reg = get_action_registry()
+        fg = self.mouse.foreground_info() if not self.mouse.dry_run else {}
+        ok, badge = self._run_resolved(reg, reg.resolve_effective_action(key, fg))
+        if ok:
+            name = default_moves.NAMES.get(key) or key
+            self._say(f"{name} → {badge}", 1.5)
+            self._recent_action, self._recent_until = key, time.perf_counter() + .8
+
+    def _palm_held(self, t0: float, result) -> None:
+        now_key = self.PALM_HELD.get((result.action, result.active_gesture))
+        for key in ("thumb_index", "thumb_middle_drag", "thumb_index_middle"):
+            on = key == now_key
+            mode, fire = self.holds.step(key, on, self._move_binding(key) if on else None, t0)
+            if fire:
+                self._run_default_move(key)
+            if on and mode != "native":
+                result.action, result.is_moving = "none", False
 
     def _run_resolved(self, reg, resolved):
         """Run a binding; the mode switches the registry cannot reach are done here."""
@@ -2607,7 +2997,7 @@ class QtRuntime:
             self.draw.last["action"] = badge
         self._say(f"그림 [{judged['name']}] → {badge}", 1.5)
 
-    def _log_composite_fire(self, comp: Dict[str, Any]) -> None:
+    def _log_composite_fire(self, comp: Dict[str, Any], detector=None) -> None:
         """The 3 s of joints before a composite gesture fired (logs/composite_fires, the last 50; joints only): to see
         afterwards WHY a command ran - the looks shown to the camera do not show what happens in use (2026-11-11)."""
         try:
@@ -2616,7 +3006,7 @@ class QtRuntime:
             d.mkdir(parents=True, exist_ok=True)
             frames = [{"t": round(t, 3), "posture": p, "engine": g,
                        "lm": [[round(q.x, 4), round(q.y, 4), round(getattr(q, "z", 0.0) or 0.0, 4)] for q in lm]}
-                      for t, p, g, lm in list(self.composite_detector.trace)]
+                      for t, p, g, lm in list((detector or self.composite_detector).trace)]
             name = time.strftime("%Y%m%d-%H%M%S") + f"-{comp['key']}.json"
             (d / name).write_text(json.dumps({"key": comp["key"], "posture": comp.get("base_posture"),
                                               "trigger": comp.get("trigger_type"), "frames": frames}), encoding="utf-8")
@@ -2750,6 +3140,35 @@ class QtRuntime:
             if self.failures.trigger(t0, f"motion_{event.kind}", note=json.dumps(event.info, ensure_ascii=False)):
                 pass
         return self.motion.active
+
+    def _motion_composites(self, t0: float, hand) -> None:
+        """Motion mode is on: the composite gestures marked "motion mode only" (2026-11-11 request: a gesture made in
+        [말·글로 연결] that works only in motion mode). The rule engine does not run here, so the hand shape comes from
+        the joints alone (as for the sequences). With the control off it is told on the screen, not run."""
+        reg = get_action_registry()
+        det = self.motion_composite_detector
+        if det.registry is not reg:
+            det = self.motion_composite_detector = CompositeGestureDetector(reg)
+        if not any(c.get("motion_only") and c.get("enabled", True) for c in reg.composite_gestures.values()):
+            det.reset()
+            return
+        aspect = self.mouse.frame_aspect
+        hit = det.step(t0, hand.landmarks, "", set(), aspect, scope="motion", posture=hand_posture(hand.landmarks, aspect))
+        if hit is None:
+            return
+        name = str(hit.get("name") or hit["key"])
+        self.motion._last_activity = t0                # a command ran: motion mode does not time out under it
+        if self.paused:
+            badge = str(reg.resolve_effective_action(hit["key"], {}).get("badge") or "")
+            self._motion_last = f"시뮬레이션: {name}" + (f" → {badge}" if badge else "")
+            self._say(f"모션: {self._motion_last} (실행 안 함)", 1.5)
+            return
+        self._log_composite_fire(hit, det)
+        fg = self.mouse.foreground_info() if not self.mouse.dry_run else {}
+        self._use_names[hit["key"]] = name
+        ok, badge = self._run_resolved(reg, reg.resolve_effective_action(hit["key"], fg))
+        self._motion_last = f"{name} → {badge}" if ok else f"{name}: {badge}"
+        self._say(f"모션 모드 동작 [{name}] → {badge}", 1.5)
 
     def _motion_would(self, action: str, target_key: str, by_key) -> str:
         """What a motion-mode swipe would run: the command connected to it on the action screen, else its built-in key."""

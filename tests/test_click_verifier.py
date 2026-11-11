@@ -145,7 +145,7 @@ def test_clicks_are_counted_on_the_main_screen_and_start_a_round_at_forty(tmp_pa
     t = rt._use_t
     for i in range(39):
         rt._use_event("rule", "left_click", t + i, label="thumb_index")
-    assert rt._use_pending[KEY] == 39 and "모으는 중 39/40" in rt._learn_note and "F를 누르면" in rt._learn_note
+    assert rt._use_pending[KEY] == 39 and "모으는 중 39/40" in rt._learn_note and "F8(어느 창에서든)을 누르면" in rt._learn_note
     asked = rt._learn_request
     rt._use_auto(t + 200)
     assert rt._learn_request == asked                       # 39: not yet (a taught gesture asks at 20)

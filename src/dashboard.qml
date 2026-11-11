@@ -121,9 +121,41 @@ ApplicationWindow {
         property int frame: 0
         property bool playing: true
         readonly property var shown: items.length > 0 ? items[Math.min(current, items.length - 1)] : null
-        title: "모은 사용 사례 · " + (cases.name || "")
-        onItemsChanged: { current = 0; frame = 0 }
-        onCurrentChanged: frame = 0
+        // the review session before learning (src/use_review.py, 2026-11-11): each waiting use is passed or rejected here
+        readonly property bool review: cases.review === true
+        property int lastCount: -1
+        function count(v) { var n = 0; for (var i = 0; i < items.length; i++) if ((items[i].review || "") === v) n++; return n }
+        readonly property int nOk: count("ok")
+        readonly property int nBad: count("bad")
+        readonly property int nLeft: count("")
+        function judge(v) {
+            if (!review || shown === null) return
+            var i = Math.min(current, items.length - 1)
+            // a verdict hands the list a new model, which scrolls it back to the top (2026-11-11): keep where it was
+            var y = caseList.contentY
+            dashboard.judgeUseCase(i, v)
+            var its = dashboard.useCases.items || []
+            for (var k = 1; k <= its.length; k++) {            // on to the next one not looked at yet
+                var j = (i + k) % its.length
+                if (!its[j].review) { current = j; playing = true; break }
+            }
+            keepList(y)
+        }
+        // put the list back at y (when given) and scroll just enough that the row being played is on screen
+        function keepList(y) {
+            Qt.callLater(function () {
+                caseList.forceLayout()
+                if (y !== undefined) caseList.contentY = y
+                if (items.length > 0) caseList.positionViewAtIndex(Math.min(current, items.length - 1), ListView.Contain)
+            })
+        }
+        title: (review ? "오탐지 검토 · " : "모은 사용 사례 · ") + (cases.name || "")
+        // (a verdict changes the rows but not the list: stay on the row)
+        onItemsChanged: { if (!(cases.judged > 0 && items.length === lastCount)) { current = 0; frame = 0 } lastCount = items.length }
+        onCurrentChanged: { frame = 0; keepList() }
+        onClosed: if (review) dashboard.finishUseReview()
+        Shortcut { sequence: "1"; enabled: useCasesDialog.visible && useCasesDialog.review; onActivated: useCasesDialog.judge("ok") }
+        Shortcut { sequence: "2"; enabled: useCasesDialog.visible && useCasesDialog.review; onActivated: useCasesDialog.judge("bad") }
         footer: DialogButtonBox {
             onRejected: useCasesDialog.close()
             Button {
@@ -150,6 +182,8 @@ ApplicationWindow {
                 text: useCasesDialog.cases.loading ? "불러오는 중…"
                       : useCasesDialog.cases.error ? useCasesDialog.cases.error
                       : useCasesDialog.items.length === 0 ? "아직 모은 사례가 없어요. 이 동작을 쓰면 실행될 때마다 앞뒤 손 움직임이 저장돼요."
+                      : useCasesDialog.review ? "학습 전에 하나씩 봐 주세요. 의도한 동작이면 [통과], 우연히 잘못 잡힌 것이면 [오탐지]. "
+                        + "통과한 사례만 이 동작으로 학습하고, 오탐지는 '이 동작이 아님' 예시로 따로 배워요. 빨간 선이 명령이 실행된 순간이에요."
                       : "이 동작이 실행될 때마다 저장된 손 움직임이에요 (최근 " + useCasesDialog.items.length + "개). "
                         + "빨간 선이 명령이 실행된 순간이에요. F로 '원하지 않음'을 표시한 사례는 '아님'으로 학습돼요."
                 wrapMode: Text.Wrap
@@ -189,16 +223,21 @@ ApplicationWindow {
                                 anchors.leftMargin: 10
                                 spacing: 2
                                 Text {
-                                    text: (useCasesDialog.items.length - index) + ".  " + modelData.when
+                                    text: (useCasesDialog.review ? index + 1 : useCasesDialog.items.length - index) + ".  " + modelData.when
                                           + (modelData.direction ? "   " + modelData.direction : "")
                                     font.pixelSize: 12
                                     font.bold: true
                                     color: window.ink
                                 }
                                 Text {
-                                    text: modelData.marked ? modelData.mark_text : "실행됨 (원하는 동작으로 학습)"
+                                    text: modelData.marked ? modelData.mark_text
+                                          : modelData.review === "ok" ? "통과 (이 동작으로 학습)"
+                                          : modelData.review === "bad" ? "오탐지 ('아님'으로 학습)"
+                                          : useCasesDialog.review ? "아직 안 봄" : "실행됨 (검토 전)"
                                     font.pixelSize: 11
-                                    color: modelData.marked ? "#B91C1C" : window.muted
+                                    font.bold: modelData.review === "ok" || modelData.review === "bad"
+                                    color: modelData.marked || modelData.review === "bad" ? "#B91C1C"
+                                           : modelData.review === "ok" ? "#15803D" : window.muted
                                 }
                             }
                             MouseArea {
@@ -324,6 +363,165 @@ ApplicationWindow {
                             color: window.muted
                         }
                     }
+                    // the verdict of the use being shown, and how far the session is
+                    RowLayout {
+                        objectName: "useReviewBar"
+                        visible: useCasesDialog.review && useCasesDialog.shown !== null
+                        Layout.fillWidth: true
+                        spacing: 6
+                        CompactButton {
+                            objectName: "useReviewOk"
+                            text: "통과 (1)"
+                            accent: useCasesDialog.shown !== null && useCasesDialog.shown.review === "ok"
+                            onClicked: useCasesDialog.judge("ok")
+                        }
+                        CompactButton {
+                            objectName: "useReviewBad"
+                            text: "오탐지 (2)"
+                            danger: useCasesDialog.shown !== null && useCasesDialog.shown.review === "bad"
+                            onClicked: useCasesDialog.judge("bad")
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "통과 " + useCasesDialog.nOk + "  ·  오탐지 " + useCasesDialog.nBad + "  ·  남음 " + useCasesDialog.nLeft
+                                  + (useCasesDialog.nLeft === 0 ? "   다 봤어요. 닫으면 통과한 사례로 이어 가요." : "")
+                            font.pixelSize: 12
+                            font.bold: true
+                            color: useCasesDialog.nLeft === 0 ? "#15803D" : window.ink
+                            wrapMode: Text.Wrap
+                        }
+                        CompactButton {
+                            objectName: "useReviewRest"
+                            visible: useCasesDialog.nLeft > 0
+                            text: "남은 " + useCasesDialog.nLeft + "개 모두 통과"
+                            onClicked: confirmDialog.ask("남은 사례 모두 통과",
+                                "아직 안 본 " + useCasesDialog.nLeft + "개를 보지 않고 통과시킵니다. 오탐지가 섞여 있으면 그대로 학습돼요.",
+                                "모두 통과", function () { dashboard.judgeUseRest("ok") })
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The candidate of the exported gesture model next to the one in use (src/onnx_candidate.py): applied only here
+    Dialog {
+        id: onnxDialog
+        objectName: "onnxDialog"
+        anchors.centerIn: parent
+        width: Math.min(820, window.width - 48)
+        modal: true
+        readonly property var cand: dashboard.onnxCandidate
+        title: cand.ready === true ? "새 손짓 모델 후보" : "손짓 모델"
+        contentItem: ColumnLayout {
+            spacing: 10
+            TextLabel {
+                Layout.fillWidth: true
+                visible: onnxDialog.cand.ready === true
+                text: "쓰면서 모은 사례 " + (onnxDialog.cand.trained_on || 0) + "개와 안내 녹화로 앱이 새로 학습한 후보예요 ("
+                      + (onnxDialog.cand.created || "") + ", " + (onnxDialog.cand.minutes || 0) + "분 걸림). "
+                      + "[적용]을 누르기 전까지는 지금 모델을 그대로 써요. 지금 모델: " + (onnxDialog.cand.current_trained || "알 수 없음") + " 학습."
+                wrapMode: Text.Wrap
+                font.pixelSize: 12
+                color: window.muted
+            }
+            TextLabel {
+                Layout.fillWidth: true
+                visible: onnxDialog.cand.ready !== true
+                text: "기다리는 새 후보는 없어요. 적용했던 모델이 마음에 들지 않으면 이전 모델로 되돌릴 수 있어요."
+                wrapMode: Text.Wrap
+                font.pixelSize: 12
+                color: window.muted
+            }
+            // what | the model in use | the candidate
+            GridLayout {
+                visible: onnxDialog.cand.ready === true
+                Layout.fillWidth: true
+                columns: 3
+                columnSpacing: 14
+                rowSpacing: 6
+                TextLabel { text: "비교"; font.bold: true; font.pixelSize: 12 }
+                TextLabel { text: "지금 모델"; font.bold: true; font.pixelSize: 12 }
+                TextLabel { text: "새 후보"; font.bold: true; font.pixelSize: 12 }
+                Repeater {
+                    model: onnxDialog.cand.rows || []
+                    delegate: TextLabel {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 360
+                        text: modelData.what
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                        Layout.row: index + 1
+                        Layout.column: 0
+                        required property int index
+                    }
+                }
+                Repeater {
+                    model: onnxDialog.cand.rows || []
+                    delegate: TextLabel {
+                        required property var modelData
+                        required property int index
+                        Layout.row: index + 1
+                        Layout.column: 1
+                        text: modelData.current
+                        font.pixelSize: 12
+                        color: window.muted
+                    }
+                }
+                Repeater {
+                    model: onnxDialog.cand.rows || []
+                    delegate: TextLabel {
+                        required property var modelData
+                        required property int index
+                        Layout.row: index + 1
+                        Layout.column: 2
+                        text: modelData.candidate + (modelData.better === "yes" ? "  (나아짐)" : modelData.better === "no" ? "  (나빠짐)" : "")
+                        font.pixelSize: 12
+                        font.bold: modelData.better !== ""
+                        color: modelData.better === "yes" ? "#15803D" : modelData.better === "no" ? "#B91C1C" : window.ink
+                    }
+                }
+            }
+            Repeater {
+                model: onnxDialog.cand.notes || []
+                delegate: TextLabel {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    text: "· " + modelData
+                    font.pixelSize: 12
+                    color: window.muted
+                    wrapMode: Text.Wrap
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                CompactButton {
+                    objectName: "onnxRollback"
+                    visible: onnxDialog.cand.can_rollback === true
+                    text: "이전 모델로 되돌리기"
+                    onClicked: confirmDialog.ask("이전 손짓 모델로 되돌리기", "지금 쓰는 손짓 모델을 바로 전에 쓰던 모델로 바꿉니다.",
+                                                 "되돌리기", function () { dashboard.rollbackOnnxModel() })
+                }
+                Item { Layout.fillWidth: true }
+                CompactButton {
+                    objectName: "onnxClose"
+                    text: "닫기"
+                    onClicked: onnxDialog.close()
+                }
+                CompactButton {
+                    objectName: "onnxDiscard"
+                    visible: onnxDialog.cand.ready === true
+                    text: "버리기"
+                    onClicked: { dashboard.discardOnnxCandidate(); onnxDialog.close() }
+                }
+                CompactButton {
+                    objectName: "onnxApply"
+                    visible: onnxDialog.cand.ready === true
+                    accent: true
+                    text: "적용"
+                    onClicked: confirmDialog.ask("새 손짓 모델 적용", "지금 모델을 보관하고 새 후보로 바꿉니다. 나중에 [이전 모델로 되돌리기]로 돌아갈 수 있어요.",
+                                                 "적용", function () { if (dashboard.applyOnnxCandidate()) onnxDialog.close() })
                 }
             }
         }
@@ -1186,14 +1384,18 @@ ApplicationWindow {
                                                 id: historyCol
                                                 Layout.fillWidth: true
                                                 spacing: 2
+                                                // the name on its own line, wrapping: a long name used to push the marks and the
+                                                // buttons out of the card (2026-11-11, seen when the "motion mode only" mark was added)
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    text: historyCard.modelData.gesture_name
+                                                          + (historyCard.modelData.app_match ? "  ·  " + historyCard.modelData.app_match + "에서만" : "")
+                                                    font.bold: true
+                                                    wrapMode: Text.Wrap
+                                                }
                                                 RowLayout {
                                                     Layout.fillWidth: true
                                                     spacing: 6
-                                                    TextLabel {
-                                                        text: historyCard.modelData.gesture_name
-                                                              + (historyCard.modelData.app_match ? "  ·  " + historyCard.modelData.app_match + "에서만" : "")
-                                                        font.bold: true
-                                                    }
                                                     Chip {
                                                         text: historyCard.modelData.current ? "적용 중" : "이후 바뀜"
                                                         warn: !historyCard.modelData.current
@@ -1201,6 +1403,11 @@ ApplicationWindow {
                                                     Chip {
                                                         visible: historyCard.hasHold
                                                         text: "유지 " + Number(historyCard.modelData.hold_seconds || 0).toFixed(1) + "초"
+                                                    }
+                                                    Chip {
+                                                        objectName: "llmMotionOnlyChip"
+                                                        visible: historyCard.modelData.motion_only === true
+                                                        text: "모션 모드에서만"
                                                     }
                                                     Item { Layout.fillWidth: true }
                                                 }
@@ -1360,6 +1567,14 @@ ApplicationWindow {
                                                     onClicked: historyCard.startEdit()
                                                 }
                                                 CompactButton {
+                                                    // 2026-11-11: the gesture counts only while motion mode is on (press again: everywhere)
+                                                    objectName: "llmMotionOnlyButton"
+                                                    visible: historyCard.modelData.mode_option === true && !historyCard.editing
+                                                    Layout.fillWidth: true
+                                                    text: historyCard.modelData.motion_only ? "평소에도 쓰기" : "모션 모드에서만"
+                                                    onClicked: dashboard.setLlmMotionOnly(historyCard.modelData.index, !historyCard.modelData.motion_only)
+                                                }
+                                                CompactButton {
                                                     // back one step: what was there just before this AI change
                                                     visible: historyCard.modelData.current && !historyCard.modelData.created
                                                     Layout.fillWidth: true
@@ -1396,6 +1611,192 @@ ApplicationWindow {
                         }
                     }
 
+        }
+    }
+
+    // Profiles (2026-11-11): pick, make, rename, reset, delete, export, import (qt_dashboard.py "profiles").
+    // A profile keeps only what differs from the default state; none, or an untouched one, is the default state.
+    Dialog {
+        id: profileManager
+        objectName: "profileManager"
+        property string renaming: ""        // the profile whose name is being edited
+        anchors.centerIn: parent
+        width: Math.min(660, window.width - 48)
+        height: Math.min(window.height - 48, implicitHeight)
+        modal: true
+        title: "프로필"
+        padding: 18
+        background: Rectangle { radius: 14; color: "white"; border.color: window.line }
+        header: TextLabel {
+            text: profileManager.title
+            font.pixelSize: 17
+            font.bold: true
+            leftPadding: 18; rightPadding: 18; topPadding: 16
+        }
+        onClosed: renaming = ""
+        contentItem: ScrollView {
+            id: profileScroll
+            clip: true
+            contentWidth: availableWidth
+            implicitHeight: profileCol.implicitHeight
+            ColumnLayout {
+                id: profileCol
+                width: profileScroll.availableWidth
+                spacing: 8
+                TextLabel {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 12
+                    color: window.muted
+                    text: "프로필은 기본 상태에서 바꾼 것만 기억해요: 엔진 설정, 동작 연결(복합 동작·모션 포함), 화면 옵션. "
+                          + "프로필이 없거나 아무것도 바꾸지 않은 프로필은 앱의 기본 상태 그대로입니다."
+                }
+                Repeater {
+                    model: dashboard.profileRows
+                    delegate: Rectangle {
+                        id: pRow
+                        required property var modelData
+                        readonly property string name: modelData.name
+                        objectName: "profileRow"
+                        Layout.fillWidth: true
+                        implicitHeight: pRowCol.implicitHeight + 18
+                        radius: 10
+                        color: modelData.active ? "#E6F8F3" : "white"
+                        border.color: modelData.active ? "#46E5BD" : window.line
+                        border.width: modelData.active ? 2 : 1
+                        ColumnLayout {
+                            id: pRowCol
+                            anchors.fill: parent
+                            anchors.margins: 9
+                            spacing: 6
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    spacing: 1
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: pRow.modelData.title + (pRow.modelData.active ? "  ·  사용 중" : "")
+                                        font.bold: true
+                                        font.pixelSize: 14
+                                        elide: Text.ElideRight
+                                    }
+                                    TextLabel {
+                                        Layout.fillWidth: true
+                                        text: pRow.modelData.note
+                                        font.pixelSize: 12
+                                        color: window.muted
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                                CompactButton {
+                                    visible: !pRow.modelData.active
+                                    primary: true
+                                    implicitHeight: 32
+                                    leftPadding: 12; rightPadding: 12
+                                    enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
+                                    text: pRow.name === "" ? "프로필 끄기" : "이 프로필 쓰기"
+                                    onClicked: dashboard.selectProfile(pRow.name)
+                                }
+                            }
+                            RowLayout {
+                                visible: pRow.name !== "" && profileManager.renaming === pRow.name
+                                Layout.fillWidth: true
+                                spacing: 6
+                                TextField {
+                                    id: renameField
+                                    Layout.fillWidth: true
+                                    implicitHeight: 32
+                                    font.pixelSize: 13
+                                    text: pRow.name
+                                    selectByMouse: true
+                                    onAccepted: if (dashboard.renameProfile(pRow.name, text)) profileManager.renaming = ""
+                                }
+                                CompactButton {
+                                    text: "바꾸기"
+                                    primary: true
+                                    implicitHeight: 32
+                                    enabled: renameField.text.trim() !== "" && renameField.text.trim() !== pRow.name
+                                    onClicked: if (dashboard.renameProfile(pRow.name, renameField.text)) profileManager.renaming = ""
+                                }
+                                CompactButton { text: "취소"; implicitHeight: 32; onClicked: profileManager.renaming = "" }
+                            }
+                            RowLayout {
+                                visible: pRow.name !== "" && profileManager.renaming !== pRow.name
+                                Layout.fillWidth: true
+                                spacing: 6
+                                CompactButton { text: "이름 바꾸기"; onClicked: profileManager.renaming = pRow.name }
+                                CompactButton { text: "내보내기"; onClicked: dashboard.exportProfile(pRow.name) }
+                                CompactButton {
+                                    text: "기본 상태로 되돌리기"
+                                    enabled: pRow.modelData.changed > 0
+                                    onClicked: confirmDialog.ask("기본 상태로 되돌리기",
+                                        "「" + pRow.name + "」 프로필에서 바꾼 설정·동작 연결·화면 옵션을 모두 지우고 기본 상태로 되돌립니다. 프로필 자체는 남아요.",
+                                        "되돌리기", function () { dashboard.resetProfile(pRow.name) })
+                                }
+                                Item { Layout.fillWidth: true }
+                                CompactButton {
+                                    text: "삭제"
+                                    danger: true
+                                    onClicked: confirmDialog.ask("프로필 삭제",
+                                        "「" + pRow.name + "」 프로필과 그 안에서 바꾼 것을 모두 지웁니다. 되돌릴 수 없어요. 남기려면 먼저 [내보내기]를 하세요.",
+                                        "삭제", function () { dashboard.deleteProfile(pRow.name) })
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider {}
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    TextField {
+                        id: newProfileField
+                        objectName: "newProfileField"
+                        Layout.fillWidth: true
+                        implicitHeight: 34
+                        font.pixelSize: 13
+                        placeholderText: "새 프로필 이름 (예: 집 PC, 민수)"
+                        selectByMouse: true
+                        onAccepted: if (text.trim() !== "" && dashboard.createProfile(text)) text = ""
+                    }
+                    CompactButton {
+                        text: "새 프로필 만들기"
+                        primary: true
+                        implicitHeight: 34
+                        leftPadding: 12; rightPadding: 12
+                        enabled: newProfileField.text.trim() !== ""
+                        onClicked: if (dashboard.createProfile(newProfileField.text)) newProfileField.text = ""
+                    }
+                    CompactButton {
+                        text: "파일에서 가져오기"
+                        implicitHeight: 34
+                        leftPadding: 12; rightPadding: 12
+                        onClicked: dashboard.importProfile()
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    TextLabel {
+                        objectName: "profileMessage"
+                        Layout.fillWidth: true
+                        text: dashboard.profileMessage
+                        font.pixelSize: 12
+                        font.bold: true
+                        color: "#0369A1"
+                        wrapMode: Text.Wrap
+                    }
+                    CompactButton {
+                        text: "닫기"
+                        implicitHeight: 34
+                        leftPadding: 16; rightPadding: 16
+                        onClicked: profileManager.close()
+                    }
+                }
+            }
         }
     }
 
@@ -3054,6 +3455,7 @@ ApplicationWindow {
         Rectangle {
             objectName: "learnBanner"
             visible: dashboard.learnItems.length > 0 || dashboard.learnAutoLine !== ""
+                     || dashboard.onnxCandidate.ready === true || dashboard.onnxCandidate.can_rollback === true
             Layout.fillWidth: true
             Layout.leftMargin: 20
             Layout.rightMargin: 20
@@ -3086,6 +3488,15 @@ ApplicationWindow {
                         color: dashboard.learnAutoLine !== "" ? "#17603F" : window.muted
                         elide: Text.ElideRight
                     }
+                    CompactButton {
+                        // 2026-11-12: a candidate of the exported gesture model, trained by the app from the collected
+                        // uses, waits for the person's look (it replaces nothing by itself)
+                        objectName: "onnxCandidateButton"
+                        visible: dashboard.onnxCandidate.ready === true || dashboard.onnxCandidate.can_rollback === true
+                        accent: dashboard.onnxCandidate.ready === true
+                        text: dashboard.onnxCandidate.ready === true ? "새 모델 확인" : "손짓 모델 되돌리기"
+                        onClicked: onnxDialog.open()
+                    }
                 }
                 Flow {
                     Layout.fillWidth: true
@@ -3101,7 +3512,8 @@ ApplicationWindow {
                             height: learnCardCol.implicitHeight + 16
                             radius: 8
                             color: "#FFFFFF"
-                            border.color: modelData.state === "ready" || modelData.state === "learned" ? "#6CCB9F" : "#D5E7DE"
+                            border.color: modelData.state === "ready" || modelData.state === "learned" ? "#6CCB9F"
+                                          : modelData.state === "review" ? "#F0A070" : "#D5E7DE"
                             ColumnLayout {
                                 id: learnCardCol
                                 anchors.left: parent.left
@@ -3124,14 +3536,14 @@ ApplicationWindow {
                                         radius: 9
                                         implicitWidth: stateText.implicitWidth + 14
                                         implicitHeight: 18
-                                        color: ({collecting: "#E8F0FE", ready: "#DCFCE7", waiting: "#FEF3C7", learned: "#D1FAE5"})[learnCard.modelData.state] || "#EEE"
+                                        color: ({collecting: "#E8F0FE", ready: "#DCFCE7", waiting: "#FEF3C7", learned: "#D1FAE5", review: "#FDE8D8", nobase: "#FEF3C7", candidate: "#FDE8D8"})[learnCard.modelData.state] || "#EEE"
                                         Text {
                                             id: stateText
                                             anchors.centerIn: parent
-                                            text: ({collecting: "모으는 중", ready: "곧 학습", waiting: "다른 날 기다림", learned: "학습됨"})[learnCard.modelData.state] || ""
+                                            text: ({collecting: "모으는 중", ready: "곧 학습", waiting: "다른 날 기다림", learned: "학습됨", review: "검토 필요", nobase: "기본 모델 필요", candidate: "확인 필요"})[learnCard.modelData.state] || ""
                                             font.pixelSize: 11
                                             font.bold: true
-                                            color: ({collecting: "#1D4ED8", ready: "#15803D", waiting: "#B45309", learned: "#047857"})[learnCard.modelData.state] || window.muted
+                                            color: ({collecting: "#1D4ED8", ready: "#15803D", waiting: "#B45309", learned: "#047857", review: "#C2410C", nobase: "#B45309", candidate: "#C2410C"})[learnCard.modelData.state] || window.muted
                                         }
                                     }
                                 }
@@ -3176,7 +3588,27 @@ ApplicationWindow {
                                         wrapMode: Text.Wrap
                                     }
                                     CompactButton {
+                                        // enough uses were collected: the person judges them before anything is learned
+                                        objectName: "learnCardReview"
+                                        visible: learnCard.modelData.state === "review"
+                                        accent: true
+                                        text: "검토하기"
+                                        onClicked: {
+                                            dashboard.openUseReview(learnCard.modelData.key, learnCard.modelData.name)
+                                            useCasesDialog.open()
+                                        }
+                                    }
+                                    CompactButton {
+                                        // the exported gesture model's card: its candidate is looked at, not single uses
+                                        objectName: "learnCardCandidate"
+                                        visible: learnCard.modelData.key === "__onnx__" && learnCard.modelData.state === "candidate"
+                                        accent: true
+                                        text: "새 모델 확인"
+                                        onClicked: onnxDialog.open()
+                                    }
+                                    CompactButton {
                                         objectName: "learnCardCases"
+                                        visible: learnCard.modelData.state !== "review" && learnCard.modelData.key !== "__onnx__"
                                         text: "사례 보기"
                                         onClicked: {
                                             dashboard.openUseCases(learnCard.modelData.key, learnCard.modelData.name)
@@ -3249,8 +3681,9 @@ ApplicationWindow {
                                     implicitWidth: 0
                                     leftPadding: 10; rightPadding: 10
                                     enabled: !dashboard.calibratingPointer && !dashboard.trackingActive
-                                    text: dashboard.profileLabel + (dashboard.profileCount > 0 ? "  · 눌러서 바꾸기" : "")
-                                    onClicked: dashboard.cycleProfile()
+                                    objectName: "profileButton"
+                                    text: dashboard.profileLabel + "  · 관리"
+                                    onClicked: profileManager.open()
                                 }
                                 ActionButton {
                                     visible: !dashboard.pointerOnly
@@ -3554,7 +3987,7 @@ ApplicationWindow {
                     Divider {}
                     TextLabel {
                         Layout.fillWidth: true
-                        text: "Space 시작/정지 · Esc 정지 · N 다음 모니터 · F 실패 표시"
+                        text: "Space 시작/정지 · Esc 정지 · N 다음 모니터 · F 실패 표시 · F8 잘못된 클릭 표시 (어느 창에서든)"
                         font.pixelSize: 12
                         color: window.muted
                         wrapMode: Text.Wrap
@@ -4073,18 +4506,42 @@ ApplicationWindow {
     // Training center (src/training_center.py): data per gesture, scores, focused recording, training, export
     Popup {
         id: trainingCenter
+        objectName: "trainingCenterPopup"
         property string centerTab: "gestures"
         property string selectedSimFile: ""
         property bool showImprovementReport: false
         property string bindingsSubTab: "shortcuts"
-        property string selectedBindingKey: "swipe_left"
+        property string selectedBindingKey: ""
+        // What is chosen here is kept per profile (dashboard.centerPref): read at the start and when the profile changes
+        property bool prefsLoading: true
+        function loadPrefs() {
+            prefsLoading = true
+            var tab = dashboard.centerPref("centerTab", "gestures")
+            centerTab = ["gestures", "recordings", "simulator", "diagnostics", "bindings"].indexOf(tab) >= 0 ? tab : "gestures"
+            var sub = dashboard.centerPref("bindingsSubTab", "shortcuts")
+            bindingsSubTab = ["shortcuts", "motions", "composites"].indexOf(sub) >= 0 ? sub : "shortcuts"
+            simTabRoot.loadPrefs()
+            bindingsTabRoot.loadPrefs()
+            prefsLoading = false
+        }
+        function savePref(name, value) {
+            if (!prefsLoading)
+                dashboard.setCenterPref(name, value)
+        }
+        onCenterTabChanged: savePref("centerTab", centerTab)
+        onBindingsSubTabChanged: savePref("bindingsSubTab", bindingsSubTab)
+        Component.onCompleted: loadPrefs()
         anchors.centerIn: parent
         width: Math.min(1256, window.width - 20)
         height: Math.min(836, window.height - 20)
         modal: true
         focus: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-        onOpened: dashboard.openTraining()
+        onOpened: {
+            dashboard.openTraining()
+            if (centerTab === "diagnostics" && dashboard.diagnosticsChecks.length === 0)
+                dashboard.runDiagnostics()      // the tab left open last time: fill it as its button would
+        }
         onClosed: dashboard.closeTraining()
         padding: 14
         background: Rectangle { radius: 16; color: "white"; border.color: window.line; clip: true }
@@ -4106,7 +4563,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                         elide: Text.ElideRight
-                        text: "학습 센터 · 데이터 품질 · 시뮬레이터"
+                        text: "학습 센터"
                         font.pixelSize: 19
                         font.bold: true
                     }
@@ -4114,7 +4571,9 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                         elide: Text.ElideRight
-                        text: "녹화 품질 평가 및 선별 → 동작별 선택/통합 학습 → 시뮬레이터 검증 → 동작별 초기화 및 모델 버전 복원"
+                        objectName: "centerSubtitle"
+                        text: "녹화 고르기 → 학습 → 시뮬레이터로 확인 → 동작 연결  ·  여기서 바꾼 옵션은 「"
+                              + dashboard.centerProfileName + "」에 저장돼요"
                         font.pixelSize: 12
                         color: window.muted
                     }
@@ -4170,19 +4629,19 @@ ApplicationWindow {
                 spacing: 6
                 ActionButton {
                     implicitHeight: 36
-                    text: "1. 동작별 학습 · 초기화"
+                    text: "1. 동작별 학습"
                     accent: trainingCenter.centerTab === "gestures"
                     onClicked: trainingCenter.centerTab = "gestures"
                 }
                 ActionButton {
                     implicitHeight: 36
-                    text: "2. 녹화 품질 평가 · 선별 (" + dashboard.trainingFiles.length + ")"
+                    text: "2. 녹화 (" + dashboard.trainingFiles.length + ")"
                     accent: trainingCenter.centerTab === "recordings"
                     onClicked: trainingCenter.centerTab = "recordings"
                 }
                 ActionButton {
                     implicitHeight: 36
-                    text: "3. 학습 데이터 · 모델 시뮬레이터"
+                    text: "3. 시뮬레이터"
                     accent: trainingCenter.centerTab === "simulator"
                     onClicked: {
                         trainingCenter.centerTab = "simulator"
@@ -4194,7 +4653,7 @@ ApplicationWindow {
                 }
                 ActionButton {
                     implicitHeight: 36
-                    text: "4. 모델 버전 복원 · 앱 자가 진단"
+                    text: "4. 모델 복원 · 진단"
                     accent: trainingCenter.centerTab === "diagnostics"
                     onClicked: {
                         trainingCenter.centerTab = "diagnostics"
@@ -4205,7 +4664,7 @@ ApplicationWindow {
                 }
                 ActionButton {
                     implicitHeight: 36
-                    text: "5. 단축키 매핑 · 복합동작 · 시계열 모션"
+                    text: "5. 동작 연결"
                     accent: trainingCenter.centerTab === "bindings"
                     onClicked: trainingCenter.centerTab = "bindings"
                 }
@@ -4934,13 +5393,26 @@ ApplicationWindow {
                     refreshCurFrame()
                 }
                 onPlayFrameIdxChanged: refreshCurFrame()
-                onExpandSkeletonChanged: skeletonCanvas.requestPaint()
-                onShowArmPoseChanged: skeletonCanvas.requestPaint()
-                onFullScreenCoordModeChanged: skeletonCanvas.requestPaint()
-                onShowSpatialSprayChanged: skeletonCanvas.requestPaint()
+                onExpandSkeletonChanged: { skeletonCanvas.requestPaint(); trainingCenter.savePref("sim.expandSkeleton", expandSkeleton) }
+                onShowArmPoseChanged: { skeletonCanvas.requestPaint(); trainingCenter.savePref("sim.showArmPose", showArmPose) }
+                onFullScreenCoordModeChanged: { skeletonCanvas.requestPaint(); trainingCenter.savePref("sim.fullScreenCoordMode", fullScreenCoordMode) }
+                onShowSpatialSprayChanged: { skeletonCanvas.requestPaint(); trainingCenter.savePref("sim.showSpatialSpray", showSpatialSpray) }
+                onCalibInterpGapChanged: trainingCenter.savePref("sim.calibInterpGap", calibInterpGap)
+                onCalibJointJumpChanged: trainingCenter.savePref("sim.calibJointJump", calibJointJump)
+                onPlaySpeedChanged: trainingCenter.savePref("sim.playSpeed", playSpeed)
+                function loadPrefs() {
+                    calibInterpGap = dashboard.centerPref("sim.calibInterpGap", 3)
+                    calibJointJump = dashboard.centerPref("sim.calibJointJump", 0.38)
+                    playSpeed = dashboard.centerPref("sim.playSpeed", 1.0)
+                    expandSkeleton = dashboard.centerPref("sim.expandSkeleton", false)
+                    showArmPose = dashboard.centerPref("sim.showArmPose", true)
+                    fullScreenCoordMode = dashboard.centerPref("sim.fullScreenCoordMode", true)
+                    showSpatialSpray = dashboard.centerPref("sim.showSpatialSpray", true)
+                }
 
                 Connections {
                     target: dashboard
+                    function onCenterPrefsChanged() { trainingCenter.loadPrefs() }
                     function onTrainingChanged() {
                         if (dashboard.selectedSimFile !== "" && trainingCenter.selectedSimFile !== dashboard.selectedSimFile) {
                             trainingCenter.selectedSimFile = dashboard.selectedSimFile
@@ -6673,19 +7145,38 @@ ApplicationWindow {
             // Tab 5: Shortcut Mapping · Composite Gestures · Dedicated Time-Series Motion Learning
             Item {
                 id: bindingsTabRoot
+                objectName: "bindingsTabRoot"
                 visible: trainingCenter.centerTab === "bindings"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
+                // dashboard.bindingRows: what each hand signal runs in the hand mode in use (qt_dashboard._binding_rows)
                 property var selectedRowObj: {
-                    var rows = dashboard.actionBindingRows || []
+                    var rows = dashboard.bindingRows || []
+                    var first = null
                     for (var i = 0; i < rows.length; i++) {
                         if (rows[i].key === trainingCenter.selectedBindingKey) {
                             return rows[i]
                         }
+                        if (rows[i].editable && (first === null || (!first.active && rows[i].active)))
+                            first = rows[i]          // the first one that can be changed and is in use now
                     }
-                    return rows.length > 0 ? rows[0] : null
+                    return first !== null ? first : (rows.length > 0 ? rows[0] : null)
                 }
+                readonly property bool selEditable: selectedRowObj !== null && Boolean(selectedRowObj.editable)
+                function loadPrefs() {
+                    var groups = dashboard.hotkeyGroups || []
+                    var g = dashboard.centerPref("bind.hotkeyGroup", "브라우저")
+                    hotkeyGroup = groups.indexOf(g) >= 0 ? g : "브라우저"
+                    var recipes = dashboard.recipeGroups || []
+                    g = dashboard.centerPref("bind.motionRecipeGroup", "브라우저")
+                    motionRecipeGroup = recipes.indexOf(g) >= 0 ? g : "브라우저"
+                    g = dashboard.centerPref("bind.compRecipeGroup", "미디어")
+                    compRecipeGroup = recipes.indexOf(g) >= 0 ? g : "미디어"
+                }
+                onHotkeyGroupChanged: trainingCenter.savePref("bind.hotkeyGroup", hotkeyGroup)
+                onMotionRecipeGroupChanged: trainingCenter.savePref("bind.motionRecipeGroup", motionRecipeGroup)
+                onCompRecipeGroupChanged: trainingCenter.savePref("bind.compRecipeGroup", compRecipeGroup)
                 property string editActionType: selectedRowObj ? String(selectedRowObj.action_type || "hotkey") : "hotkey"
                 property string editActionValue: selectedRowObj ? String(selectedRowObj.action_value || "") : ""
                 property bool editBindingEnabled: selectedRowObj ? Boolean(selectedRowObj.binding_enabled) : true
@@ -6720,8 +7211,20 @@ ApplicationWindow {
                         editActionType = String(selectedRowObj.action_type || "hotkey")
                         editActionValue = String(selectedRowObj.action_value || "")
                         editBindingEnabled = Boolean(selectedRowObj.binding_enabled)
+                        saveNote = ""
+                        saveFailed = false
                     }
                 }
+                // what [저장] did (a refused command used to leave the screen silent: the list kept the old command)
+                property string saveNote: ""
+                property bool saveFailed: false
+                // the choice on the right differs from what is saved (the list on the left shows the saved one)
+                readonly property bool unsaved: selectedRowObj !== null && selEditable
+                    && (editActionType !== String(selectedRowObj.action_type || "")
+                        || editActionValue !== String(selectedRowObj.action_value || ""))
+                // why the picked command cannot be connected to this signal ("" = it can)
+                readonly property string refusal: selectedRowObj !== null
+                    ? dashboard.bindingRefusal(selectedRowObj.key, editActionType, editActionValue) : ""
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -6741,21 +7244,21 @@ ApplicationWindow {
                             CompactButton {
                                 implicitHeight: 32
                                 leftPadding: 14; rightPadding: 14
-                                text: "5-1. 단축키 · 유튜브 · 프로그램 실행 · 앱별 매핑"
+                                text: "연결 바꾸기"
                                 accent: trainingCenter.bindingsSubTab === "shortcuts"
                                 onClicked: trainingCenter.bindingsSubTab = "shortcuts"
                             }
                             CompactButton {
                                 implicitHeight: 32
                                 leftPadding: 14; rightPadding: 14
-                                text: "5-2. 시계열 모션 전용 학습 · 새 모션 동작 등록 (" + dashboard.motionTrackRows.length + ")"
+                                text: "모션 등록 (" + dashboard.motionTrackRows.length + ")"
                                 accent: trainingCenter.bindingsSubTab === "motions"
                                 onClicked: trainingCenter.bindingsSubTab = "motions"
                             }
                             CompactButton {
                                 implicitHeight: 32
                                 leftPadding: 14; rightPadding: 14
-                                text: "5-3. 복합 손동작 (핀치+스와이프/유지/더블핀치) 등록 (" + dashboard.compositeGestureRows.length + ")"
+                                text: "복합 동작 등록 (" + dashboard.compositeGestureRows.length + ")"
                                 accent: trainingCenter.bindingsSubTab === "composites"
                                 onClicked: trainingCenter.bindingsSubTab = "composites"
                             }
@@ -6783,85 +7286,126 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.margins: 8
                                 spacing: 6
-                                TextLabel {
-                                    text: "동작별 현재 매핑된 단축키 · 명령 목록"
-                                    font.bold: true
-                                    font.pixelSize: 13
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    TextLabel {
+                                        text: "손 신호 → 실행되는 명령"
+                                        font.bold: true
+                                        font.pixelSize: 13
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Chip { objectName: "bindingProfileChip"; text: dashboard.bindingProfileNote }
+                                    Chip { objectName: "handModeChip"; text: "지금 · " + dashboard.handModeName }
                                 }
                                 ScrollView {
+                                    id: bindingListScroll
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
                                     clip: true
+                                    contentWidth: availableWidth
+                                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                                     ColumnLayout {
-                                        width: parent.width - 12
-                                        spacing: 5
+                                        width: bindingListScroll.availableWidth - 12
+                                        spacing: 4
                                         Repeater {
-                                            model: dashboard.actionBindingRows
-                                            delegate: Rectangle {
+                                            model: dashboard.bindingRows
+                                            delegate: ColumnLayout {
                                                 id: bItem
                                                 required property var modelData
-                                                readonly property bool isSel: bindingsTabRoot.selectedRowObj && bindingsTabRoot.selectedRowObj.key === modelData.key
+                                                required property int index
+                                                readonly property bool isSel: bindingsTabRoot.selectedRowObj !== null && bindingsTabRoot.selectedRowObj.key === modelData.key
+                                                readonly property bool firstOfSection: index === 0 || dashboard.bindingRows[index - 1].section !== modelData.section
+                                                readonly property string note: {
+                                                    var parts = []
+                                                    if (modelData.why) parts.push(modelData.why)
+                                                    if (modelData.how) parts.push(modelData.how)
+                                                    if (modelData.changed) parts.push("기본 명령: " + String(modelData.default_badge || ""))
+                                                    var n = (modelData.app_overrides || []).length
+                                                    if (n > 0) parts.push("앱 전용 " + n + "개")
+                                                    return parts.join("  ·  ")
+                                                }
                                                 Layout.fillWidth: true
-                                                implicitHeight: bItemCol.implicitHeight + 12
-                                                radius: 8
-                                                color: isSel ? "#E0F2FE" : "white"
-                                                border.color: isSel ? "#0284C7" : window.line
-                                                border.width: isSel ? 2 : 1
-                                                ColumnLayout {
-                                                    id: bItemCol
-                                                    anchors.fill: parent
-                                                    anchors.margins: 6
-                                                    spacing: 3
-                                                    RowLayout {
-                                                        Layout.fillWidth: true
-                                                        spacing: 6
-                                                        Rectangle {
-                                                            radius: 4
-                                                            color: bItem.modelData.track === "motion" ? "#EDE9FE" : "#E6F8F3"
-                                                            border.color: bItem.modelData.track === "motion" ? "#C4B5FD" : "#8CE0CA"
-                                                            implicitWidth: bTrkTxt.implicitWidth + 8
-                                                            implicitHeight: 18
+                                                spacing: 3
+                                                TextLabel {
+                                                    visible: bItem.firstOfSection
+                                                    Layout.fillWidth: true
+                                                    Layout.topMargin: bItem.index === 0 ? 0 : 10
+                                                    text: bItem.modelData.section
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: window.muted
+                                                    elide: Text.ElideRight
+                                                }
+                                                Rectangle {
+                                                    objectName: "bindingRow"
+                                                    Layout.fillWidth: true
+                                                    implicitHeight: bItemCol.implicitHeight + 12
+                                                    radius: 8
+                                                    color: bItem.isSel ? "#E0F2FE" : (bItem.modelData.editable ? "white" : "#F1F5F9")
+                                                    border.color: bItem.isSel ? "#0284C7" : window.line
+                                                    border.width: bItem.isSel ? 2 : 1
+                                                    opacity: bItem.modelData.active ? 1 : 0.6
+                                                    ColumnLayout {
+                                                        id: bItemCol
+                                                        anchors.fill: parent
+                                                        anchors.margins: 6
+                                                        spacing: 2
+                                                        RowLayout {
+                                                            Layout.fillWidth: true
+                                                            spacing: 8
                                                             TextLabel {
-                                                                id: bTrkTxt
-                                                                anchors.centerIn: parent
-                                                                text: bItem.modelData.track === "motion" ? "시계열 모션" : "정지·핀치"
-                                                                font.pixelSize: 11
+                                                                text: bItem.modelData.name
                                                                 font.bold: true
-                                                                color: bItem.modelData.track === "motion" ? "#5B21B6" : "#0F6E5B"
+                                                                font.pixelSize: 12
+                                                                elide: Text.ElideRight
+                                                                Layout.fillWidth: true
+                                                                Layout.minimumWidth: 0
+                                                            }
+                                                            // "기본": a move or sign the app comes with (2026-11-11)
+                                                            Rectangle {
+                                                                objectName: "bindingDefaultTag"
+                                                                visible: Boolean(bItem.modelData.builtin)
+                                                                radius: 4
+                                                                color: bItem.modelData.changed ? "#FFF0D4" : "#E8EEF4"
+                                                                border.color: bItem.modelData.changed ? "#F2B544" : "#C9D6E2"
+                                                                implicitWidth: defTagTxt.implicitWidth + 10
+                                                                implicitHeight: 18
+                                                                TextLabel {
+                                                                    id: defTagTxt
+                                                                    anchors.centerIn: parent
+                                                                    text: !bItem.modelData.editable ? "기본 · 고정"
+                                                                          : (bItem.modelData.changed ? "기본 · 바꿈" : "기본")
+                                                                    font.pixelSize: 11
+                                                                    font.bold: true
+                                                                    color: bItem.modelData.changed ? "#945800" : "#475569"
+                                                                }
+                                                            }
+                                                            TextLabel {
+                                                                text: "→ " + String(bItem.modelData.shortcut_badge || "")
+                                                                font.pixelSize: 12
+                                                                font.bold: true
+                                                                color: !bItem.modelData.binding_enabled ? window.muted
+                                                                       : (bItem.modelData.editable ? "#0369A1" : "#475569")
+                                                                elide: Text.ElideRight
+                                                                horizontalAlignment: Text.AlignRight
+                                                                Layout.maximumWidth: 190
                                                             }
                                                         }
                                                         TextLabel {
-                                                            text: bItem.modelData.name
-                                                            font.bold: true
-                                                            font.pixelSize: 12
-                                                            elide: Text.ElideRight
+                                                            visible: bItem.note !== ""
                                                             Layout.fillWidth: true
+                                                            text: bItem.note
+                                                            font.pixelSize: 12
+                                                            color: bItem.modelData.why ? "#B45309" : window.muted
+                                                            wrapMode: Text.Wrap
                                                         }
                                                     }
-                                                    RowLayout {
-                                                        Layout.fillWidth: true
-                                                        spacing: 6
-                                                        TextLabel {
-                                                            text: "→ " + String(bItem.modelData.shortcut_badge || "")
-                                                            font.pixelSize: 12
-                                                            font.bold: true
-                                                            color: "#0369A1"
-                                                            elide: Text.ElideRight
-                                                            Layout.fillWidth: true
-                                                        }
-                                                        TextLabel {
-                                                            visible: (bItem.modelData.app_overrides || []).length > 0
-                                                            text: "앱전용 " + (bItem.modelData.app_overrides || []).length + "개"
-                                                            font.pixelSize: 11
-                                                            font.bold: true
-                                                            color: "#7C3AED"
-                                                        }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: trainingCenter.selectedBindingKey = bItem.modelData.key
                                                     }
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: trainingCenter.selectedBindingKey = bItem.modelData.key
                                                 }
                                             }
                                         }
@@ -6883,7 +7427,45 @@ ApplicationWindow {
                                 spacing: 10
 
                                 Rectangle {
-                                    visible: bindingsTabRoot.selectedRowObj !== null
+                                    objectName: "bindingFixedNote"
+                                    visible: bindingsTabRoot.selectedRowObj !== null && !bindingsTabRoot.selEditable
+                                    Layout.fillWidth: true
+                                    implicitHeight: fixedNoteCol.implicitHeight + 20
+                                    radius: 10
+                                    color: "#F7FAFB"
+                                    border.color: window.line
+                                    ColumnLayout {
+                                        id: fixedNoteCol
+                                        anchors.fill: parent
+                                        anchors.margins: 10
+                                        spacing: 6
+                                        TextLabel {
+                                            Layout.fillWidth: true
+                                            text: bindingsTabRoot.selectedRowObj
+                                                  ? (bindingsTabRoot.selectedRowObj.name + "  →  " + bindingsTabRoot.selectedRowObj.shortcut_badge) : ""
+                                            font.bold: true
+                                            font.pixelSize: 14
+                                            wrapMode: Text.Wrap
+                                        }
+                                        TextLabel {
+                                            visible: text !== ""
+                                            Layout.fillWidth: true
+                                            text: bindingsTabRoot.selectedRowObj ? String(bindingsTabRoot.selectedRowObj.how || "") : ""
+                                            font.pixelSize: 12
+                                            color: window.muted
+                                            wrapMode: Text.Wrap
+                                        }
+                                        TextLabel {
+                                            Layout.fillWidth: true
+                                            text: "이 조작은 다른 모든 동작의 바탕이 되는 기본 동작이라 다른 명령으로 바꿀 수 없어요. 원하는 명령은 왼쪽 목록의 다른 동작에 연결하세요."
+                                            font.pixelSize: 12
+                                            wrapMode: Text.Wrap
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    visible: bindingsTabRoot.selEditable
                                     Layout.fillWidth: true
                                     implicitHeight: globalEditCol.implicitHeight + 20
                                     radius: 10
@@ -6899,13 +7481,16 @@ ApplicationWindow {
                                             Layout.fillWidth: true
                                             spacing: 8
                                             TextLabel {
-                                                text: bindingsTabRoot.selectedRowObj ? ("[" + bindingsTabRoot.selectedRowObj.name + "] 실행 동작 · 단축키 설정") : ""
+                                                text: bindingsTabRoot.selectedRowObj ? (bindingsTabRoot.selectedRowObj.name + "  →  실행할 명령") : ""
                                                 font.bold: true
-                                                font.pixelSize: 15
+                                                font.pixelSize: 14
+                                                wrapMode: Text.Wrap
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
                                             }
                                             Item { Layout.fillWidth: true }
                                             CompactButton {
-                                                text: bindingsTabRoot.editBindingEnabled ? "동작 사용 중 (클릭 시 끔)" : "비활성화됨 (클릭 시 켬)"
+                                                text: bindingsTabRoot.editBindingEnabled ? "켜짐 · 누르면 끔" : "꺼짐 · 누르면 켬"
                                                 accent: bindingsTabRoot.editBindingEnabled
                                                 // saved at once with the saved command (it used to change only an unsaved flag)
                                                 onClicked: {
@@ -6921,9 +7506,34 @@ ApplicationWindow {
 
                                         TextLabel {
                                             Layout.fillWidth: true
-                                            text: bindingsTabRoot.selectedRowObj ? ("현재 매핑: " + bindingsTabRoot.selectedRowObj.shortcut_detail + "  ·  학습 트랙: " + bindingsTabRoot.selectedRowObj.training_format_badge) : ""
+                                            text: bindingsTabRoot.selectedRowObj ? ("지금 연결: " + bindingsTabRoot.selectedRowObj.shortcut_detail + "  ·  " + bindingsTabRoot.selectedRowObj.section) : ""
                                             font.pixelSize: 12
                                             color: "#0369A1"
+                                            font.bold: true
+                                            wrapMode: Text.Wrap
+                                        }
+                                        TextLabel {
+                                            objectName: "bindingDefaultNote"
+                                            visible: bindingsTabRoot.selectedRowObj !== null && Boolean(bindingsTabRoot.selectedRowObj.builtin)
+                                            Layout.fillWidth: true
+                                            text: bindingsTabRoot.selectedRowObj
+                                                  ? ("앱 기본 동작 · 기본 명령: " + String(bindingsTabRoot.selectedRowObj.default_badge || "")
+                                                     + (bindingsTabRoot.selectedRowObj.changed ? "  ([기본값 복원]으로 되돌려요)" : "")
+                                                     + (String(bindingsTabRoot.selectedRowObj.how || "") !== "" ? "\n" + bindingsTabRoot.selectedRowObj.how : ""))
+                                                  : ""
+                                            font.pixelSize: 12
+                                            color: window.muted
+                                            wrapMode: Text.Wrap
+                                        }
+                                        TextLabel {
+                                            objectName: "bindingInactiveNote"
+                                            visible: bindingsTabRoot.selectedRowObj !== null && !bindingsTabRoot.selectedRowObj.active
+                                            Layout.fillWidth: true
+                                            text: bindingsTabRoot.selectedRowObj
+                                                  ? ("⚠ " + bindingsTabRoot.selectedRowObj.why + "  ·  연결은 저장되지만 지금 손 방식("
+                                                     + dashboard.handModeName + ")에서는 실행되지 않습니다") : ""
+                                            font.pixelSize: 12
+                                            color: "#B45309"
                                             font.bold: true
                                             wrapMode: Text.Wrap
                                         }
@@ -6934,7 +7544,7 @@ ApplicationWindow {
                                             visible: others.length > 0
                                             Layout.fillWidth: true
                                             text: "⚠ 같은 명령이 다른 동작에도 연결돼 있어요: " + others.join(", ")
-                                                  + (bindingsTabRoot.editBindingEnabled ? "" : "  ·  이 동작을 꺼도 그 동작으로는 계속 실행됩니다 (5-3 복합 동작 등에서 끄세요)")
+                                                  + (bindingsTabRoot.editBindingEnabled ? "" : "  ·  이 동작을 꺼도 그 동작으로는 계속 실행됩니다 (왼쪽 목록에서 그 동작을 골라 끄세요)")
                                             font.pixelSize: 12
                                             color: "#B45309"
                                             font.bold: true
@@ -7073,7 +7683,10 @@ ApplicationWindow {
                                                     leftPadding: 8; rightPadding: 8
                                                     text: modelData.label
                                                     accent: bindingsTabRoot.editActionValue === modelData.value
-                                                    onClicked: bindingsTabRoot.editActionValue = modelData.value
+                                                    // a command this signal cannot take (a drag on a pointing click ...) is not offered
+                                                    enabled: bindingsTabRoot.selectedRowObj === null
+                                                             || dashboard.bindingRefusal(bindingsTabRoot.selectedRowObj.key, "mouse_action", modelData.value) === ""
+                                                    onClicked: { bindingsTabRoot.editActionValue = modelData.value; bindingsTabRoot.saveNote = "" }
                                                 }
                                             }
                                         }
@@ -7099,37 +7712,58 @@ ApplicationWindow {
                                                 onTextEdited: bindingsTabRoot.editActionValue = text
                                             }
                                             CompactButton {
-                                                text: "단축키 매핑 저장"
+                                                text: "저장"
                                                 primary: true
                                                 implicitHeight: 34
                                                 leftPadding: 14; rightPadding: 14
+                                                enabled: bindingsTabRoot.refusal === ""
                                                 onClicked: {
                                                     if (bindingsTabRoot.selectedRowObj) {
-                                                        dashboard.saveGestureBinding(
+                                                        var ok = dashboard.saveGestureBinding(
                                                             bindingsTabRoot.selectedRowObj.key,
                                                             bindingsTabRoot.editActionType,
                                                             bindingsTabRoot.editActionValue,
                                                             bindingsTabRoot.editBindingEnabled
                                                         )
+                                                        bindingsTabRoot.saveFailed = !ok
+                                                        bindingsTabRoot.saveNote = ok ? "저장했어요." : ("저장하지 못했어요: " + dashboard.trainingNote.replace("매핑 저장 실패: ", ""))
                                                     }
                                                 }
                                             }
                                             CompactButton {
                                                 text: "기본값 복원"
+                                                visible: bindingsTabRoot.selectedRowObj !== null && Boolean(bindingsTabRoot.selectedRowObj.can_reset)
                                                 implicitHeight: 34
                                                 onClicked: {
                                                     if (bindingsTabRoot.selectedRowObj) {
                                                         dashboard.resetGestureBinding(bindingsTabRoot.selectedRowObj.key)
+                                                        bindingsTabRoot.editKey = ""         // show the restored command on the right too
+                                                        bindingsTabRoot.saveNote = "기본값으로 되돌렸어요."
+                                                        bindingsTabRoot.saveFailed = false
                                                     }
                                                 }
                                             }
+                                        }
+                                        TextLabel {
+                                            objectName: "bindingSaveNote"
+                                            readonly property string say: bindingsTabRoot.refusal !== "" ? ("이 명령은 연결할 수 없어요: " + bindingsTabRoot.refusal)
+                                                : bindingsTabRoot.saveNote !== "" ? bindingsTabRoot.saveNote
+                                                : bindingsTabRoot.unsaved ? "바꾼 내용이 아직 저장되지 않았어요. [저장]을 눌러야 왼쪽 목록에 반영돼요." : ""
+                                            visible: say !== ""
+                                            Layout.fillWidth: true
+                                            text: say
+                                            font.pixelSize: 12
+                                            font.bold: true
+                                            color: (bindingsTabRoot.refusal !== "" || bindingsTabRoot.saveFailed) ? "#B91C1C"
+                                                   : (bindingsTabRoot.saveNote !== "" ? "#0F6E5B" : "#B45309")
+                                            wrapMode: Text.Wrap
                                         }
                                     }
                                 }
 
                                 // Foreground Program-Specific Override Section
                                 Rectangle {
-                                    visible: bindingsTabRoot.selectedRowObj !== null
+                                    visible: bindingsTabRoot.selEditable
                                     Layout.fillWidth: true
                                     implicitHeight: appOvrCol.implicitHeight + 20
                                     radius: 10
@@ -8576,7 +9210,7 @@ ApplicationWindow {
         color: "transparent"
         flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
                | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
-        width: 150
+        width: 420
         height: 70
         x: on ? view.cursor[0] + 14 : 0
         y: on ? view.cursor[1] + 14 : 0
@@ -8607,7 +9241,9 @@ ApplicationWindow {
             Label {
                 id: pointLabel
                 anchors.centerIn: parent
-                text: pointRing.view.kind === "right" ? "우클릭" : "더블클릭"
+                // the click it would be, and why the ring is (not) filling: the file's name, "not on a file" ...
+                text: (pointRing.view.kind === "right" ? "우클릭" : "더블클릭")
+                      + (pointRing.view.why ? "  ·  " + pointRing.view.why : "")
                 color: pointRing.view.on_file ? (pointRing.view.kind === "right" ? "#93C5FD" : "#6EE7B7") : "#94A3B8"
                 font.pixelSize: 12
                 font.bold: true

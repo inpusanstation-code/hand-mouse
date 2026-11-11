@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 POSTURE_TO_GESTURE = {p: p for p in ("thumb_index", "thumb_middle", "thumb_ring", "thumb_pinky", "thumb_index_middle",
                                      "v_sign", "rock_sign", "thumbs_up")}
 # postures the hand takes all the time: a command on "hold it" would fire in normal use
-EVERYDAY_POSTURES = {"open_hand", "fist", "thumb_tucked"}
+EVERYDAY_POSTURES = {"open_hand", "open_hand_back", "fist", "thumb_tucked"}
 UNKNOWN_NAME = "목록에 없는 손 모양"
 
 
@@ -339,9 +339,14 @@ def fingers_down(landmarks, tips=(8, 12)) -> bool:
     """The (index and middle) fingertips point down: below the wrist by a third of the hand size (image y grows down).
     An upside-down V is its own sign (2026-11-10 report): the on/off V and the composite postures tell them apart."""
     import math
-    w = landmarks[0]
-    size = math.hypot(landmarks[9].x - w.x, landmarks[9].y - w.y) or 1e-6
-    return sum(landmarks[t].y for t in tips) / len(tips) - w.y > size / 3
+
+    def xy(i):                       # (recordings keep the joints as [x, y, z] lists: the on/off V judged while a
+        p = landmarks[i]             # recording is read for training crashed here, 2026-11-12)
+        return (p.x, p.y) if hasattr(p, "x") else (p[0], p[1])
+    wx, wy = xy(0)
+    mx, my = xy(9)
+    size = math.hypot(mx - wx, my - wy) or 1e-6
+    return sum(xy(t)[1] for t in tips) / len(tips) - wy > size / 3
 
 
 THUMB_OUT_STRAIGHT = .9  # thumb base -> tip over the sum of its segments (motion_mode.hand_features: bent .4-.7)
@@ -398,6 +403,43 @@ def _finger_ratios(landmarks):
     return out
 
 
+# An open hand has every finger straight at both of its joints (2026-11-11, user: "손펴기 판정이 너무 후하다. 손가락의 첫째
+# 두번째 마디도 다 펴졌을 때를 기준으로"). The tip -> wrist ratio (1.55) let a hand with the fingers bent at the middle
+# joints through: of the 9 "손 펴기 유지" commands that evening (logs/composite_fires 20:11-20:14) 4 were held with the
+# middle joints bent 25-50 deg and the end joints 11-27 deg; the other 5 had every joint within 13 deg. Over the 983
+# frames read as an open hand in that session's logs the two groups part at about 20 deg (straight: 744 frames, middle
+# and end joints both <= 20; the rest bent >= 25 at the middle joint). Bend = 180 - the joint's angle, in 3D.
+OPEN_BEND = 20.0         # deg, middle (PIP) and end (DIP) joints of every finger, to become an open hand
+OPEN_BEND_KEEP = 25.0    # deg, while an open hand is already being held
+
+
+def finger_bends(landmarks, aspect: float = .5625):
+    """(middle joint, end joint) bend in degrees for index, middle, ring, pinky; 0 = straight."""
+    import math
+    p = [(q.x, q.y * aspect, getattr(q, "z", 0.0) or 0.0) for q in landmarks]
+
+    def bend(a, b, c):
+        v1 = [p[a][i] - p[b][i] for i in range(3)]
+        v2 = [p[c][i] - p[b][i] for i in range(3)]
+        n = math.hypot(*v1) * math.hypot(*v2)
+        if n < 1e-12:
+            return 0.0
+        cos = sum(x * y for x, y in zip(v1, v2)) / n
+        return 180.0 - math.degrees(math.acos(max(-1.0, min(1.0, cos))))
+
+    return [(bend(m, pip, dip), bend(pip, dip, tip)) for m, pip, dip, tip in
+            ((5, 6, 7, 8), (9, 10, 11, 12), (13, 14, 15, 16), (17, 18, 19, 20))]
+
+
+def fingers_straight(landmarks, aspect: float = .5625, keep: bool = False) -> bool:
+    """Every finger straight at both joints (OPEN_BEND, or OPEN_BEND_KEEP for a hand already held open)."""
+    limit = OPEN_BEND_KEEP if keep else OPEN_BEND
+    try:
+        return all(a <= limit and b <= limit for a, b in finger_bends(landmarks, aspect))
+    except Exception:
+        return True
+
+
 PROBE_PINCH = .35        # thumb tip -> finger tip / hand size for "touching" (recordings: real pinches p50 .17-.26)
 PROBE_TRIPLE = .25       # thumb + index + middle: both tips this near ...
 PROBE_TRIPLE_EVEN = 1.3  # ... and about equally near (else it is the nearer one's pinch)
@@ -407,12 +449,101 @@ PROBE_CLEAR = 1.4        # ... and the next closest finger at least this much fa
 
 def hand_posture(landmarks, aspect: float = 1.0, taught: bool = True) -> str:
     """`_rule_posture`, replaced by a shape the user taught when that model is sure (src/posture_teach.py;
-    `taught=False`: the rules alone)."""
+    `taught=False`: the rules alone). An open hand showing its back is "open_hand_back" (`faced`)."""
     rule = _rule_posture(landmarks, aspect)
     if not taught or landmarks is None or len(landmarks) < 21:
         return rule
     from src.posture_teach import ASPECT, override
-    return override(landmarks, rule, aspect if aspect != 1.0 else ASPECT)
+    return faced(override(landmarks, rule, aspect if aspect != 1.0 else ASPECT), landmarks, aspect)
+
+
+# ---------------------------------------------------------------------------- palm or back of the hand to the camera
+# 2026-11-11 request ("오른손·왼손 정보와 엄지 위치로 손등/손바닥을 구분 … 별개의 명령으로"). Two signs that do not depend
+# on each other:
+#  - the turn from the index knuckle to the little knuckle around the wrist, in the picture: one way for a palm, the other
+#    for the back, and which is which follows from the hand's label (MediaPipe "Left" / "Right" of the picture);
+#  - the thumb: it sits on the palm side, so its tip is nearer the camera than the index knuckle with the palm to the
+#    camera and farther with the back to it.
+# Measured on the 42 recordings (label "Left" = the right hand in the mirrored picture; 10,201 open-hand frames, every
+# 5th): 62 % turn one way (> +.3), 31 % the other (< -.3) - hands pointing down 95 % the other way, pointing up 12 %, as a
+# hand let hang or held across the body shows its back. With the first turn the thumb is nearer the camera in 100 % of
+# the frames (median -.30 hand sizes), with the other it is farther in 76 % (median +.16). No recording was LABELLED palm
+# or back, so this is two signs agreeing, not an accuracy.
+BACK_TURN = .3           # sine of the knuckle turn, against the palm's way, from which the hand may be showing its back
+BACK_THUMB = -.15        # ... and the thumb tip is not nearer the camera than this (hand sizes; palms: below -.21 in 90 %)
+_HAND = __import__("threading").local()     # the label of the hand being judged, per thread (the runtime's loop sets it)
+
+
+def set_hand_label(label: str, arm: str = "") -> None:
+    """Which hand the landmarks judged on this thread belong to: MediaPipe's "Left" / "Right" as the tracker gives it
+    (the picture's, before the mirror is undone), "" = unknown: no hand is then told as showing its back.
+    `arm`: the arm the hand sits on (`arm_label`), "" = not seen."""
+    _HAND.label = label if label in ("Left", "Right") else ""
+    _HAND.arm = arm if arm in ("Left", "Right") else ""
+
+
+def hand_label() -> str:
+    return getattr(_HAND, "label", "")
+
+
+# Same day, the user's follow-up ("어깨·팔꿈치 정보도 있고, 엄지 좌우 위치 정보도 연계해서 보면 쉽게 구분 가능하잖아"): the
+# arm tells which hand it is without the hand model's own left/right reading. On the recordings' open-hand frames that
+# have Pose joints (10,060): of the 3,076 with the reversed turn the nearest Pose wrist was the labelled hand's in 3,015
+# (2,544 clearly: within one hand size, visible, the other wrist twice as far) and clearly the other arm's in 4. So the
+# reversed turn really is the same hand turned round, and when the arm confirms the hand the turn alone decides (the
+# thumb's depth, which disagreed in 24 % of those frames, is then not asked). An arm that says the OTHER hand does not
+# overrule the label: with the palm's turn that happened clearly in 314 frames (5 %), and would make each a "back".
+ARM_NEAR = 1.0           # hand sizes from the hand's wrist to the Pose wrist at most
+ARM_CLEAR = 2.0          # ... and the other Pose wrist at least this many times farther
+ARM_VISIBLE = .5
+
+
+def arm_label(pose, landmarks, aspect: float = 1.0) -> str:
+    """"Left" / "Right": the arm whose wrist the hand sits on, in the hand label's naming; "" when not clear.
+    `pose`: Pose joints 11-16 as [x, y, visibility] (shoulders, elbows, wrists; left then right), or None."""
+    import math
+    if not pose or len(pose) < 6 or landmarks is None or len(landmarks) < 21:
+        return ""
+    w = landmarks[0]
+    size = math.hypot(landmarks[9].x - w.x, (landmarks[9].y - w.y) * aspect)
+    if size <= 1e-6:
+        return ""
+    d = {side: math.hypot(pose[i][0] - w.x, (pose[i][1] - w.y) * aspect) / size for side, i in (("Left", 4), ("Right", 5))}
+    near, far = ("Left", "Right") if d["Left"] <= d["Right"] else ("Right", "Left")
+    visible = float(pose[4 if near == "Left" else 5][2]) >= ARM_VISIBLE
+    return near if visible and d[near] <= ARM_NEAR and d[far] >= ARM_CLEAR * d[near] else ""
+
+
+def back_of_hand(landmarks, aspect: float = 1.0, label: Optional[str] = None, arm: Optional[str] = None) -> bool:
+    """The back of the hand faces the camera: the knuckles turn against the palm's way for this hand, and either the arm
+    confirms which hand it is or the thumb's depth agrees. False when the hand is unknown or edge-on."""
+    import math
+    label = hand_label() if label is None else label
+    arm = getattr(_HAND, "arm", "") if arm is None else arm
+    if label not in ("Left", "Right") or landmarks is None or len(landmarks) < 21:
+        return False
+    w = landmarks[0]
+    a = (landmarks[5].x - w.x, (landmarks[5].y - w.y) * aspect)
+    b = (landmarks[17].x - w.x, (landmarks[17].y - w.y) * aspect)
+    turn = (a[0] * b[1] - a[1] * b[0]) / max(1e-9, math.hypot(*a) * math.hypot(*b))
+    if (turn if label == "Left" else -turn) > -BACK_TURN:
+        return False                               # the palm's way, or too edge-on to say
+    if arm == label:
+        return True                                # the arm says it is this hand: the turn is enough
+    size =math.hypot(landmarks[9].x - w.x, (landmarks[9].y - w.y) * aspect)
+    thumb = ((getattr(landmarks[4], "z", 0.0) or 0.0) - (getattr(landmarks[5], "z", 0.0) or 0.0)) / max(1e-9, size)
+    return thumb >= BACK_THUMB
+
+
+def faced(posture: str, landmarks, aspect: float = 1.0) -> str:
+    """An open hand showing its back is its own shape, "open_hand_back"; everything else stays."""
+    return "open_hand_back" if posture == "open_hand" and back_of_hand(landmarks, aspect) else posture
+
+
+def unless_bound(posture: Optional[str], bound) -> Optional[str]:
+    """"open_hand_back" counts as the plain open hand while no gesture is bound to it (`bound`: the shapes in use), so
+    what was connected to 손 펴기 before the two were told apart keeps working with either side of the hand."""
+    return "open_hand" if posture == "open_hand_back" and "open_hand_back" not in bound else posture
 
 
 def _rule_posture(landmarks, aspect: float = 1.0) -> str:
@@ -467,7 +598,9 @@ def _rule_posture(landmarks, aspect: float = 1.0) -> str:
         if palm_sideways(landmarks, aspect) >= KNIFE:
             return "knife_hand"           # the hand's edge to the camera (손날), thumb anywhere
         thumb_in = math.dist(pt[4], pt[9]) / size
-        return "thumb_tucked" if thumb_in < .45 else "open_hand"
+        if thumb_in < .45:
+            return "thumb_tucked"
+        return "open_hand" if fingers_straight(landmarks, aspect) else ""   # joints bent: not an open hand yet
     return ""
 
 

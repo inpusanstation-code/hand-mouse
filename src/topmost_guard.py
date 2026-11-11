@@ -49,6 +49,31 @@ def _clear(hwnds: Iterable[int]) -> None:
         u.SetWindowPos(wintypes.HWND(h), wintypes.HWND(-2), 0, 0, 0, 0, 0x13)
 
 
+def is_topmost(hwnd: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    u.GetWindowLongW.restype = ctypes.c_long
+    return bool(u.GetWindowLongW(wintypes.HWND(hwnd), -20) & WS_EX_TOPMOST)
+
+
+def clear_if_topmost(hwnd: int) -> bool:
+    """The app's own MAIN window must never be "always on top" (its overlays are, on purpose; the main window is an
+    ordinary window and nothing in the app asks for it). 2026-11-11 report: "앱 화면이 최상단 layer에 고정되어서 다른 앱을
+    눌러도 계속 최상단" - seen on the running app: the main window carried WS_EX_TOPMOST, set by Windows, not by the app
+    (the same flag other programs' windows picked up after the app's Win+D, see the module note; the guard below leaves
+    the app's own windows alone and only looks for two seconds). True when the flag was there and has been taken off."""
+    if sys.platform != "win32" or not hwnd:
+        return False
+    try:
+        if not is_topmost(int(hwnd)):
+            return False
+        _clear([int(hwnd)])
+        return not is_topmost(int(hwnd))
+    except Exception:
+        return False
+
+
 def guard(send: Callable[[], None], log: Callable[[str], None] | None = None) -> None:
     """Run send() (the Win+D key press); then, off the caller's thread, clear topmost flags that appeared."""
     if sys.platform != "win32":

@@ -38,12 +38,30 @@ def cases(folder: Path | str, key: str, limit: int = MAX_CASES) -> List[Dict[str
     events = read_uses(folder, base(key), MAX_USES * 8 if want else limit)
     if want:
         events = [ev for ev in events if event_direction(ev) == want][-limit:]
+    from src import use_review
+    reviews = use_review.load(folder)
+    for ev in events:
+        ev["review"] = use_review.verdict(reviews, str(ev.get("file") or ""), ev.get("id"))
+    return rows(reversed(events))
+
+
+def rows(events) -> List[Dict[str, Any]]:
+    """Logged uses as the viewer's rows, in the order given. "review": the person's verdict ("", "ok", "bad")."""
+    from src.hand_direction import name
+    from src.online.use_import import event_direction
     out = []
-    for ev in reversed(events):
+    for ev in events:
         clip = _clip(ev)
         marked = str(ev.get("marked") or "")
         out.append({"id": ev.get("id"), "when": str(ev.get("wall") or ""), "marked": bool(marked),
                     "mark_text": MARKS.get(marked, "원하지 않음 표시" if marked else ""),
                     "enforced": str(ev.get("enforced") or ""), "file": str(ev.get("file") or ""),
+                    "review": str(ev.get("review") or ""),
                     "direction": name(event_direction(ev)), **clip})
     return out
+
+
+def review_cases(folder: Path | str, root: Path | str, key: str) -> List[Dict[str, Any]]:
+    """The review session's rows (src/use_review.py): this gesture's uses no learning round has taken yet, oldest first."""
+    from src.use_review import waiting
+    return rows(waiting(folder, root, key))

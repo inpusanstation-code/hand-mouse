@@ -83,3 +83,14 @@ def test_a_moving_or_blocked_hand_and_a_disabled_sign_never_toggle():
     ts = ToggleSign()
     frames = [vsign()] * 12 + [hand(fingers="open")] * 12 + [vsign()] * 14     # a real dropout: starts over, 0.47 s left < hold
     assert not run(ts, frames)[0]
+
+
+def test_the_sign_is_judged_on_recorded_joints_too():
+    """2026-11-12: reading a recording for training crashed in the on/off V (joints there are [x, y, z] lists, and the
+    upside-down check read .x): scripts/train_tcn.py stopped with "'list' object has no attribute 'x'"."""
+    from src.pose_probe import fingers_down
+    from tests.test_sequence import v_hand
+    up, down = v_hand(), v_hand(down=True)
+    as_lists = lambda hand: [[p.x, p.y, p.z] for p in hand]     # noqa: E731
+    assert fingers_down(as_lists(down)) and not fingers_down(as_lists(up))
+    assert fingers_down(down) and not fingers_down(up)

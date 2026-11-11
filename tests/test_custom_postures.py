@@ -346,7 +346,11 @@ def test_an_open_hand_being_held_stays_one_while_the_fingers_only_relax_a_little
     det = CompositeGestureDetector.__new__(CompositeGestureDetector)
     hand = _hand(("index", "middle", "ring", "pinky"))
     relaxed = _hand(("index", "middle", "ring", "pinky"))
-    relaxed[8].y = relaxed[5].y - .085                       # the index tip comes down a little
+    for j, y in zip((6, 7, 8), (.56, .53, .50)):             # the index tips toward the camera: shorter, still straight
+        relaxed[j].y = y
+    hooked = _hand(("index", "middle", "ring", "pinky"))
+    hooked[8].y = hooked[5].y - .085                         # the index tip folded back at the end joint (2026-11-11:
+    assert not det._open_goes_on(hooked, "", [])             # "마디도 다 펴졌을 때를 기준으로" - no longer an open hand)
     bent = _hand(("middle", "ring", "pinky"))                 # the index folded: the hand changed
     assert min(_finger_ratios(hand)) >= 1.55 and 1.35 <= min(_finger_ratios(relaxed)) < 1.55 and min(_finger_ratios(bent)) < 1.35
     assert det._open_goes_on(relaxed, "", []) and not det._open_goes_on(bent, "", [])

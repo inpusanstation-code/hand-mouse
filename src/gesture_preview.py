@@ -133,6 +133,7 @@ WRIST = (.50, .90)
 # shape -> (thumb, (index, middle, ring, pinky)); up / fold / half, thumb: out / tuck / up / pinch:<finger mcp>
 SHAPES = {
     "open_hand": ("out", ("up", "up", "up", "up")),
+    "open_hand_back": ("out", ("up", "up", "up", "up")),      # drawn mirrored: the thumb on the other side
     "thumb_tucked": ("tuck", ("up", "up", "up", "up")),
     "fist": ("tuck", ("fold", "fold", "fold", "fold")),
     "fingers_bent": ("tuck", ("half", "half", "half", "half")),
@@ -196,6 +197,8 @@ def drawn(shape: str) -> List[Tuple[float, float]]:
         pts[1 + i] = p
     if shape == "knife_hand":                      # the palm turned sideways: narrow
         pts = [(.5 + (x - .5) * .3, y) for x, y in pts]
+    if shape == "open_hand_back":
+        pts = [(1 - x, y) for x, y in pts]
     if shape in UPSIDE_DOWN:
         pts = [(1 - x, 1 - y) for x, y in pts]
     return pts

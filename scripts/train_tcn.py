@@ -282,11 +282,34 @@ def load_training_sessions(paths, args, *, window: int = WINDOW):
             time_stretch_range=tuple(aug_cfg.get("time_stretch_range", (0.85, 1.15))),
             frame_drop_prob=float(aug_cfg.get("frame_drop_prob", 0.05)),
         )
+    # --use-events: the uses collected while the app was used (src/use_training.py) as one more record. Its events
+    # belong to no recorded posture; the pick* functions below take them into every training set, never into a test.
+    use_folder = getattr(args, "use_events", "") or ""
+    if use_folder:
+        from src.use_training import as_record, collect
+        use_items = collect(use_folder, CLASSES)
+        use_record = as_record(use_items)
+        emit("note", text=f"쓰면서 모은 사례 {sum(not i['held'] for i in use_items)}개를 함께 학습해요 "
+                          f"(따로 둔 것 {sum(bool(i['held']) for i in use_items)}개)")
+        if use_record is not None:
+            extra_records = list(extra_records or []) + [use_record]
     all_load_paths = [str(p) for p in resolved_primary] + [str(p) for p in aug_paths]
     sessions = load_sessions(all_load_paths, window, use_cleaned=False, extra_records=extra_records,
                              keep_rest=bool(getattr(args, "keep_rest", False)))
     eval_sessions = sessions[: len(paths)]
     return sessions, eval_sessions, opts
+
+
+def _use_key(args) -> str:
+    """What the collected uses are now, for the fold cache: folds trained with other uses are not reused."""
+    folder = getattr(args, "use_events", "") or ""
+    if not folder:
+        return ""
+    try:
+        from src.use_training import counts
+        return json.dumps(counts(folder, CLASSES), sort_keys=True)
+    except Exception:
+        return "?"
 
 
 def emit(event: str, **info) -> None:
@@ -311,6 +334,8 @@ def pick(sessions, conds):
         in_cond = np.isin(s["cond"], conds)
         if (s.get("meta") or {}).get("mode") == "free":
             in_cond = in_cond | ((s["cond"] == -1) & (s["y"] == 0))
+        if (s.get("meta") or {}).get("mode") == "use":      # collected uses: no posture, always trained on
+            in_cond = in_cond | (s["cond"] == -1)
         m = (s["y"] >= 0) & in_cond
         xs.append(s["x"][m])
         ys.append(s["y"][m])
@@ -323,6 +348,8 @@ def pick_with_conds(sessions, conds):
         in_cond = np.isin(s["cond"], conds)
         if (s.get("meta") or {}).get("mode") == "free":
             in_cond = in_cond | ((s["cond"] == -1) & (s["y"] == 0))
+        if (s.get("meta") or {}).get("mode") == "use":      # collected uses: no posture, always trained on
+            in_cond = in_cond | (s["cond"] == -1)
         m = (s["y"] >= 0) & in_cond
         xs.append(s["x"][m])
         ys.append(s["y"][m])
@@ -336,6 +363,8 @@ def pick_with_weights(sessions, conds):
         in_cond = np.isin(s["cond"], conds)
         if (s.get("meta") or {}).get("mode") == "free":
             in_cond = in_cond | ((s["cond"] == -1) & (s["y"] == 0))
+        if (s.get("meta") or {}).get("mode") == "use":      # collected uses: no posture, always trained on
+            in_cond = in_cond | (s["cond"] == -1)
         m = (s["y"] >= 0) & in_cond
         xs.append(s["x"][m])
         ys.append(s["y"][m])
@@ -1227,6 +1256,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--thr", type=float, default=0.7)
     ap.add_argument("--k", type=int, default=3, help="frames in a row above the threshold that count as the gesture")
     ap.add_argument("--no-export", action="store_true")
+    ap.add_argument("--use-events", default="", help="use log folder (logs/use_events): the collected uses the person"
+                    " passed or rejected are trained on as well (src/use_training.py)")
     ap.add_argument("--progress", action="store_true", help="JSON progress lines for the app")
     ap.add_argument("--output-dir", type=Path, default=ROOT / "models", help="model output folder")
     ap.add_argument("--gestures", nargs="+", help="train only these gesture tasks as independent binary models")
@@ -1380,6 +1411,7 @@ def main(argv: list[str] | None = None) -> int:
         {"recordings": recordings_key(paths), "code": code_hash(), "classes": classes, "conds": conds, "held": held,
          "seed": a.seed, "thr": a.thr, "k": a.k, "epochs": opts["epochs"], "stride": opts["window_stride"],
          "device": opts["effective_device"], "keep_rest": a.keep_rest, "hard_negatives": a.hard_negatives,
+         "use_events": _use_key(a),
          "hn": [a.hard_negative_thr, a.hard_negative_weight, a.hard_negative_rounds],
          "sweep": a.threshold_sweep, "augment": bool(opts["offline_augment"]), "no_cleaned": a.no_cleaned,
          "derived": derived_key(paths), "split_mode": str(getattr(a, "split_mode", "condition") or "condition"),

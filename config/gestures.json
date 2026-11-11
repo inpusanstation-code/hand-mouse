@@ -160,6 +160,7 @@
   "fist_curl_exit": 1.2,
   "fist_confirm_time": 0.12,
   "index_tuck_ratio": 1.15,
+  "fist_upright": true,
   "pinch_fistlike_confirm": 0.12,
   "fling_strength": 1.0,
   "record_gain_min": 1.0,

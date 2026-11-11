@@ -15,6 +15,7 @@ from typing import Dict, Iterable
 
 VK_F2 = 0x71
 VK_PAUSE = 0x13          # emergency stop, anywhere (spec 10)
+VK_F8 = 0x77             # "that click / command was not meant", anywhere (2026-11-11)
 VK_O = 0x4F
 VK_0 = 0x30
 VK_NUMPAD0 = 0x60
@@ -62,6 +63,12 @@ class KeyPoller:
         if hit and require_focus:
             return self._foreground_is_ours()
         return hit
+
+
+def mark_key_pressed(keys: KeyPoller) -> bool:
+    """F8, whatever window is in front. The F key only reaches the app when its window has the focus, and a stray click
+    happens while the person works in another program (2026-11-11: an evening of use, 53 clicks, not one mark)."""
+    return keys.pressed([VK_F8])
 
 
 def settings_key_pressed(keys: KeyPoller, typing: bool) -> bool:

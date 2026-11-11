@@ -1,0 +1,140 @@
+[
+ {
+  "event": "initialized",
+  "time": "2026-11-11 22:39:23",
+  "reasons": [],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ]
+ },
+ {
+  "event": "rejected",
+  "time": "2026-11-11 22:39:58",
+  "reasons": [
+   "macro_f1_dropped",
+   "forgot:thumb_ring",
+   "forgot:thumb_index",
+   "forgot:thumb_middle",
+   "forgot:palm_side"
+  ],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "metrics": {
+   "before": {
+    "macro_f1": 0.8235128881746376,
+    "reps": {
+     "thumb_ring": [
+      34,
+      44
+     ],
+     "thumb_index": [
+      78,
+      120
+     ],
+     "thumb_middle": [
+      38,
+      39
+     ],
+     "palm_side": [
+      28,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 191,
+    "reps_total": 246,
+    "wrong_reps": 23,
+    "false_fires": 56,
+    "none_minutes": 8.863150000000022
+   },
+   "after": {
+    "macro_f1": 0.7437401867111804,
+    "reps": {
+     "thumb_ring": [
+      31,
+      44
+     ],
+     "thumb_index": [
+      59,
+      120
+     ],
+     "thumb_middle": [
+      11,
+      39
+     ],
+     "palm_side": [
+      21,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 135,
+    "reps_total": 246,
+    "wrong_reps": 7,
+    "false_fires": 6,
+    "none_minutes": 8.863150000000022
+   },
+   "learned": {
+    "macro_f1": 0.5,
+    "reps": {
+     "thumb_index": [
+      0,
+      1
+     ]
+    },
+    "reps_hit": 0,
+    "reps_total": 1,
+    "wrong_reps": 1,
+    "false_fires": 0,
+    "none_minutes": 0.010468333333331732
+   }
+  },
+  "data_snapshot": "73:1794404366",
+  "training": {
+   "method": "er",
+   "buffer": "reservoir",
+   "buffer_size": 5000,
+   "lr": 0.0003,
+   "encoder_lr": 0.0,
+   "rounds": 3,
+   "updates": 186,
+   "events": [
+    "head_updated"
+   ],
+   "user_samples": 73,
+   "held_out": 2,
+   "new_classes": [],
+   "untested_new_classes": [],
+   "device": "cuda"
+  }
+ }
+]

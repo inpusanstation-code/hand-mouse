@@ -26,7 +26,9 @@ def window_center_at(x: int, y: int, own_pid: Optional[int] = None) -> Optional[
     try:
         import ctypes
         from ctypes import wintypes
-        user32 = ctypes.windll.user32
+        # its own handle on user32: argument types set on the shared ctypes.windll.user32 break other packages' calls
+        # to the same functions (2026-11-12: uiautomation's GetAncestor, see src/point_mode._user32)
+        user32 = ctypes.WinDLL("user32")
         user32.WindowFromPoint.argtypes = [wintypes.POINT]
         user32.WindowFromPoint.restype = wintypes.HWND
         user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]

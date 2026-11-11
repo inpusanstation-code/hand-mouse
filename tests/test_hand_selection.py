@@ -121,3 +121,26 @@ def test_selected_hand_is_used_even_when_opposite_hand_appears_first():
     assert selected_detection([right], "Left", True) is None
     assert selected_detection([detection("Right", .4)], "Left", True) is None
     assert selected_detection([left, left], "Left", True) is None
+
+
+def test_a_small_reading_inside_the_hand_never_wins_over_the_hand():
+    """2026-11-11 evening ("가상 손이 위로 점프 튀었다가 제자리로 2번 정도 반복"): MediaPipe gave the hand and, inside it at
+    the fingers, a hand a third of its size - both "Left" with scores .97-1.00 - and whichever scored higher was used."""
+    from src.hand_selection import merge_duplicates
+    follower = HandFollower()
+    picked = []
+    for n in range(12):
+        hand = hand_at("Left", x=.47, y=.76, size=.30, score=.98 if n % 2 else 1.0)
+        part = hand_at("Left", x=.46, y=.65, size=.11, score=1.0 if n % 2 else .98)       # the scores take turns
+        order = [hand, part] if n % 3 else [part, hand]
+        assert merge_duplicates(order) == [hand]
+        picked.append(follower.select(order, "Right", True, n / 30) is hand)
+    assert all(picked)
+    # two readings of about one size: the one like the frame before stays, whatever the scores do
+    follower = HandFollower()
+    assert follower.select([hand_at("Left", x=.50, size=.30)], "Right", True, 0.0) is not None
+    near, shifted = hand_at("Left", x=.505, size=.30, score=.97), hand_at("Left", x=.56, size=.33, score=.99)
+    assert follower.select([shifted, near], "Right", True, .03) is near
+    # a clearly better score still decides
+    sure, unsure = hand_at("Left", size=.11, score=.99), hand_at("Left", size=.30, score=.6)
+    assert merge_duplicates([unsure, sure]) == [sure]

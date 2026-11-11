@@ -122,6 +122,9 @@ def learning_runtime(tmp_path):
     from tests.test_virtual_hand import box_runtime
     rt = box_runtime(tmp_path)
     rt.engine.config["online_learning_enabled"] = True
+    # these tests are about counting and starting a round; the person's look before it (on by default since 2026-11-11,
+    # src/use_review.py) has its own tests in tests/test_use_review.py
+    rt.engine.config["use_review_required"] = False
     (tmp_path / "online").mkdir(exist_ok=True)
     (tmp_path / "online" / "encoder.json").write_text("{}", encoding="utf-8")
     rt._online_root = tmp_path / "online"
@@ -517,3 +520,39 @@ def test_the_runtime_logs_the_kind_of_click_and_asks_the_kinds_model_only_when_t
     assert rt._click_model("left_click:thumb_index:double") == "left_click:thumb_index"
     rt._use_watchers = {"online": SimpleNamespace(verifiers={"left_click:thumb_index:double": object()})}
     assert rt._click_model("left_click:thumb_index:double") == "left_click:thumb_index:double"
+
+
+def test_right_clicks_from_before_they_could_be_marked_anywhere_are_left_out_of_the_learning(tmp_path, monkeypatch):
+    """2026-11-11: "F8 이전 기록은 우클릭 학습에서 빼줘". Before F8 a stray right click went unmarked; once it could be
+    marked, 33 of an hour's 40 were. An unmarked one from before is no example of a meant right click."""
+    pytest.importorskip("torch")
+    from src.online import use_import as ui
+    from src.online.samples import SampleStore
+    from tests.test_online_update import frames
+    assert ui.unmarkable_right_click({"key": "right_click", "wall": "2026-11-11 21:28:39"})
+    assert not ui.unmarkable_right_click({"key": "right_click", "wall": "2026-11-11 21:31:12"})
+    assert not ui.unmarkable_right_click({"key": "left_click", "wall": "2026-11-11 20:00:00"})
+    assert not ui.unmarkable_right_click({"key": "right_click"})
+
+    def log_clicks(folder):
+        log = UseLog(folder, pc="pc-test", background=False)
+        t = 0.0
+        for i in range(6):                                  # 2 marked right clicks, 3 unmarked ones, 1 left click
+            for f in frames("thumb_index", seed=i):
+                lm = np.asarray(f["lm"], dtype=float)
+                log.frame(t + f["t"], SimpleNamespace(landmarks=[SimpleNamespace(x=p[0], y=p[1], z=p[2]) for p in lm],
+                                                      world=np.asarray(f["world"], dtype=float).tolist()))
+            log.event("rule", "left_click" if i == 5 else "right_click", t + 1.2, label="thumb_index", shadow=None)
+            if i < 2:
+                log.mark_last(t + 1.4)
+            t += 3.0
+        log.close()
+
+    log_clicks(tmp_path / "now")                            # logged now: F8 exists, every one counts
+    got = ui.import_events(SampleStore(tmp_path / "a"), tmp_path / "now", ["none", "thumb_index"])
+    assert got["negatives"] == 2 and got["weak"] == 4 and "old_right_clicks" not in got
+    monkeypatch.setattr(ui, "RIGHT_CLICK_MARKABLE_FROM", "2099-01-01 00:00:00")      # the same log, as if from before F8
+    assert ui.pending_counts(tmp_path / "now", tmp_path / "b").get("left_click:thumb_index") == 1
+    assert not any(k.startswith("right_click") for k in ui.pending_counts(tmp_path / "now", tmp_path / "b"))
+    got = ui.import_events(SampleStore(tmp_path / "b"), tmp_path / "now", ["none", "thumb_index"])
+    assert got["negatives"] == 2 and got["weak"] == 1 and got["old_right_clicks"] == 3   # the marked ones still teach "no"

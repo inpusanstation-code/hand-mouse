@@ -7,6 +7,13 @@ config/active_profile.txt     name of the profile in use (absent / empty = none)
 A profile only OVERLAYS the base config (defaults < config/gestures.json < profile). Selecting
 another profile or none never edits gestures.json. Profiles hold measured numbers only (no camera
 images); the folder is git-ignored because a profile name can be a person's name.
+
+2026-11-11 (the person's rule): no profile, or a profile nothing was changed in, IS the app's default state. A profile
+keeps only what differs from the default:
+    "updates" in <name>.json                 engine settings changed while the profile is on (any JSON value)
+    config/profiles/bindings/<name>.json     gesture -> command bindings that differ (src/action_bindings.py)
+    the app's settings under profile/<name>/ and center/<name>/   screen options (src/qt_dashboard.py)
+so a change made to the defaults (in code or the shared config files) reaches every profile that did not touch it.
 """
 from __future__ import annotations
 
@@ -47,9 +54,27 @@ def list_profiles(config_dir: Path) -> List[str]:
         return []
 
 
+BINDINGS_DIR = "bindings"      # config/profiles/bindings/<name>.json (src/action_bindings.bindings_path)
+EXPORT_FORMAT = "manux-hand-mouse-profile"
+
+
+def bindings_file(config_dir: Path, name: str) -> Path:
+    profile_path(config_dir, name)          # validates the name
+    return profiles_dir(config_dir) / BINDINGS_DIR / f"{name.strip()}.json"
+
+
+def _write(path: Path, doc: Dict[str, Any]) -> None:
+    """Whole or not at all (the runtime thread and the screens both save profiles)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 def save_profile(config_dir: Path, name: str, updates: Dict[str, float],
                  report: Optional[Dict[str, Any]] = None) -> Path:
-    """Write (or replace) a profile; a replaced one is kept as `<name>.json.bak`."""
+    """Write (or replace) a profile from measured numbers (the calibration wizard); a replaced one is kept as
+    `<name>.json.bak`."""
     path = profile_path(config_dir, name)
     clean = {str(k): float(v) for k, v in updates.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,6 +84,115 @@ def save_profile(config_dir: Path, name: str, updates: Dict[str, float],
                "updates": clean, "report": report or {}}
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def create_profile(config_dir: Path, name: str) -> Path:
+    """A new profile with nothing changed: the app's default state until the person changes something in it."""
+    path = profile_path(config_dir, name)
+    if path.exists():
+        raise ValueError(f"'{name.strip()}' 프로필이 이미 있어요.")
+    _write(path, {"name": name.strip(), "created": time.strftime("%Y-%m-%d %H:%M:%S"), "updates": {}, "report": {}})
+    return path
+
+
+def load_values(config_dir: Path, name: str) -> Optional[Dict[str, Any]]:
+    """Every engine setting the profile changes, as stored (numbers, switches, words, lists). None = no such profile."""
+    doc = load_profile_document(config_dir, name)
+    if doc is None:
+        return None
+    raw = doc.get("updates", {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def save_values(config_dir: Path, name: str, updates: Dict[str, Any]) -> Path:
+    """Replace the engine settings the profile changes (the rest of its file stays). The profile must exist: one
+    that was just renamed or deleted is not brought back by a save that was on its way."""
+    path = profile_path(config_dir, name)
+    doc = load_profile_document(config_dir, name)
+    if doc is None:
+        raise ValueError(f"'{name}' 프로필이 없어요.")
+    doc["updates"] = dict(updates)
+    _write(path, doc)
+    return path
+
+
+def rename_profile(config_dir: Path, old: str, new: str) -> Path:
+    """The profile under another name (its bindings file with it; the active choice follows)."""
+    src, dst = profile_path(config_dir, old), profile_path(config_dir, new)
+    if not src.exists():
+        raise ValueError(f"'{old}' 프로필이 없어요.")
+    if dst.exists():
+        raise ValueError(f"'{new.strip()}' 프로필이 이미 있어요.")
+    doc = load_profile_document(config_dir, old) or {}
+    doc["name"] = new.strip()
+    _write(dst, doc)
+    src.unlink()
+    b_old, b_new = bindings_file(config_dir, old), bindings_file(config_dir, new)
+    if b_old.exists():
+        b_new.parent.mkdir(parents=True, exist_ok=True)
+        b_old.replace(b_new)
+    if get_active(config_dir, ignore_override=True) == old.strip():
+        set_active(config_dir, new)
+    return dst
+
+
+def changed_counts(config_dir: Path, name: str) -> Dict[str, int]:
+    """How much the profile differs from the default state: engine settings and gesture bindings (for the list)."""
+    values = load_values(config_dir, name) or {}
+    bindings = 0
+    try:
+        raw = json.loads(bindings_file(config_dir, name).read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            bindings = sum(len(raw.get(k) or ()) for k in ("bindings", "composite_gestures", "custom_motions", "deleted"))
+    except (OSError, ValueError):
+        pass
+    return {"settings": len(values), "bindings": bindings}
+
+
+def export_document(config_dir: Path, name: str) -> Dict[str, Any]:
+    """The profile as one JSON document (its file and its bindings); the screens add their own parts."""
+    doc = load_profile_document(config_dir, name)
+    if doc is None:
+        raise ValueError(f"'{name}' 프로필이 없어요.")
+    out: Dict[str, Any] = {"format": EXPORT_FORMAT, "version": 1, "name": name.strip(),
+                           "exported": time.strftime("%Y-%m-%d %H:%M:%S"), "profile": doc, "bindings": {}}
+    try:
+        raw = json.loads(bindings_file(config_dir, name).read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            out["bindings"] = raw
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def free_name(config_dir: Path, wanted: str) -> str:
+    """`wanted`, or "wanted 2", "wanted 3" ... when taken."""
+    base = (wanted or "").strip() or "가져온 프로필"
+    if not valid_name(base):
+        base = "가져온 프로필"
+    names = set(list_profiles(config_dir))
+    name, n = base, 2
+    while name in names:
+        name, n = f"{base[:28]} {n}", n + 1
+    return name
+
+
+def import_document(config_dir: Path, doc: Dict[str, Any], name: Optional[str] = None) -> str:
+    """Make a profile from an exported document; returns its name (a taken name gets a number)."""
+    if not isinstance(doc, dict) or doc.get("format") != EXPORT_FORMAT:
+        raise ValueError("이 앱에서 내보낸 프로필 파일이 아니에요.")
+    inner = doc.get("profile") if isinstance(doc.get("profile"), dict) else {}
+    final = free_name(config_dir, name or str(doc.get("name") or inner.get("name") or ""))
+    body = dict(inner)
+    body["name"] = final
+    body.setdefault("created", time.strftime("%Y-%m-%d %H:%M:%S"))
+    if not isinstance(body.get("updates"), dict):
+        body["updates"] = {}
+    _write(profile_path(config_dir, final), body)
+    bindings = doc.get("bindings")
+    if isinstance(bindings, dict) and bindings:
+        _write(bindings_file(config_dir, final), bindings)
+    return final
 
 
 def load_profile(config_dir: Path, name: str, known_keys: Optional[set] = None) -> Optional[Dict[str, float]]:
@@ -183,6 +317,11 @@ def delete_profile(config_dir: Path, name: str) -> bool:
     if not path.exists():
         return False
     path.unlink()
+    for extra in (bindings_file(config_dir, name), path.with_name(path.name + ".bak")):
+        try:
+            extra.unlink()
+        except OSError:
+            pass
     if get_active(config_dir, ignore_override=True) == name.strip():
         set_active(config_dir, None)
     return True
