@@ -1,0 +1,104 @@
+{
+ "created": "2026-11-12 00:59:14",
+ "seconds": 358.0,
+ "uses": {
+  "none": 54
+ },
+ "trained_on": 43,
+ "held_out": 10,
+ "candidate": {
+  "trained": "2026-11-12 00:58:08",
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up",
+   "swipe_tab_left",
+   "motion_f5"
+  ],
+  "training_mode": "fast",
+  "uses": {
+   "clicks": 0,
+   "clicks_seen": 0,
+   "rejected": 10,
+   "rejected_fired": 1
+  },
+  "misfires_per_min": 4.61,
+  "rules_misfires_per_min": 13.14,
+  "held_out_posture": {
+   "thumb_index": {
+    "rate": 0.813,
+    "total": 75,
+    "rules_rate": 1.0
+   },
+   "thumb_ring": {
+    "rate": 0.933,
+    "total": 30,
+    "rules_rate": 1.0
+   }
+  }
+ },
+ "current": {
+  "trained": "2026-11-08 19:40:07",
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "training_mode": "thorough",
+  "uses": {
+   "clicks": 0,
+   "clicks_seen": 0,
+   "rejected": 10,
+   "rejected_fired": 8
+  },
+  "misfires_per_min": 2.27,
+  "rules_misfires_per_min": 8.84,
+  "held_out_posture": {
+   "thumb_index": {
+    "rate": 0.938,
+    "total": 257,
+    "rules_rate": 0.708
+   },
+   "thumb_ring": {
+    "rate": 0.865,
+    "total": 89,
+    "rules_rate": 0.787
+   },
+   "thumb_middle": {
+    "rate": 0.742,
+    "total": 132,
+    "rules_rate": 0.576
+   },
+   "thumb_pinky": {
+    "rate": 0.729,
+    "total": 85,
+    "rules_rate": 0.647
+   },
+   "palm_side": {
+    "rate": 0.878,
+    "total": 90,
+    "rules_rate": 0.978
+   },
+   "v_sign": {
+    "rate": 1.0,
+    "total": 16,
+    "rules_rate": 1.0
+   },
+   "thumbs_up": {
+    "rate": 1.0,
+    "total": 60,
+    "rules_rate": 0.95
+   }
+  }
+ }
+}

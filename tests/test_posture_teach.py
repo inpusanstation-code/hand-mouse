@@ -1,0 +1,154 @@
+"""Teaching a shown hand shape (src/posture_teach.py): a small MLP on the joints, checked, applied, used by both
+posture functions only where the rules told that shape's examples otherwise."""
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+import src.posture_teach as pt
+from src.action_bindings import CompositeGestureDetector
+from src.pose_probe import hand_posture
+from tests.test_pose_probe_upside_down import FRAME as TODAY     # 2026-11-11 look, a frame no rule matched
+
+FIX = Path(__file__).with_name("fixtures")
+
+
+def _frames(name):
+    out = []
+    for f in json.loads((FIX / name).read_text(encoding="utf-8"))["frames"]:
+        lm = f["lm"] if isinstance(f, dict) else (f[1] if len(f) == 2 else f)
+        if lm:
+            out.append([list(p) + [0.0] * (3 - len(p)) for p in lm])
+    return out
+
+
+def _pts(lm):
+    return [SimpleNamespace(x=p[0], y=p[1], z=p[2]) for p in lm]
+
+
+def _negatives():
+    """'other': half-fist moving, ring contact, a scroll stroke, and the 11-10 upside-down V turned upright."""
+    lms = (_frames("half_fist_moving.json") + _frames("half_fist_ring_contact.json")
+           + _frames("scroll_grab_stroke_and_return.json")
+           + [[[p[0], 1.0 - p[1], p[2]] for p in lm] for lm in _frames("v_sign_down_20261110.json")])
+    x = np.array([pt.features(lm) for lm in lms], np.float32)
+    rules = np.array([hand_posture(_pts(lm), pt.ASPECT, taught=False) for lm in lms], dtype="<U24")
+    return {"x": x, "rule": rules, "rec": np.arange(len(lms), dtype=np.int32) % 4}
+
+
+def _teach(tmp_path):
+    down = _frames("v_sign_down_20261110.json")
+    rule = [hand_posture(_pts(lm), pt.ASPECT, taught=False) for lm in down]
+    ex = [{"label": "v_sign_down", "frames": down[:5], "rule_said": rule[:5] + [""], "aspect": pt.ASPECT},
+          {"label": "v_sign_down", "frames": down[5:], "rule_said": rule[5:] + [""], "aspect": pt.ASPECT}]
+    report = pt.train(ex, _negatives(), out=pt.CANDIDATE_PATH)
+    return report
+
+
+def test_examples_are_saved_as_joints_and_counted(tmp_path):
+    pt.save_example("v_sign_down", [TODAY], [""])
+    pt.save_example("v_sign_down", [TODAY], [""])
+    assert pt.example_counts() == {"v_sign_down": 2}
+    saved = json.loads(next(pt.EXAMPLES_DIR.glob("*.json")).read_text(encoding="utf-8"))
+    assert set(saved) == {"label", "created", "aspect", "rule_said", "frames"}          # no picture
+    assert pt.delete_examples("v_sign_down") == 2 and pt.example_counts() == {}
+
+
+def test_trained_on_one_day_it_knows_another_days_upside_down_v_but_not_the_upright_one(tmp_path):
+    report = _teach(tmp_path)
+    assert report["can_apply"] and report["false_rate"] == 0.0
+    model = pt.TaughtModel(json.loads(pt.CANDIDATE_PATH.read_text(encoding="utf-8")))
+    label, p = model.predict(_pts(TODAY))                       # 2026-11-11, not in the training
+    assert label == "v_sign_down" and p >= pt.THRESHOLD
+    upright = [[q[0], 1.0 - q[1], q[2]] for q in TODAY]
+    assert model.predict(_pts(upright))[0] == "other"
+
+
+def test_applied_model_fills_in_where_the_rules_gave_nothing_in_both_posture_functions(tmp_path):
+    _teach(tmp_path)
+    assert hand_posture(_pts(TODAY), pt.ASPECT) == ""           # not applied yet: the rules alone
+    assert pt.apply_candidate() and not pt.CANDIDATE_PATH.exists()
+    pt.reset_cache()
+    assert hand_posture(_pts(TODAY), pt.ASPECT) == "v_sign_down"
+    assert hand_posture(_pts(TODAY), pt.ASPECT, taught=False) == ""
+    assert CompositeGestureDetector._detect_base_posture(_pts(TODAY), "", set()) == "v_sign_down"
+    pt.turn_off()
+    pt.reset_cache()
+    assert hand_posture(_pts(TODAY), pt.ASPECT) == ""
+
+
+def test_the_model_replaces_only_what_the_rules_said_for_its_examples(tmp_path):
+    _teach(tmp_path)
+    model = pt.TaughtModel(json.loads(pt.CANDIDATE_PATH.read_text(encoding="utf-8")))
+    assert model.override(_pts(TODAY), "") == "v_sign_down"
+    assert model.override(_pts(TODAY), "thumb_pinky") == "thumb_pinky"    # never seen for these examples: kept
+
+
+def test_too_many_misfires_cannot_be_applied(tmp_path, monkeypatch):
+    monkeypatch.setattr(pt, "MAX_FALSE", -1.0)
+    assert not _teach(tmp_path)["can_apply"]
+
+
+def _thumb_out(lm, far=.9):
+    """The same hand with its thumb stretched away from the fingers (`far` palm lengths from its base)."""
+    import math
+    out = [list(p) for p in lm]
+    palm = math.hypot(lm[9][0] - lm[0][0], lm[9][1] - lm[0][1])
+    dx, dy = lm[2][0] - lm[1][0], lm[2][1] - lm[1][1]          # on along the thumb's own base: a straight thumb
+    n = math.hypot(dx, dy) or 1e-6
+    for joint, share in ((3, .5), (4, 1.0)):
+        out[joint] = [lm[2][0] + dx / n * far * palm * share, lm[2][1] + dy / n * far * palm * share, lm[2][2]]
+    return out
+
+
+def test_a_shape_taught_with_the_thumb_out_needs_the_thumb_out(tmp_path):
+    """2026-11-11 report: a fist turned over (the back of the hand down) was told as the taught "thumb to the right",
+    though the thumb was not out at all."""
+    fists = _frames("half_fist_moving.json")
+    shown = [_thumb_out(lm) for lm in fists[:20]]                       # what the person showed: the thumb well out
+    stats = pt.thumb_stats([{"label": "custom_1", "frames": shown}, {"label": "custom_9", "frames": fists[:20]}])
+    assert stats["custom_1"]["len"] > .8 and stats["custom_1"]["reach"] > .4
+    assert all(pt.thumb_ok(stats["custom_1"], lm) for lm in shown)
+    assert not any(pt.thumb_ok(stats["custom_1"], lm) for lm in fists)                      # the thumb is in: not it
+    assert not any(pt.thumb_ok(stats["custom_1"], lm) for lm in _frames("v_sign_down_20261110.json"))   # long, but on the fingers
+    assert all(pt.thumb_ok(stats["custom_1"], _thumb_out(lm, .75)) for lm in fists[20:40])  # out a little less: still it
+    assert all(pt.thumb_ok(stats["custom_9"], lm) for lm in fists)      # a shape taught with the thumb in: no thumb rule
+    assert pt.thumb_ok(None, fists[0]) and pt.thumb_ok({}, fists[0])
+    # the model keeps each shape's taught thumb and asks it before telling the shape
+    ex = [{"label": "custom_1", "frames": shown[:10], "rule_said": ["fist"], "aspect": pt.ASPECT},
+          {"label": "custom_1", "frames": shown[10:], "rule_said": ["fist"], "aspect": pt.ASPECT}]
+    pt.train(ex, _negatives(), out=pt.CANDIDATE_PATH)
+    assert pt.apply_candidate()
+    pt.reset_cache()
+    model = pt.active_model()
+    assert model.thumb["custom_1"]["reach"] > .4
+    model.predict = lambda *a, **k: ("custom_1", .99)                   # whatever the model says of the turned fist
+    assert model.override(_pts(fists[0]), "fist") == "fist"
+    assert model.override(_pts(shown[0]), "fist") == "custom_1"
+    # a model trained before the thumb was kept reads it from the saved examples
+    data = json.loads(pt.MODEL_PATH.read_text(encoding="utf-8"))
+    data.pop("thumb")
+    pt.MODEL_PATH.write_text(json.dumps(data), encoding="utf-8")
+    pt.save_example("custom_1", shown[:10], ["fist"])
+    pt.reset_cache()
+    assert pt.active_model().thumb["custom_1"]["reach"] > .4
+
+
+def test_a_shape_taught_with_a_finger_folded_is_not_told_with_that_finger_out():
+    """2026-11-12: "커스텀 등록한 검지만 펴기 동작이 창닫기 동작이랑 겹쳐서 작동". One example of the taught "index only"
+    had the little finger half out, the model was allowed to replace the rock sign, and a full rock sign ran both the
+    close-window question and the taught shape's command. The fingers are asked now, as the thumb is."""
+    import json
+    from pathlib import Path
+    from src import posture_teach as pt
+    doc = json.loads((Path(__file__).parent / "fixtures" / "index_point_vs_rock_20261112.json").read_text(encoding="utf-8"))
+    aspect = doc["aspect"]
+    stats = pt.finger_stats([{"label": "index_point", "aspect": aspect, "frames": doc["taught"]}])["index_point"]
+    assert stats["low"][0] >= pt.FINGER_OUT_3D and stats["high"][3] < pt.FINGER_OUT_3D     # index out, little finger in
+    assert all(pt.fingers_ok(stats, f, aspect) for f in doc["taught"])                     # the examples, the half-out one too
+    assert not any(pt.fingers_ok(stats, f, aspect) for f in doc["rock"])                   # the rock sign: another shape
+    assert not any(pt.plausible("index_point", f, aspect, None, stats) for f in doc["rock"])
+    assert all(pt.fingers_ok(None, f, aspect) for f in doc["rock"])                        # nothing known: nothing decided
+    folded = {"low": [1.9, 1.9, .8, .8], "high": [2.2, 2.2, 1.1, 1.1]}                     # taught with the middle finger out
+    assert not pt.fingers_ok(folded, doc["taught"][0], aspect)                             # ... and here it is folded
