@@ -571,3 +571,70 @@ def test_the_command_can_be_changed_and_the_line_stays_in_force(registry, tmp_pa
     assert registry.get_binding("thumb_ring")["action_value"] == "f8"
     history.undo(history.rows(registry)[0]["index"], registry)
     assert registry.get_binding("thumb_ring")["action_value"] == before["action_value"]
+
+def test_a_gesture_registered_without_an_ai_line_is_listed_and_deleted(registry, tmp_path):
+    """2026-11-12: '거꾸로 V 유지 -> 폴더 열기' was registered by an older copy of the app, worked, and was not on the AI
+    list (no history line), so it could not be seen or deleted there."""
+    from src.sequence import SequenceStore
+    comp = registry.register_composite_gesture("", "거꾸로 V 유지", "v_sign_down", "hold", "launch_app", r"%USERPROFILE%\Desktop\x",
+                                               hold_seconds=.4)
+    seqs = SequenceStore(tmp_path / "s.json")
+    seq = seqs.add("V 다음 주먹", ["v_sign", "fist"])
+    registry.set_binding(seq, "hotkey", "ctrl+t", track="sequence")
+    history = lb.History(tmp_path / "ai.json", tmp_path / "s.json")
+    rows = {r["gesture_key"]: r for r in history.rows(registry)}
+    assert rows[comp["key"]]["adopted"] and rows[comp["key"]]["current"] and rows[comp["key"]]["custom"]
+    assert rows[seq]["adopted"] and rows[seq]["current"]
+    assert "thumb_ring" not in rows                                   # built-in gestures are not adopted
+    assert len(history.rows(registry)) == 2                            # once only
+    history.delete(rows[comp["key"]]["index"], registry)
+    assert comp["key"] not in registry.composite_gestures and comp["key"] not in registry.bindings
+    history.delete(rows[seq]["index"], registry)
+    assert seq not in SequenceStore(tmp_path / "s.json").items and seq not in registry.bindings
+    assert history.rows(registry) == []
+
+
+def test_deleting_a_made_gesture_removes_it_even_when_its_line_is_out_of_date(registry, tmp_path):
+    """2026-11-12 ("삭제한 동작이 남아서 작동되게 하는일은 없게"): a line no longer in force only lost the line, and a line
+    where the AI re-bound a made gesture left the gesture registered."""
+    history = lb.History(tmp_path / "ai.json")
+    comp = registry.register_composite_gesture("", "손 펴기 유지", "open_hand", "hold", "hotkey", "f5", hold_seconds=1.0)
+    lb.apply(lb.check(ai({"gesture_key": comp["key"], "action_value": "f6"}), gestures(registry))["proposals"], registry,
+             history=history)
+    line = next(r for r in history.rows(registry) if not r.get("adopted"))
+    assert line["current"] and not line.get("created")
+    registry.set_binding(comp["key"], "hotkey", "f9", track="composite")        # changed elsewhere afterwards
+    rows = history.rows(registry)
+    stale = next(r for r in rows if r["index"] == line["index"])
+    assert not stale["current"]
+    assert any(r.get("adopted") and r["current"] and r["gesture_key"] == comp["key"] for r in rows)   # listed as it is now
+    history.delete(stale["index"], registry)
+    assert comp["key"] not in registry.composite_gestures and comp["key"] not in registry.bindings
+    assert all(not r["current"] for r in history.rows(registry))
+
+
+def test_a_deleted_gesture_is_kept_and_can_be_brought_back(registry, tmp_path):
+    """2026-11-12: "손바닥 폈을때 바탕화면 보기 명령어 어디갔냐?" - deleted from the list, nothing kept it."""
+    from src.sequence import SequenceStore
+    comp = registry.register_composite_gesture("comp_open_hand_hold", "손 펴기 유지", "open_hand", "hold", "mouse_action",
+                                               "show_desktop", hold_seconds=1.0)
+    seqs = SequenceStore(tmp_path / "s.json")
+    seq = seqs.add("V 다음 주먹", ["v_sign", "fist"])
+    registry.set_binding(seq, "hotkey", "ctrl+t", track="sequence")
+    history = lb.History(tmp_path / "ai.json", tmp_path / "s.json")
+    for key in (comp["key"], seq):
+        row = next(r for r in history.rows(registry) if r["gesture_key"] == key)
+        history.delete(row["index"], registry)
+    assert comp["key"] not in registry.composite_gestures
+    gone = history.deleted_rows(registry)
+    assert [g["key"] for g in gone] == [seq, comp["key"]] and "Win + D" in gone[1]["after"]
+    history.restore(gone[1]["trash_index"], registry)
+    assert registry.composite_gestures[comp["key"]]["hold_seconds"] == 1.0
+    assert registry.get_binding(comp["key"])["action_value"] == "show_desktop"
+    history.restore(gone[0]["trash_index"], registry)
+    assert seq in SequenceStore(tmp_path / "s.json").items and registry.get_binding(seq)["action_value"] == "ctrl+t"
+    assert history.deleted_rows(registry) == []
+    rows = {r["gesture_key"]: r for r in history.rows(registry)}
+    assert rows[comp["key"]]["current"] and rows[seq]["current"]          # back on the list
+    with pytest.raises(ValueError):
+        history.restore(gone[1]["trash_index"], registry)                # once

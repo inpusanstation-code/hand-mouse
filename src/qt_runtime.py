@@ -32,7 +32,7 @@ from src.failure_log import FailureRecorder
 from src.finger_kinematics import CausalFingerTracker
 from src.close_sign import CloseSign
 from src.toggle_sign import ToggleSign
-from src.motion_mode import ACTION_LABELS, MotionMode
+from src.motion_mode import ACTION_LABELS, MotionMode, hand_features as motion_hand_features
 from src.palm_axes import PalmAxesCalibration, valid_axes
 from src.elbow_pivot import ElbowPivot
 from src.pose_tracker import DEFAULT_POSE_MODEL, PoseTracker, pick_arm
@@ -46,6 +46,8 @@ from src.use_log import UseLog, read_events as read_use_events, shadow_verdict
 from src.online.use_import import CLICK_ACTIONS, click_base, click_key, click_name, learnable as use_import_learnable
 from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
+from src.other_hand_motion import OtherHandMotion, other_hand
+from src.speed_dial import STEP_DEG, SpeedDial
 from src.crop_recorder import CropRecorder, crops_path
 from src.roi_tracker import RoiTracker, hand_box
 from src.hand_selection import HandFollower, _center_and_size, merge_duplicates, selected_detection
@@ -136,6 +138,7 @@ class UiState:
     gate_model: str = "tcn"             # "tcn" = models/gesture_tcn.onnx, "online" = the model learned from this person
     virtual_hand: bool = False          # the hand on the screen: a box on the camera image maps to the monitor (src/virtual_hand.py)
     virtual_box: Tuple[float, float, float, float] = DEFAULT_BOX
+    other_box: Tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)   # the other hand's own box (drawn hand only)
     screen_ratio: float = 1.0           # physical / logical pixels of the main screen (the drawn hand is in logical ones)
     rec_focus: str = ""                 # guided recording of one gesture only (training center "집중 녹화"); "" = all
     model_version: int = 0              # +1 when the training center saved a new model: reload the gate
@@ -143,6 +146,7 @@ class UiState:
     rec_paused: bool = False
     rec_discard: int = 0                # +1 per press of "녹화 취소 (버리기)"
     point_mode: bool = True             # pointing mode (src/point_mode.py), switched in the settings window
+    other_motion: bool = True           # motion mode with the other hand (src/other_hand_motion.py), the settings window
     point_settings: Optional[Dict[str, Any]] = None   # its details (src/point_mode.SETTINGS); None = defaults
     signal_text: bool = True            # the name of the signal written beside the drawn hand (settings window)
 
@@ -177,6 +181,7 @@ class Snapshot:
     registration: Optional[Dict[str, Any]] = None  # adding a new gesture: state, demo, seconds, report (src/online/registration.py)
     online_gesture: str = ""              # a registered gesture recognised right now (shown on the preview, sends nothing)
     virtual_hand: Optional[Dict[str, Any]] = None  # the hand drawn at the cursor (src/virtual_hand.py), None = no hand
+    other_hand: Optional[Dict[str, Any]] = None    # the other hand drawn on the screen too (2026-11-12), None = none
     preview_hand: Optional[Dict[str, Any]] = None  # skeleton drawn over the preview by src/HandSkeleton.qml (src/finger_overlay.py)
     finger: Optional[Dict[str, Any]] = None        # fingertips drawn next to the cursor by src/FingerTracker.qml
     point: Optional[Dict[str, Any]] = None         # pointing mode: kind, dwell progress 0..1, on a file (src/point_mode.py)
@@ -354,6 +359,17 @@ class QtRuntime:
         self._hand_follower = HandFollower()
         self._applied_profile = engine.profile_name
         self.motion = MotionMode(engine.config)
+        self.other_motion = OtherHandMotion(engine.config)   # the other hand swipes (src/other_hand_motion.py, 2026-11-12)
+        self._other_hand = None
+        self._other_last, self._other_last_t = None, -1e9   # where the other hand was (centre, size), and when
+        self.speed_dial = SpeedDial()     # the other hand's thumb + index tap -> a dial for YouTube's speed (src/speed_dial.py)
+        self.seek_dial = SpeedDial("seek")   # ... thumb + middle tap -> the same dial for seeking 5 s steps
+        self._yt_rate: Optional[float] = None   # YouTube's speed as last set by the speed dial (None: not known this run)
+        self._frame_wh = (1280, 720)
+        # the other hand drawn on the desktop (2026-11-12, "왼쪽 스켈레톤도 모니터에 같이"): its own size and joint filters
+        self._other_size, self._other_smoother = HandSize(), ViewSmoother()
+        self._other_view: Optional[Dict[str, Any]] = None
+        self._other_seen_t = -1e9
         self.close_sign = CloseSign(engine.config)
         self.toggle_sign = ToggleSign(engine.config)
         self.finger_tracker = CausalFingerTracker()
@@ -713,7 +729,8 @@ class QtRuntime:
             self._hand_follower.reset()
         else:
             if engine.config.get("hand_follow_enabled", True):
-                chosen = self._hand_follower.select(detections, ui.control_hand, camera.config.mirror, t0)
+                chosen = self._hand_follower.select(detections, ui.control_hand, camera.config.mirror, t0,
+                                                    avoid=self._other_last if t0 - self._other_last_t <= .5 else None)
                 if self._hand_follower.followed:
                     self._det_path += "+follow"
             else:
@@ -721,6 +738,13 @@ class QtRuntime:
             detections = [chosen] if chosen is not None else []
             if detections:
                 self._hand_seen_t = t0
+        # the other hand (not the control hand, apart from it): a motion hand of its own
+        self._other_hand = (other_hand(all_detections, detections[0] if detections else None, ui.control_hand,
+                                       camera.config.mirror,
+                                       last=self._other_last if t0 - self._other_last_t <= .5 else None)
+                            if ui.stage == "main" else None)
+        if self._other_hand is not None:
+            self._other_last, self._other_last_t = _center_and_size(self._other_hand), t0
         self.mouse.hand_size = self._hand_width_fraction(detections[0].landmarks, frame.shape[1], frame.shape[0]) if detections else None
         live = ui.stage == "main" and not self.paused and not self.draw.active and not ui.calibrating
         # which hand the shapes of this frame are judged for: an open hand showing its back is told from its palm by it
@@ -836,6 +860,9 @@ class QtRuntime:
         self._engine_raw = None     # what the rule engine itself said this frame (guided capture overwrites result.action)
         toggle_hold = (not palm_calibrating) and self._toggle_sign(t0, ui, detections)
         motion_active = (not toggle_hold) and self._motion(t0, ui, detections)
+        self._frame_wh = (frame.shape[1], frame.shape[0])
+        self._other_motion_step(t0, ui, motion_active or guided_recording or palm_calibrating)
+        self._other_draw(t0, ui, frame.shape[1], frame.shape[0])
         if motion_active and detections and not guided_recording:
             self._motion_composites(t0, detections[0])
         else:
@@ -1029,7 +1056,8 @@ class QtRuntime:
                                                     gesture=result.active_gesture))
                 switching = bool(mouse.switcher_open)    # the task switcher: no page scroll, no drag; the box still places the cursor
                 # (a dragging hand curls its other fingers: it is not a fist that grabs the page)
-                fist_seen = result.active_gesture == "fist" and not command_hold and not switching and not drag_on
+                fist_seen = ((result.active_gesture == "fist" or self._loose_fist(hand.landmarks))
+                             and not command_hold and not switching and not drag_on)
                 fist_mode, fist_fire = self.holds.step("vh_fist", fist_seen, self._move_binding("vh_fist") if fist_seen else None,
                                                        t0, Grip.START)
                 if fist_fire:
@@ -1407,7 +1435,8 @@ class QtRuntime:
             metrics=self._metrics, tracking=tracking, failures=self._pending_failures,
             recent_line=self._pending_recent, message=self._pending_message,
             motion=(self.motion.active, self.motion.remaining(t0), self._motion_last, self.motion.entering(t0),
-                    self.motion.leaving(t0)),
+                    self.motion.leaving(t0),
+                    (self.other_motion.active, self.other_motion.arming(t0), self._other_name())),
             toggle_progress=self.toggle_sign.progress(t0),
             close_sign=(self.close_sign.progress(t0), self.close_sign.pending(t0),
                         self._close_notice if time.perf_counter() < self._close_notice_until else ""),
@@ -1417,7 +1446,8 @@ class QtRuntime:
             registration=self._registration_view,
             online_gesture=self._online_gesture if t0 < self._online_gesture_until else "",
             virtual_hand=self._virtual_hand,
-            preview_hand=self._preview_hand,
+            other_hand=self._other_view,
+            preview_hand=self._preview_with_other(t0),
             pose_probe=self._pose_probe_view(t0),
             pose_probe_shot=((self.pose_probe.shot_seq, self.pose_probe.shot, self.pose_probe.clip)
                              if self.pose_probe.shot_seq else None),
@@ -3155,36 +3185,273 @@ class QtRuntime:
                     self.pointer.reset()
                 self._motion_last = ""
                 self._say("모션 모드 켜짐 (시뮬레이션: 키는 보내지 않아요)" if sim
-                          else "모션 모드 켜짐: 손을 펴고 좌우로 쓸어 보세요", 3.0)
+                          else "모션 모드 켜짐: 손 펴고 쓸면 탭 이동, 검지만 펴고 쓸면 앞으로·뒤로", 3.0)
             elif event.kind == "exit":
                 self._say(f"모션 모드 꺼짐 ({event.info.get('why')})", 2.0)
             elif event.kind == "close_ask":
                 self._motion_last = "창 닫기? 한 번 더 아래로"
                 self._say("창을 닫을까요? 3초 안에 손을 올렸다 한 번 더 아래로 쓸면 닫습니다", 3.0)
             elif event.kind == "swipe":
-                from src.gesture_catalog import BY_KEY, MOTION_TARGETS
-                target_key = MOTION_TARGETS.get(event.action, event.action)
-                confirmed = self._intent(target_key, t0)
-                if sim:                            # what it would have sent, nothing sent
-                    self._motion_last = "시뮬레이션: " + self._motion_would(event.action, target_key, BY_KEY)
-                    sent = None
-                else:
-                    sent = confirmed and self.mouse.send_motion_action(event.action)
-                if sent is None:
-                    pass
-                elif sent:
-                    if event.action in ACTION_LABELS:
-                        self._motion_last = ACTION_LABELS[event.action]
-                    elif target_key in BY_KEY:
-                        self._motion_last = BY_KEY[target_key].name
-                    else:
-                        self._motion_last = event.action
-                else:
-                    self._motion_last = "TCN 동작 확인 안 됨" if not confirmed else "실행 안 됨"
+                self._motion_last, sent = self._motion_send(event, t0, sim)
                 self._say(f"모션: {self._motion_last}" + (" (실행 안 함)" if sent is None else ""), 1.5)
             if self.failures.trigger(t0, f"motion_{event.kind}", note=json.dumps(event.info, ensure_ascii=False)):
                 pass
         return self.motion.active
+
+    def _motion_send(self, event, t0: float, sim: bool, check: bool = True):
+        """Send a motion swipe's command (or, with the control off, only say what it would send). (text, sent); sent is None
+        when nothing was meant to be sent. `check`: the TCN check (it watches the control hand: off for the other hand)."""
+        from src.gesture_catalog import BY_KEY, MOTION_TARGETS
+        target_key = MOTION_TARGETS.get(event.action, event.action)
+        confirmed = self._intent(target_key, t0) if check else True
+        if sim:                                    # what it would have sent, nothing sent
+            return "시뮬레이션: " + self._motion_would(event.action, target_key, BY_KEY), None
+        sent = confirmed and self.mouse.send_motion_action(event.action)
+        if sent:
+            if event.action in ACTION_LABELS:
+                return ACTION_LABELS[event.action], True
+            if target_key in BY_KEY:
+                return BY_KEY[target_key].name, True
+            return event.action, True
+        return ("TCN 동작 확인 안 됨" if not confirmed else "실행 안 됨"), False
+
+    def _preview_with_other(self, t0: float):
+        """The preview skeleton, plus the other hand (2026-11-12, "왼손도 화면에 스켈레톤 다른색깔로"): its joints and the
+        state of its motion ("idle" seen, "arming" being held open, "on" its swipes count), drawn in its own colour."""
+        other = self._other_hand
+        if other is None or self.ui.stage != "main":
+            return self._preview_hand
+        om = self.other_motion
+        state = "on" if om.active else ("arming" if om.arming(t0) > 0 else "idle")
+        out = dict(self._preview_hand or {})
+        out["other"] = {"lm": [[round(float(p.x), 4), round(float(p.y), 4)] for p in other.landmarks], "state": state}
+        return out
+
+    OTHER_KEEP = .5      # s the other hand stays drawn (faded) through a dropout: small moving hands drop out often
+    DIAL_QUIET = .6      # s after a dial is closed by a fist in which the other hand's swipes are not read
+
+    def _other_draw(self, t0: float, ui, fw: int, fh: int) -> None:
+        """The other hand drawn on the desktop like the virtual hand. Its look is the settings window's "다른 손" colour; its
+        state as on the preview.
+
+        2026-11-12 ("양손이 따로 노는데 … 싱크"): it was placed by its own place on the whole camera image (the image = the
+        monitor), the control hand by its place in the virtual-hand box (the box = the monitor) - two maps, so hands
+        side by side in front of the camera were drawn apart on the screen by more than they were. Tying it to the control
+        hand (same day) was "더 번거롭다" ("따로 놀되 좀더 싱크가 맞게"): now each hand moves on its own but both go
+        through the same box -> monitor map. That left the left hand stuck in the monitor's left corner (it sits left of
+        the control hand's box, "벗어나기가 힘들다"), so it has a box of its own (`ui.other_box`, drawn on the preview with
+        [왼손 영역 그리기]; the whole camera image until drawn)."""
+        on = (ui.stage == "main" and ui.virtual_hand and ui.other_motion and not ui.use_index_pointer)
+        hand = self._other_hand if on else None
+        dial = (self.speed_dial.view() or self.seek_dial.view()) if on else None
+        if hand is None:
+            # an open dial stays on the screen, faded, until a fist closes it (2026-11-12: "주먹으로 종료하기 전까지는
+            # 게이지가 이유없이 없어지지 않게") - a dropped-out hand does not take it away
+            if self._other_view is not None and on and (t0 - self._other_seen_t <= self.OTHER_KEEP or dial is not None):
+                self._other_view = {**self._other_view, "lost": True, "dial": dial}
+            else:
+                self._other_view = None
+                self._other_size.reset()
+                self._other_smoother.reset()
+            return
+        lm = hand.landmarks
+        view = virtual_hand_view(lm, fw, fh, (), "none", size=self._other_size(lm, fw, fh, t0))
+        if view is None:
+            return
+        self._other_seen_t = t0
+        cx, cy = palm_centre(lm)
+        box = getattr(ui, "other_box", None)
+        if box is not None and valid_box(box):
+            x0, y0, x1, y1 = box
+            cx, cy = (cx - x0) / (x1 - x0), (cy - y0) / (y1 - y0)
+        om = self.other_motion
+        self._other_view = {"pts": self._other_smoother(view["pts"], t0), "dial": self.speed_dial.view() or self.seek_dial.view(),
+                            "pos": [round(min(1.0, max(0.0, cx)), 4), round(min(1.0, max(0.0, cy)), 4)],
+                            "state": "on" if om.active else ("arming" if om.arming(t0) > 0 else "idle"), "lost": False}
+
+    # 2026-11-12 ("주먹 스크롤이 적용 안되는 경우가 잦다"): of the 43 fists held 8 frames and more in that day's logs the engine
+    # read 13 as no fist: the curl just over its start limit .95 with the thumb along the side (1.04-1.05), a thumb half
+    # out taken for the thumbs-up pose (it does not ask where the thumb points), the thumb on the index taken for a
+    # thumb + index pinch (which in the virtual hand has no job). In the virtual hand a fist is also: every finger curled to
+    # LOOSE_FIST (engine measure), the index to .1 less, the thumb not pointing up, the thumb + index not closed for a click.
+    # Same logs: 30 -> 35 of 43 grabbed. Recordings, runs of 5 such frames per minute: rest 1.22 -> 1.26, thumb + index
+    # pinching 2.85 -> 3.53, fist strokes 9.3 -> 15.4.
+    LOOSE_FIST = (1.05, 1.0)
+
+    def _loose_fist(self, landmarks) -> bool:
+        if self.shape_pinch.closed or len(landmarks) != 21:
+            return False
+        r = self.engine.finger_curl_ratios(landmarks)
+        if max(r) > self.LOOSE_FIST[0] or r[0] > self.LOOSE_FIST[1]:
+            return False
+        f = motion_hand_features(landmarks)
+        return not (f["thumb_straight"] >= .85 and f["thumb_up"] >= .7)
+
+    def _other_name(self) -> str:
+        side = self.ui.control_hand
+        return "왼손" if side == "Right" else ("오른손" if side == "Left" else "다른 손")
+
+    def _other_motion_step(self, t0: float, ui, held_off: bool) -> None:
+        """The other hand's motion mode (src/other_hand_motion.py): shown open it arms, then its swipes send the motion
+        commands while the control hand keeps the cursor. Not while motion mode itself is on (the control hand swipes
+        then), a guided recording or a calibration runs, nor with `motion_other_hand` off."""
+        om = self.other_motion
+        on = (ui.other_motion and float(self.engine.config.get("motion_other_hand", om.cfg("motion_other_hand"))) >= 1.0
+              and ui.stage == "main" and not ui.calibrating and not held_off)
+        if not on:
+            if om.active or om.arming(t0) > 0:
+                om.reset(t0)
+            for d in (self.speed_dial, self.seek_dial):
+                if d.active:
+                    d.reset()
+            return
+        hand = self._other_hand
+        if self._speed_dial_step(t0, hand):
+            return                                   # the dial has the hand: no swipes meanwhile
+        event = om.step(t0, hand.landmarks if hand is not None else None)
+        miss = om.motion.last_miss if om.active else None
+        if miss and abs(float(miss.get("dx", 0))) >= .15 and miss is not getattr(self, "_other_miss_seen", None):
+            # a big stroke of the other hand that sent nothing: keep the seconds around it (2026-11-12: index-alone swipes
+            # were refused and nothing showed why)
+            self._other_miss_seen = miss
+            self.failures.trigger(t0, "motion_other_miss", note=json.dumps(miss, ensure_ascii=False))
+        if event is None:
+            return
+        who = self._other_name()
+        sim = self.paused
+        if event.kind == "enter":
+            self._say(f"{who} 모션: 손 펴고 쓸면 탭, 검지만 펴고 쓸면 앞으로·뒤로" + (" (시뮬레이션)" if sim else ""), 1.5)
+        elif event.kind == "exit":
+            self._say(f"{who} 모션 끝", 1.0)
+        elif event.kind == "swipe":
+            text, sent = self._motion_send(event, t0, sim, check=False)
+            self._motion_last = f"{who}: {text}"
+            self._say(f"{who} 모션: {text}" + (" (실행 안 함)" if sent is None else ""), 1.5)
+        self.failures.trigger(t0, f"motion_other_{event.kind}", note=json.dumps(event.info, ensure_ascii=False))
+
+    def _speed_dial_step(self, t0: float, hand) -> bool:
+        """The other hand's dials (src/speed_dial.py): thumb + index tap = YouTube's speed, thumb + middle tap = seeking.
+        True while one is on (or just switched); one at a time. Keys go to a YouTube window only (elsewhere Shift+. types a
+        ">"), and with the control off it only says what it would do."""
+        fw, fh = self._frame_wh
+        lm = hand.landmarks if hand is not None else None
+        dials = (self.speed_dial, self.seek_dial)
+        self.speed_dial.known_speed = self._yt_rate     # it opens on the speed it was closed on (2026-11-12)
+        events = {d.kind: d.step(t0, lm, fw, fh) for d in dials}
+        if any("off" in events[d.kind] for d in dials):
+            # closed by a fist: that fist must not go on as a fist swipe (YouTube's speed motions are fist swipes)
+            self._dial_quiet_until = t0 + self.DIAL_QUIET
+            self.other_motion.reset(t0)
+        who = self._other_name()
+        seek = self.seek_dial
+        seek.rate_hint = self._yt_rate
+        if seek.active:
+            # the seek dial is open: the thumb + index only fires it, as the fingers close, however long they stay (2026-11-12:
+            # "연속으로 할수가 없다 … 엄지검지로 pinch하면 엄지중지 감기 바가 사라짐" - a pinch held .4 s opened the speed dial
+            # and closed this one, one let go after .45 s was not a tap and the dial closed for want of use)
+            if self.speed_dial.active:
+                self.speed_dial.close()
+            events["speed"] = [e for e in events["speed"] if e != "on"]     # (no switching to the speed dial from here)
+            if "press" in events["speed"]:
+                seek.touch(t0)
+                self._seek_fire()
+                return True
+        for d in dials:
+            if "on" in events[d.kind]:
+                for other in dials:
+                    if other is not d and other.active:
+                        other.close()
+                self.other_motion.reset(t0)          # (a swipe half read before the tap is dropped)
+                step = f"{STEP_DEG:g}°"
+                if d.kind == "seek":
+                    self._say(f"{who} 이동 다이얼: 손 방향으로 초를 정하고(11시 = 0초, {step}에 5초) 엄지+검지를 집을 때마다 이동 · 주먹을 쥐면 끝", 2.0)
+                else:
+                    # 2026-11-12 ("주먹으로 종료한 배속을 계속 적용"): it opens on the speed it was last closed on and sends
+                    # nothing; turning goes on from there. Not known yet this run: the first turn sets YouTube to the dial.
+                    self._say(f"{who} 배속 다이얼 {d.speed():g}배" + ("" if d.synced else " (돌리면 이 값부터 맞춰요)")
+                              + f": 시계 방향 {step}마다 빠르게, 반대로 느리게 · 주먹을 쥐면 끝", 2.0)
+                return True
+        if "off" in events["seek"]:
+            self._say(f"{who} 이동 다이얼 끝", 1.0)
+            return True
+        if seek.active or t0 < getattr(self, "_dial_quiet_until", -1.0):
+            return True
+        dial = self.speed_dial
+        ev = events["speed"]
+        if not ev:
+            return dial.active
+        n = sum(1 for e in ev if e == "faster") - sum(1 for e in ev if e == "slower")
+        if "off" in ev:
+            # a closing fist gives back the steps the curling hand turned (SpeedDial UNDO_S): send those first
+            if n and dial.synced:
+                press = self._youtube_press(f"배속 {dial.speed():g}배")
+                if press is not None:
+                    press("yt_speed_up" if n > 0 else "yt_speed_down", abs(n))
+                    self._yt_rate = dial.speed()
+            self._say(f"{who} 배속 다이얼 끝" + (f" · {dial.speed():g}배 유지" if dial.synced else ""), 1.2)
+            return True
+        if not n:
+            return dial.active                       # (a lone short tap: nothing for the speed dial)
+        label = f"배속 {dial.speed():g}배"
+        if not dial.synced:
+            if self._speed_sync(dial):
+                self._say(label, 1.0)
+            return True
+        press = self._youtube_press(label)
+        if press is None:
+            return True
+        press("yt_speed_up" if n > 0 else "yt_speed_down", abs(n))
+        self._yt_rate = dial.speed()
+        self._say(label, 1.0)
+        return True
+
+    def _speed_sync(self, dial) -> bool:
+        """Put YouTube on the dial's speed whatever it was: down to its floor, then up (YouTube does not tell its speed)."""
+        press = self._youtube_press(f"배속 {dial.speed():g}배")
+        if press is None:
+            return False
+        down, up = dial.sync_keys()
+        press("yt_speed_down", down)
+        press("yt_speed_up", up)
+        dial.synced = True
+        self._yt_rate = dial.speed()
+        return True
+
+    def _youtube_press(self, label: str):
+        """A function that sends a YouTube key n times, or None when nothing is to be sent (the control off: told only; another
+        window in front: said so)."""
+        if self.paused:
+            self._say(f"시뮬레이션 · {label} (실행 안 함)", 1.0)
+            return None
+        fg = self.mouse.foreground_info() if not self.mouse.dry_run else {"title_full": "YouTube"}
+        if "youtube" not in (str(fg.get("title_full") or fg.get("title") or "")).lower():
+            self._say(f"{label} · 유튜브 창이 앞에 있을 때만 보내요", 1.2)
+            return None
+        reg = get_action_registry()
+
+        def press(value, times):
+            for _ in range(times):
+                reg.execute_resolved_action({"action_type": "youtube_key", "action_value": value},
+                                            dry_run=self.mouse.dry_run, mouse_controller=self.mouse)
+        return press
+
+    def _seek_fire(self) -> None:
+        """Send the seek dial's amount: 10 s chunks by J / L (letter keys: they do not walk a focused menu like the arrows), a
+        5 s rest by an arrow."""
+        delta = self.seek_dial.seconds()
+        if not delta:
+            self._say("0초 · 손을 돌려 초를 정한 뒤 집어요", 1.2)
+            return
+        label = f"{abs(delta)}초 {'앞으로' if delta > 0 else '뒤로'}"
+        if self._yt_rate and abs(self._yt_rate - 1.0) > 1e-6:
+            label += f" (유튜브 {self._yt_rate:g}배속: 실제 {abs(delta) * self._yt_rate:g}초)"
+        press = self._youtube_press(label)
+        if press is None:
+            return
+        tens, rest = divmod(abs(delta), 10)
+        press("yt_forward_10" if delta > 0 else "yt_rewind_10", tens)
+        press("yt_forward_5" if delta > 0 else "yt_rewind_5", rest // 5)
+        self._say(label, 1.0)
 
     def _motion_composites(self, t0: float, hand) -> None:
         """Motion mode is on: the composite gestures marked "motion mode only" (2026-11-11 request: a gesture made in
@@ -3243,6 +3510,12 @@ class QtRuntime:
             "dk": getattr(g, "last_desktop", None),            # show-desktop posture: tuck, hold, activity
             "motion": True if self.motion.active else None,
             "mo_miss": self.motion.last_miss if self.motion.active else None,   # biggest refused stroke and why
+            # the other hand (src/other_hand_motion.py, 2026-11-12): its joints, its motion state and its biggest refused stroke
+            "olm": ([[round(float(p.x), 4), round(float(p.y), 4), round(float(getattr(p, "z", 0.0)), 4)]
+                     for p in self._other_hand.landmarks] if self._other_hand is not None else None),
+            "omo": (("on" if self.other_motion.active else "arming" if self.other_motion.arming(t0) > 0 else "idle")
+                    if self._other_hand is not None else None),
+            "omiss": self.other_motion.motion.last_miss if self.other_motion.active else None,
             "sign": [self.close_sign.last_pose, round(self.close_sign.progress(t0), 2), round(self.toggle_sign.progress(t0), 2)],   # rock sign pose?, its hold progress, V sign progress
             "pk": getattr(g, "last_pinky", None),               # thumb+pinky acceptance conditions
             "hold": getattr(g, "last_hold", None),   # thumb+index: (hold dist, release thr, tip dist)

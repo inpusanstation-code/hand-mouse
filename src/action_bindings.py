@@ -60,6 +60,12 @@ YOUTUBE_KEY_PRESETS: Dict[str, Dict[str, Any]] = {
     "yt_speed_down": {"keys": ["shift", ","], "label": "유튜브 배속 느리게 (Shift+<)", "badge": "YT 배속- (Shift+<)"},
     "yt_vol_up": {"keys": ["up"], "label": "유튜브 볼륨 크게 (↑)", "badge": "YT 볼륨+ (↑)"},
     "yt_vol_down": {"keys": ["down"], "label": "유튜브 볼륨 작게 (↓)", "badge": "YT 볼륨- (↓)"},
+    # Shorts by the mouse wheel at the middle of the window (2026-11-12: ↑/↓ go to whatever has the keyboard focus, and once
+    # that was YouTube's left menu the arrows walked through the menu instead of the Shorts - "처음에 한번만 되고 그다음은
+    # 왼쪽 사이드바가 신호를 뺐어간다"). The wheel goes to what is under the pointer, so the pointer is put on the middle of
+    # the window for the notch and back at once.
+    "yt_short_next": {"keys": [], "wheel": -1, "label": "유튜브 다음 쇼츠 (창 가운데에서 휠 아래로)", "badge": "YT 다음 쇼츠"},
+    "yt_short_prev": {"keys": [], "wheel": 1, "label": "유튜브 이전 쇼츠 (창 가운데에서 휠 위로)", "badge": "YT 이전 쇼츠"},
     "media_play_pause": {"keys": ["playpause"], "label": "시스템 미디어 재생/일시정지", "badge": "미디어 재생/정지"},
     "media_vol_up": {"keys": ["volumeup"], "label": "시스템 볼륨 올리기", "badge": "시스템 볼륨+"},
     "media_vol_down": {"keys": ["volumedown"], "label": "시스템 볼륨 내리기", "badge": "시스템 볼륨-"},
@@ -201,6 +207,7 @@ DEFAULT_GESTURE_BINDINGS: Dict[str, Dict[str, Any]] = {
         "enabled": True,
         "app_overrides": [],
     },
+    # 2026-11-12: the index alone swiped left = back, right = forward; the open hand left = the previous tab, right = the next
     "swipe_left": {
         "gesture_key": "swipe_left",
         "track": "motion",
@@ -554,6 +561,33 @@ def format_action_detail(action_type: str, action_value: str, app_overrides: Opt
             parts.append(f"{app_m} 실행 중 → {ov_lbl}")
         return f"{base} (앱 조건: {', '.join(parts)})"
     return base
+
+
+def wheel_at_window_middle(notches: int) -> bool:
+    """One wheel turn (`notches` > 0 = up) at the middle of the foreground window, the pointer put back right after.
+    (Its own user32 handle: `ctypes.windll.user32` is shared with the rest of the process, see point_mode._user32.)"""
+    import sys
+    if sys.platform != "win32":
+        pyautogui.scroll(int(notches))
+        return True
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_size_t]
+    hwnd = user32.GetForegroundWindow()
+    rect, back = wintypes.RECT(), wintypes.POINT()
+    if not hwnd or not user32.GetWindowRect(hwnd, ctypes.byref(rect)) or rect.right <= rect.left:
+        return False
+    user32.GetCursorPos(ctypes.byref(back))
+    user32.SetCursorPos((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+    MOUSEEVENTF_WHEEL = 0x0800
+    user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, ctypes.c_uint32(120 * int(notches)).value, 0)
+    user32.SetCursorPos(back.x, back.y)
+    return True
 
 
 class ActionBindingRegistry:
@@ -1126,6 +1160,12 @@ class ActionBindingRegistry:
 
         if atype == "youtube_key":
             yt = YOUTUBE_KEY_PRESETS.get(aval)
+            if yt and yt.get("wheel"):
+                if mouse_controller is not None and hasattr(mouse_controller, "event_log"):
+                    mouse_controller.event_log.append(f"youtube:{aval}")
+                if not dry_run and not wheel_at_window_middle(int(yt["wheel"])):
+                    return False, "창을 찾지 못함"
+                return True, badge
             keys = list(yt["keys"]) if yt else parse_hotkey_keys(aval)
             if not keys:
                 return False, "알 수 없는 YouTube 기능키"

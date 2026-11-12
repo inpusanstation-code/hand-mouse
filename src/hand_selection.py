@@ -116,13 +116,20 @@ class HandFollower:
         limit = max(self.reach * self._size, self.min_reach)
         return abs(center[0] - self._center[0]) <= limit and abs(center[1] - self._center[1]) <= limit
 
-    def select(self, detections, side, mirrored, now):
+    def select(self, detections, side, mirrored, now, avoid=None):
+        """`avoid` = (centre, size) of the other hand a moment ago (src/other_hand_motion.py): a detection there, and not where
+        the control hand was, is that hand - not the control hand, by the strict reading or by following (2026-11-12: with
+        the right hand out of view the left one was followed as the control hand for up to 3 s and moved the cursor)."""
         if side != self._side:
             self.reset()
             self._side = side
         self.followed = False
         recent = self._center is not None and self._seen_at is not None and now - self._seen_at <= self.max_gap
         detections = merge_duplicates(detections, (self._center, self._size) if recent else None)
+        if avoid is not None and avoid[1] > 0:
+            from src.other_hand_motion import near
+            mine = (self._center, self._size) if recent else None
+            detections = [d for d in detections if not near(d, avoid) or near(d, mine)]
         chosen = selected_detection(detections, side, mirrored)
         if chosen is not None:
             self._remember(*_center_and_size(chosen), now)

@@ -181,10 +181,10 @@ def test_motion_mode_suspends_the_pointer_and_sends_the_swipe_command(tmp_path):
     rt.ui = UiState(stage="main", control_hand="Right", click_style="off", motion_request=1)   # the button
     steps(rt, 3)
     assert rt.motion.active
-    # a swipe to the user's right with the thumb out = "forward"; the pointer does not follow the hand
+    # a swipe of the open hand to the user's right = the next tab (2026-11-12); the pointer does not follow the hand
     rt.tracker.dx = 0.0
     steps(rt, 22, move=0.0135)
-    assert "motion:forward" in rt.mouse.event_log
+    assert "motion:tab_next" in rt.mouse.event_log
     assert rt.mouse.last_screen_pos == pos
     assert rt._snap.motion[0] is True
     rt.ui = UiState(stage="main", control_hand="Right", click_style="off", motion_request=2)   # button again

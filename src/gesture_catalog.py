@@ -39,10 +39,10 @@ BASE_TASKS = (
     Task("v_sign", "V 손 모양 (제어 켜기·끄기)", "검지·중지만 V로 펴고 나머지는 접어 가만히 유지하세요", category="창·모드"),
     Task("rock_sign", "검지·새끼 펴기 (창 닫기)", "검지·새끼만 펴고 중지·약지를 접어 유지하세요. 실제 창은 닫히지 않아요", category="창·모드"),
     Task("thumbs_up", "엄지 위로 (모션 모드 켜기·끄기)", "네 손가락을 접고 엄지만 위로 세워 가만히 유지하세요", category="창·모드"),
-    Task("swipe_left", "손 펴고 왼쪽 쓸기 (뒤로)", "엄지까지 손을 펴고 왼쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="left"),
-    Task("swipe_right", "손 펴고 오른쪽 쓸기 (앞으로)", "엄지까지 손을 펴고 오른쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="right"),
-    Task("swipe_tab_left", "엄지 접고 왼쪽 쓸기 (이전 탭)", "엄지를 접고 네 손가락을 펴 왼쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="left"),
-    Task("swipe_tab_right", "엄지 접고 오른쪽 쓸기 (다음 탭)", "엄지를 접고 네 손가락을 펴 오른쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="right"),
+    Task("swipe_left", "검지만 펴고 왼쪽 쓸기 (뒤로)", "검지만 펴고 나머지는 접은 채 왼쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="left"),
+    Task("swipe_right", "검지만 펴고 오른쪽 쓸기 (앞으로)", "검지만 펴고 나머지는 접은 채 오른쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="right"),
+    Task("swipe_tab_left", "손 펴고 왼쪽 쓸기 (이전 탭)", "네 손가락을 모두 펴고 왼쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="left"),
+    Task("swipe_tab_right", "손 펴고 오른쪽 쓸기 (다음 탭)", "네 손가락을 모두 펴고 오른쪽으로 한 번 쓸어 멈추세요. 쉬기 때 돌아오세요", category="방향 모션", direction="right"),
     Task("swipe_down", "손 펴고 아래로 쓸기 (창 내리기)", "손을 펴 아래로 한 번 쓸어 멈추세요. 쉬기 때 올리세요. 실제 창은 내려가지 않아요", category="방향 모션", direction="down"),
     Task("open_move", "손 펴고 이동 (정밀 커서)", "손을 편 채 천천히 여러 방향으로 움직이세요. 손가락을 집지 마세요", True, "이동·중립", "none"),
     Task("fist_move", "주먹 이동 (빠른 커서)", "주먹을 쥐고 여러 방향으로 움직이세요. 엄지만 세우지 마세요", True, "이동·중립", "none"),
@@ -66,6 +66,7 @@ DISPLAY_KEYS = list(BASE_DISPLAY_KEYS)
 NAMES = {key: BY_KEY[key].name for key in DISPLAY_KEYS}
 CLASSES = ["none", "thumb_index", "thumb_ring"] + list(dict.fromkeys(t.label for t in TASKS if t.label not in {"none", "thumb_index", "thumb_ring"}))
 CATEGORIES = ["전체", "클릭·드래그", "창·모드", "방향 모션", "이동·중립"]
+# the swipe keys name the stroke (its hand shape and direction): leftward = back / the previous tab
 BASE_MOTION_TARGETS = {
     "back": "swipe_left",
     "forward": "swipe_right",

@@ -743,6 +743,7 @@ def to_json(result: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------- what the AI connected (a readable list + undo)
 HISTORY_PATH = Path(__file__).resolve().parents[1] / "config" / "ai_connections.json"
 HISTORY_MAX = 200
+TRASH_MAX = 100       # deleted gestures kept (config/deleted_gestures.json), to be brought back
 
 
 class History:
@@ -772,10 +773,68 @@ class History:
         if items:
             self._save(self.load() + list(items))
 
+    # ---- every gesture the user made is on the list (2026-11-12, "예전 버전에서 커스텀 동작으로 등록했던 동작이 아직 남아서
+    # 작동", "앞으로 이렇게 등록된 동작이 리스트에 안뜨거나, 삭제한 동작이 남아서 작동되게 하는일은 없게"): the list was
+    # built from the AI history alone, so a gesture registered before that history (an older copy of the app, a copied
+    # config, a line pushed out past HISTORY_MAX) or changed elsewhere afterwards worked but could not be seen or deleted
+    # here. Now the stores are the source: a made gesture (composite gesture, registered motion, sequence, shape drawing)
+    # without a line in force gets one ("adopted"), so [수정]·[삭제] work on it like on any other.
+    def custom_gestures(self, registry) -> Dict[str, Dict[str, Any]]:
+        """Key -> {"name", flags of its kind} for every gesture the user made (not the app's built-in ones)."""
+        from src.action_bindings import DEFAULT_GESTURE_BINDINGS
+        out: Dict[str, Dict[str, Any]] = {}
+        for key, comp in registry.composite_gestures.items():
+            if key not in DEFAULT_GESTURE_BINDINGS:
+                out[key] = {"name": str(comp.get("name") or key)}
+        for key, m in registry.custom_motions.items():
+            if key not in DEFAULT_GESTURE_BINDINGS:
+                out[key] = {"name": str(m.get("name") or key), "motion": True}
+        try:
+            from src.sequence import SequenceStore
+            for key, item in SequenceStore(self.sequences_path).items.items():
+                out[key] = {"name": str(item.get("name") or key), "sequence": True}
+            from src.path_gesture import PathStore
+            for key, item in PathStore(self.paths_path).items.items():
+                out[key] = {"name": str(item.get("name") or key), "path": True}
+        except Exception:
+            pass
+        return out
+
+    def adopt(self, registry) -> int:
+        """Give every made gesture without a line in force a line of its own (see above). Returns how many were added."""
+        entries = self.load()
+        live = {e.get("gesture_key") for e in entries
+                if not e.get("undone") and not e.get("app_match")
+                and still_in_force(e, registry, self.sequences_path, self.paths_path)}
+        when = time.strftime("%Y-%m-%d %H:%M")
+        added = []
+        for key, info in self.custom_gestures(registry).items():
+            if key in live:
+                continue
+            b = registry.get_binding(key)
+            atype, value = str(b.get("action_type") or "mouse_action"), str(b.get("action_value") or "none")
+            after = format_action_badge(atype, value)
+            for ov in b.get("app_overrides") or []:          # e.g. a YouTube motion: nothing elsewhere, a key in YouTube
+                after += f" · {ov.get('app_match', '')}에서: " + format_action_badge(str(ov.get("action_type", "")),
+                                                                                    str(ov.get("action_value", "")))
+            added.append({"time": when, "request": "", "adopted": True, "gesture_key": key, "gesture_name": info["name"],
+                          "app_match": "", "action_type": atype, "action_value": value,
+                          "enabled": bool(b.get("enabled", True)), "after": after, "steps": [],
+                          "created": True, "before": {}, "before_text": "(AI 기록 없이 등록된 동작)",
+                          **{k: True for k in ("motion", "sequence", "path") if info.get(k)}})
+        if added:
+            self._save(entries + added)
+        return len(added)
+
     def rows(self, registry) -> List[Dict[str, Any]]:
         """Newest first, with whether each is still in force (a later change may have replaced it)."""
         out = []
         modes = self._mode_holders(registry)
+        try:
+            self.adopt(registry)
+        except Exception:
+            pass
+        custom = self.custom_gestures(registry)
         for i, e in enumerate(self.load()):
             if e.get("undone"):
                 continue
@@ -791,6 +850,7 @@ class History:
                 row.update(hold_seconds=round(float(comp.get("hold_seconds", .55)), 2),
                            hold_min=hold_minimum(posture), hold_max=HOLD_MAX)
             row["editable"] = bool(row["current"]) and e.get("enabled", True) is not False
+            row["custom"] = e.get("gesture_key", "") in custom          # [삭제] removes the gesture itself
             # which world the gesture lives in, and its name without the command it was recorded with (2026-11-12)
             from src.action_bindings import MODE_NAMES_KO, gesture_mode
             row["mode"] = gesture_mode(e.get("gesture_key", ""), registry)
@@ -894,34 +954,131 @@ class History:
         return f"고쳤어요: {e.get('gesture_name', key)} → " + " · ".join(notes)
 
     def delete(self, index: int, registry) -> str:
-        """Remove the connection itself (not "go back one step"): a gesture the AI created is deleted, a program-specific
-        command removed, an existing gesture goes back to its built-in command (2026-11-10: there was only 되돌리기)."""
+        """Remove the connection itself (not "go back one step"): a gesture the user made (by the AI or before it) is
+        deleted, a program-specific command removed, a built-in gesture goes back to its built-in command (2026-11-10:
+        there was only 되돌리기).
+
+        2026-11-12 ("삭제한 동작이 남아서 작동되게 하는일은 없게"): a made gesture is deleted whatever its line says - it
+        used to stay when its command had been changed elsewhere since (the line no longer "in force": only the line
+        went) or when the AI had only re-bound it (it got "no command" but stayed registered). Every other line of that
+        gesture goes with it."""
         entries = self.load()
         if not 0 <= index < len(entries) or entries[index].get("undone"):
             raise ValueError("지울 항목이 없어요.")
         e = entries[index]
         key, app = e["gesture_key"], e.get("app_match", "")
-        if still_in_force(e, registry, self.sequences_path, self.paths_path):
-            if e.get("created") and e.get("sequence"):
-                from src.sequence import SequenceStore
-                SequenceStore(self.sequences_path).remove(key)
-            elif e.get("created") and e.get("path"):
-                from src.path_gesture import PathStore
-                PathStore(self.paths_path).remove(key)
-            elif e.get("created") and e.get("motion"):
-                registry.delete_motion_gesture(key)
-            elif e.get("created"):
-                registry.delete_composite_gesture(key)
-            elif app:
-                registry.remove_app_override(key, app)
-            else:
-                registry.reset_binding(key)
-                from src.action_bindings import DEFAULT_GESTURE_BINDINGS
-                if key not in DEFAULT_GESTURE_BINDINGS:          # no built-in command: nothing
-                    registry.set_binding(key, "mouse_action", "none", track=registry.get_binding(key).get("track"))
-        entries[index] = {**e, "undone": True}
+        info = self.custom_gestures(registry).get(key)
+        if info is not None and not app:
+            self._remove_gesture(key, info, registry)
+            entries = [{**x, "undone": True} if x.get("gesture_key") == key and not x.get("undone") else x for x in entries]
+        else:
+            if still_in_force(e, registry, self.sequences_path, self.paths_path):
+                if app:
+                    registry.remove_app_override(key, app)
+                else:
+                    registry.reset_binding(key)
+                    from src.action_bindings import DEFAULT_GESTURE_BINDINGS
+                    if key not in DEFAULT_GESTURE_BINDINGS:          # no built-in command: nothing
+                        registry.set_binding(key, "mouse_action", "none", track=registry.get_binding(key).get("track"))
+            entries[index] = {**e, "undone": True}
         self._save(entries)
         return f"지웠어요: {e.get('gesture_name', key)}"
+
+    # ---- deleted gestures are kept, to be brought back (2026-11-12: "손바닥 폈을때 바탕화면 보기 명령어 어디갔냐?" - the
+    # old gestures listed that day were deleted from the list one by one and nothing kept them; the open hand -> Win+D
+    # had to be rebuilt from another folder's copy). config/deleted_gestures.json, the last TRASH_MAX.
+    def _trash_path(self) -> Path:
+        return self.path.with_name("deleted_gestures.json")
+
+    def trash(self) -> List[Dict[str, Any]]:
+        try:
+            data = json.loads(self._trash_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
+
+    def _save_trash(self, items: List[Dict[str, Any]]) -> None:
+        p = self._trash_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(items[-TRASH_MAX:], ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)
+
+    def _snapshot(self, key: str, info: Dict[str, Any], registry) -> Dict[str, Any]:
+        kind = next((k for k in ("motion", "sequence", "path") if info.get(k)), "composite")
+        if kind == "sequence":
+            from src.sequence import SequenceStore
+            definition = SequenceStore(self.sequences_path).items.get(key)
+        elif kind == "path":
+            from src.path_gesture import PathStore
+            definition = PathStore(self.paths_path).items.get(key)
+        elif kind == "motion":
+            definition = registry.custom_motions.get(key)
+        else:
+            definition = registry.composite_gestures.get(key)
+        binding = registry.bindings.get(key)
+        return {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "key": key, "name": info.get("name", key), "kind": kind,
+                "definition": json.loads(json.dumps(definition or {}, ensure_ascii=False)),
+                "binding": json.loads(json.dumps(binding or {}, ensure_ascii=False)),
+                "after": format_action_badge(str((binding or {}).get("action_type", "")),
+                                             str((binding or {}).get("action_value", "")))}
+
+    def deleted_rows(self, registry) -> List[Dict[str, Any]]:
+        """The kept deleted gestures not back since, newest first, with their place in the trash."""
+        alive = self.custom_gestures(registry)
+        out = [{**e, "trash_index": i} for i, e in enumerate(self.trash()) if e.get("key") not in alive and not e.get("restored")]
+        return list(reversed(out))
+
+    def restore(self, trash_index: int, registry) -> str:
+        """A deleted gesture back as it was (definition and command); its list line comes back by itself (adopt)."""
+        items = self.trash()
+        if not 0 <= trash_index < len(items):
+            raise ValueError("되살릴 항목이 없어요.")
+        e = items[trash_index]
+        key, kind, definition, binding = e.get("key", ""), e.get("kind"), e.get("definition") or {}, e.get("binding") or {}
+        if not key or not definition:
+            raise ValueError("이 항목은 정의가 남아 있지 않아 되살릴 수 없어요.")
+        if key in self.custom_gestures(registry):
+            raise ValueError(f"'{e.get('name', key)}'은(는) 이미 있어요.")
+        if kind == "sequence":
+            from src.sequence import SequenceStore
+            store = SequenceStore(self.sequences_path)
+            store.items[key] = definition
+            store.save()
+        elif kind == "path":
+            from src.path_gesture import PathStore
+            store = PathStore(self.paths_path)
+            store.items[key] = definition
+            store.save()
+        elif kind == "motion":
+            registry.custom_motions[key] = definition
+        else:
+            registry.composite_gestures[key] = definition
+        if binding:
+            registry.bindings[key] = binding
+        registry.save()
+        items[trash_index] = {**e, "restored": time.strftime("%Y-%m-%d %H:%M:%S")}
+        self._save_trash(items)
+        return f"되살렸어요: {e.get('name', key)} → {e.get('after', '')}"
+
+    def _remove_gesture(self, key: str, info: Dict[str, Any], registry) -> None:
+        """The gesture out of its store and its command out of the bindings, checked afterwards. Kept first (trash)."""
+        self._save_trash(self.trash() + [self._snapshot(key, info, registry)])
+        if info.get("sequence"):
+            from src.sequence import SequenceStore
+            SequenceStore(self.sequences_path).remove(key)
+        elif info.get("path"):
+            from src.path_gesture import PathStore
+            PathStore(self.paths_path).remove(key)
+        elif info.get("motion"):
+            registry.delete_motion_gesture(key)
+        else:
+            registry.delete_composite_gesture(key)
+        if key in registry.bindings:                   # a command left without its gesture (any track)
+            del registry.bindings[key]
+            registry.save()
+        if key in self.custom_gestures(registry):
+            raise ValueError(f"지우지 못했어요: {info.get('name', key)} (설정 파일을 확인해 주세요)")
 
     def forget(self, index: int) -> None:
         """Only the list line (the connection changed later by other means)."""

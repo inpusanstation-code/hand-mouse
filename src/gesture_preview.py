@@ -29,8 +29,13 @@ BUILTIN = {
     "thumb_pinky": ("thumb_pinky", ""), "thumb_index_middle": ("thumb_index_middle", ""),
     "thumb_middle_drag": ("thumb_middle", ""), "palm_side": ("thumb_tucked", ""), "v_sign": ("v_sign", ""),
     "rock_sign": ("rock_sign", ""), "thumbs_up": ("thumbs_up", ""),
-    "swipe_left": ("open_hand", "left"), "swipe_right": ("open_hand", "right"), "swipe_down": ("open_hand", "down"),
-    "swipe_tab_left": ("thumb_tucked", "left"), "swipe_tab_right": ("thumb_tucked", "right"),
+    "swipe_left": ("index_point", "left"), "swipe_right": ("index_point", "right"), "swipe_down": ("open_hand", "down"),
+    "swipe_tab_left": ("open_hand", "left"), "swipe_tab_right": ("open_hand", "right"),
+    # the virtual hand's own keys (2026-11-12: the AI card for "브라우저 탭 닫기" lost its picture when its connection moved
+    # from palm mode's thumb_pinky to the virtual hand's vh_pinky - these keys had no shape here)
+    "vh_pinky": ("thumb_pinky", ""), "vh_pinch": ("thumb_index", ""), "vh_drag": ("thumb_index", ""),
+    "vh_triple": ("thumb_index_middle", ""), "vh_switch": ("thumb_tucked", ""), "vh_fist": ("fist", ""),
+    "point_double": ("l_sign", ""),
 }
 MOVES = {"swipe_left": "left", "swipe_right": "right", "swipe_up": "up", "swipe_down": "down"}
 
@@ -101,25 +106,52 @@ def from_examples(posture: str, folder: Optional[Path] = None) -> List[List[Tupl
     return []
 
 
-def from_probes(posture: str, folder: Optional[Path] = None) -> List[List[Tuple[float, float]]]:
+# 2026-11-12 (a card "손 펴기 (손바닥을 카메라로) 유지" drawn with the palm to the floor: "이건 바닥을 아래로 유지하는
+#거잖아"): records made before the open hand was split by where the palm faces say "open_hand" for every facing, and
+# 11 of that day's 29 runs of the gesture were palm-down. An open hand's frames are told again by its palm (pose_probe.
+# faced) and only those of the gesture's own facing are drawn. The records do not keep which hand it was: `label` is
+# MediaPipe's label of the control hand (the caller's; "Left" = a right hand in the mirrored picture).
+OPEN_FAMILY = ("open_hand", "open_hand_back", "open_hand_down", "open_hand_up")
+
+
+def _same_shape(recorded: Any, posture: str, lm: Any, label: str) -> bool:
+    if posture not in OPEN_FAMILY:
+        return recorded == posture
+    if recorded not in OPEN_FAMILY or not lm or len(lm) != 21:
+        return False
+    from types import SimpleNamespace
+    from src import pose_probe
+    try:
+        pts = [SimpleNamespace(x=float(p[0]), y=float(p[1]), z=float(p[2]) if len(p) > 2 else 0.0) for p in lm]
+    except (TypeError, ValueError, IndexError):
+        return False
+    before = pose_probe.hand_label(), getattr(pose_probe._HAND, "arm", "")
+    try:
+        pose_probe.set_hand_label(label)
+        return pose_probe.faced("open_hand", pts, ASPECT) == posture
+    finally:
+        pose_probe.set_hand_label(*before)
+
+
+def from_probes(posture: str, folder: Optional[Path] = None, label: str = "Left") -> List[List[Tuple[float, float]]]:
     for p in sorted(Path(folder or PROBE_DIR).glob("*.json"), reverse=True):
         d = _read(p)
         if not d or (d.get("result") or {}).get("posture") != posture:
             continue
         frames = [f for f in (_xy(x.get("lm"), ASPECT) for x in d.get("frames") or []
-                              if isinstance(x, dict) and x.get("posture") == posture) if f]
+                              if isinstance(x, dict) and _same_shape(x.get("posture"), posture, x.get("lm"), label)) if f]
         if len(frames) >= 3:
             return _thin(frames)
     return []
 
 
-def from_fires(key: str, posture: str, folder: Optional[Path] = None) -> List[List[Tuple[float, float]]]:
+def from_fires(key: str, posture: str, folder: Optional[Path] = None, label: str = "Left") -> List[List[Tuple[float, float]]]:
     for p in sorted(Path(folder or FIRES_DIR).glob(f"*-{key}.json"), reverse=True):
         d = _read(p)
         if not d:
             continue
         frames = [f for f in (_xy(x.get("lm"), ASPECT) for x in d.get("frames") or []
-                              if isinstance(x, dict) and x.get("posture") == posture) if f]
+                              if isinstance(x, dict) and _same_shape(x.get("posture"), posture, x.get("lm"), label)) if f]
         if len(frames) >= 3:
             return _thin(frames[-MAX_FRAMES:])
     return []
@@ -223,7 +255,7 @@ def fit(frames: List[List[Tuple[float, float]]], margin: float = .1) -> List[Lis
 
 
 def preview(key: str, registry, sequences=None, paths=None, examples_dir: Optional[Path] = None,
-            probe_dir: Optional[Path] = None, fires_dir: Optional[Path] = None) -> Dict[str, Any]:
+            probe_dir: Optional[Path] = None, fires_dir: Optional[Path] = None, label: str = "Left") -> Dict[str, Any]:
     """{"frames": [[ [x, y] * 21 ], ...] in 0..1, "fps", "source", "move", "shapes": [names], "steps": [frame index
     where each sequence step starts]}; frames [] when there is nothing to draw."""
     shapes, move = what(key, registry, sequences, paths)
@@ -233,9 +265,9 @@ def preview(key: str, registry, sequences=None, paths=None, examples_dir: Option
     for shape in shapes:
         frames, src = from_examples(shape, examples_dir), "example"
         if not frames:
-            frames, src = from_probes(shape, probe_dir), "probe"
+            frames, src = from_probes(shape, probe_dir, label), "probe"
         if not frames and move != "sequence":
-            frames, src = from_fires(key, shape, fires_dir), "fire"
+            frames, src = from_fires(key, shape, fires_dir, label), "fire"
         if not frames:
             one = drawn(shape)
             frames, src = ([one] * 8 if one else []), "drawn"

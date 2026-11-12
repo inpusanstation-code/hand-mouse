@@ -46,7 +46,7 @@ def test_action_binding_registry_and_app_overrides(tmp_path: Path):
 
     # Default shortcut badge is visible
     b_left = reg.get_binding("swipe_left")
-    assert "Alt + ←" in b_left["badge"]
+    assert "Alt + ←" in b_left["badge"]          # 2026-11-12: the index alone to the left = back
 
     # Customize global binding to YouTube key
     saved = reg.set_binding("swipe_left", "youtube_key", "j", enabled=True)

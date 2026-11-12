@@ -192,3 +192,53 @@ def test_a_verdict_keeps_the_list_where_it_was_and_the_played_row_on_screen(tmp_
     assert ui.useCases["items"][20]["review"] == "ok"
     assert dialog.property("current") == 21 and row_on_screen(21)
     assert listview.property("contentY") >= before - 1            # not back at the top
+
+
+def test_the_session_says_plainly_when_every_use_is_judged(tmp_path):
+    """2026-11-12: "전부 다 하면 다했다는 메세지를 보여줘" - only the counts under the replay said so before."""
+    pytest.importorskip("PySide6")
+    import os
+    import time
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QObject
+    from PySide6.QtQuickControls2 import QQuickStyle
+    from PySide6.QtWidgets import QApplication
+    from src.qt_dashboard import QtDashboard
+    folder = log(tmp_path, n=3)
+    app = QApplication.instance() or QApplication([])
+    QQuickStyle.setStyle("Basic")
+    ui = QtDashboard(dry_run=True)
+    ui.use_log_folder = str(folder)
+    ui.online_root = tmp_path / "online"
+    _ALIVE.append(ui)
+    dialog = ui.window.findChild(QObject, "useCasesDialog")
+    banner = ui.window.findChild(QObject, "useReviewDone")
+    text = ui.window.findChild(QObject, "useReviewDoneText")
+
+    def settle():
+        for _ in range(20):
+            time.sleep(.01)
+            app.processEvents()
+
+    ui.openUseReview(KEY, "새 동작")
+    end = time.time() + 10
+    while ui.useCases.get("loading") and time.time() < end:
+        time.sleep(.02)
+        app.processEvents()
+    dialog.setProperty("visible", True)
+    settle()
+    assert not dialog.property("allDone") and not banner.property("visible")
+    ui.judgeUseCase(0, "ok")
+    ui.judgeUseCase(1, "bad")
+    settle()
+    assert not dialog.property("allDone")
+    ui.judgeUseCase(2, "ok")
+    settle()
+    assert dialog.property("allDone") and banner.property("visible")
+    assert "모두 마쳤어요" in text.property("text") and "통과 2" in text.property("text") and "오탐지 1" in text.property("text")
+    # the plain viewer of the same uses, all judged
+    ui.use_cases = dict(ui.use_cases, review=False)
+    ui.useCasesChanged.emit()
+    settle()
+    assert dialog.property("allDone") and "모두 판정했어요" in text.property("text")
+    dialog.setProperty("visible", False)

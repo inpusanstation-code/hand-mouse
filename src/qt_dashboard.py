@@ -105,6 +105,18 @@ def _saved_box(text: str):
     return box if valid_box(box) else DEFAULT_BOX
 
 
+OTHER_BOX_DEFAULT = (0.0, 0.0, 1.0, 1.0)   # the other hand's box until one is drawn: the whole camera image
+
+
+def _saved_other_box(text: str):
+    from src.virtual_hand import valid_box
+    try:
+        box = tuple(float(v) for v in str(text or "").split(","))
+    except ValueError:
+        return OTHER_BOX_DEFAULT
+    return box if valid_box(box) else OTHER_BOX_DEFAULT
+
+
 def _screen_ratio() -> float:
     try:
         from PySide6.QtGui import QGuiApplication
@@ -185,6 +197,7 @@ def _virtual_hand_glide() -> float:
 class QtDashboard(QObject):
     stateChanged = Signal()
     previewChanged = Signal()
+    skeletonStyleChanged = Signal()   # the skeletons' colours / opacity / thickness (src/skeleton_style.py)
     trackingChanged = Signal()        # every frame while the test runs (target, cursor, text)
     liveChanged = Signal()            # per-frame status (fps, action...); settings stay on stateChanged
     metricsChanged = Signal()         # camera mode / brightness, a few times a second
@@ -193,6 +206,7 @@ class QtDashboard(QObject):
     correctionChanged = Signal()      # online learning: the "what was that really?" question
     learnChanged = Signal()           # online learning: background learning rounds
     virtualHandChanged = Signal()     # the hand drawn at the cursor
+    otherHandChanged = Signal()       # the other hand drawn on the screen (src/other_hand_motion.py, 2026-11-12)
     fingerFrameChanged = Signal()     # the fingertips drawn next to the cursor (src/FingerTracker.qml)
     pointChanged = Signal()           # pointing mode's dwell ring at the cursor (src/point_mode.py)
     toastChanged = Signal()           # a short notice over the window that goes away by itself
@@ -364,6 +378,8 @@ class QtDashboard(QObject):
         self.virtual_hand = None
         self.virtual_hand_on = self.preferences.value("virtualHand", _virtual_hand_default(), type=bool)
         self.point_mode_on = self.preferences.value("pointMode", True, type=bool)    # pointing mode: on by default
+        self.other_motion_on = self.preferences.value("otherHandMotion", True, type=bool)   # the other hand swipes (2026-11-12)
+        self.skeleton_style = self._read_skeleton_style(self.preferences)
         try:                                                                         # its details (settings window)
             from src.point_mode import clean_settings
             self.point_settings = clean_settings(json.loads(str(self.preferences.value("pointModeSettings", "{}") or "{}")))
@@ -390,7 +406,10 @@ class QtDashboard(QObject):
         self.draw_test = {}               # what a stroke drawn in the settings is recognised as
         self._draw_store = None
         self.virtual_box = _saved_box(self.preferences.value("virtualBox", "", type=str))
+        # the other hand's own box (2026-11-12, "왼손 모니터 박스를 별도로"): the whole image until drawn
+        self.other_box = _saved_other_box(self.preferences.value("otherBox", "", type=str))
         self.box_editing = False
+        self.box_target = "main"          # which box a drag on the preview draws: "main" or "other"
         self.my_gestures = []
         self.deleted_gestures = set()
         self.command_message = ""
@@ -1128,6 +1147,24 @@ class QtDashboard(QObject):
     def virtualHand(self):
         return self.virtual_hand or {}
 
+    def set_other_hand(self, view):
+        """The other hand on the desktop: its place in the virtual-hand box (0..1, see QtRuntime._other_draw) is its place
+        on the primary screen, like the control hand's."""
+        if view is None and getattr(self, "other_hand", None) is None:
+            return
+        if view is not None:
+            from PySide6.QtGui import QGuiApplication
+            geo = QGuiApplication.primaryScreen().geometry()
+            x, y = view["pos"]
+            x, y = geo.x() + x * geo.width(), geo.y() + y * geo.height()
+            view = {**view, "x": x, "y": y}
+        self.other_hand = view
+        self.otherHandChanged.emit()
+
+    @Property("QVariant", notify=otherHandChanged)
+    def otherHand(self):
+        return getattr(self, "other_hand", None) or {}
+
     @Property(bool, notify=stateChanged)
     def virtualHandOn(self):
         return self.virtual_hand_on
@@ -1141,6 +1178,17 @@ class QtDashboard(QObject):
     @Property(bool, notify=stateChanged)
     def pointModeOn(self):
         return self.point_mode_on
+
+    @Property(bool, notify=stateChanged)
+    def otherMotionOn(self):
+        """Motion mode with the other hand (src/other_hand_motion.py): shown open it swipes, lowered it stops."""
+        return bool(getattr(self, "other_motion_on", True))
+
+    @Slot(bool)
+    def setOtherMotion(self, on):
+        self.other_motion_on = bool(on)
+        self.preferences.setValue("otherHandMotion", self.other_motion_on)
+        self.stateChanged.emit()
 
     @Slot(bool)
     def setPointMode(self, on):
@@ -1187,6 +1235,42 @@ class QtDashboard(QObject):
         self.preferences.setValue("pointModeSettings", json.dumps(self.point_settings))
         self.stateChanged.emit()
 
+    # ---- the skeletons' look (src/skeleton_style.py, 2026-11-12): colours, opacity, thickness
+    @staticmethod
+    def _read_skeleton_style(prefs):
+        from src.skeleton_style import clean
+        try:
+            return clean(json.loads(str(prefs.value("skeletonStyle", "{}") or "{}")))
+        except Exception:
+            return clean({})
+
+    @Property("QVariantMap", notify=skeletonStyleChanged)
+    def skeletonStyle(self):
+        """{"values": {main, other, vh_line, vh_joint, preview_alpha, vh_alpha, width}, "defaults", "ranges", "presets"}."""
+        from src.skeleton_style import DEFAULTS, PRESETS, RANGES, clean
+        values = getattr(self, "skeleton_style", None) or clean({})
+        return {"values": dict(values), "defaults": dict(DEFAULTS), "ranges": {k: list(v) for k, v in RANGES.items()},
+                "presets": list(PRESETS)}
+
+    @Slot(str, "QVariant", result=bool)
+    def setSkeletonStyle(self, key, value):
+        """One value; False (and nothing changes) for an unknown key or a colour that is not #RRGGBB."""
+        from src.skeleton_style import COLOR_KEYS, DEFAULTS, clean, color
+        key = str(key)
+        if key not in DEFAULTS or (key in COLOR_KEYS and not color(value)):
+            return False
+        self.skeleton_style = clean({**(getattr(self, "skeleton_style", None) or {}), key: value})
+        self.preferences.setValue("skeletonStyle", json.dumps(self.skeleton_style))
+        self.skeletonStyleChanged.emit()
+        return True
+
+    @Slot()
+    def resetSkeletonStyle(self):
+        from src.skeleton_style import clean
+        self.skeleton_style = clean({})
+        self.preferences.setValue("skeletonStyle", json.dumps(self.skeleton_style))
+        self.skeletonStyleChanged.emit()
+
     @Property("QVariant", notify=pointChanged)
     def pointView(self):
         """Pointing mode now: {"kind", "progress", "on_file", "cursor": [x, y] logical px}; {} = not pointing."""
@@ -1207,27 +1291,57 @@ class QtDashboard(QObject):
     def virtualBox(self):
         return list(self.virtual_box)
 
+    @Property("QVariantList", notify=stateChanged)
+    def otherBox(self):
+        return list(self.other_box)
+
+    @Property(bool, notify=stateChanged)
+    def otherBoxDrawn(self):
+        return tuple(self.other_box) != OTHER_BOX_DEFAULT
+
     @Property(bool, notify=stateChanged)
     def boxEditing(self):
         return self.box_editing
 
+    @Property(bool, notify=stateChanged)
+    def boxEditingOther(self):
+        return self.box_editing and self.box_target == "other"
+
     @Slot(bool)
     def setBoxEditing(self, on):
-        self.box_editing = bool(on)
+        self.box_editing, self.box_target = bool(on), "main"
+        self.stateChanged.emit()
+
+    @Slot(bool)
+    def setOtherBoxEditing(self, on):
+        self.box_editing, self.box_target = bool(on), ("other" if on else "main")
+        self.stateChanged.emit()
+
+    @Slot()
+    def resetOtherBox(self):
+        """The other hand's box back to the whole camera image."""
+        self.other_box = OTHER_BOX_DEFAULT
+        self.preferences.setValue("otherBox", "")
+        self.box_editing, self.box_target = False, "main"
         self.stateChanged.emit()
 
     @Slot(float, float, float, float, result=bool)
     def setVirtualBox(self, x0, y0, x1, y1):
-        """From a drag on the preview, 0..1 of the camera image in either direction. Too small a box is refused."""
+        """From a drag on the preview, 0..1 of the camera image in either direction. Too small a box is refused. It is
+        the control hand's box, or the other hand's while that one is being drawn (`setOtherBoxEditing`)."""
         from src.virtual_hand import valid_box
         box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
         box = tuple(round(min(1.0, max(0.0, v)), 4) for v in box)
-        self.box_editing = False
+        target, self.box_editing, self.box_target = self.box_target, False, "main"
         if not valid_box(box):
             self.stateChanged.emit()
             return False
-        self.virtual_box = box
-        self.preferences.setValue("virtualBox", ",".join(str(v) for v in box))
+        if target == "other":
+            self.other_box = box
+            self.preferences.setValue("otherBox", ",".join(str(v) for v in box))
+        else:
+            self.virtual_box = box
+            self.preferences.setValue("virtualBox", ",".join(str(v) for v in box))
         self.stateChanged.emit()
         return True
 
@@ -1421,7 +1535,14 @@ class QtDashboard(QObject):
     def _motion_badge_now(self):
         """(visible, text) of the corner badge: on while motion mode is on, 'entering' while the pose is
         held, and a short 'off' notice after it ends."""
-        on, left, last, entering, leaving = self.motion_state
+        on, left, last, entering, leaving = self.motion_state[:5]
+        # the other hand's motion (src/other_hand_motion.py, 2026-11-12): (on, arming 0..1, "왼손")
+        other = tuple(self.motion_state[5]) if len(self.motion_state) > 5 and self.motion_state[5] else (False, 0.0, "")
+        if not on and other[0]:
+            sim = " (시뮬레이션)" if getattr(self, "simulating_now", False) else ""
+            return True, f"{other[2]} 모션 켜짐{sim}" + (f" · {last}" if last else "") + " · 손을 내리면 끝"
+        if not on and other[1] >= .3:
+            return True, f"{other[2]} 모션 준비 중… {int(other[1] * 100)}%"
         if on:
             if leaving >= 0.2:
                 return True, f"모션 모드 끄는 중… {int(leaving * 100)}%"
@@ -3272,6 +3393,9 @@ class QtDashboard(QObject):
         self.hand_crop = p.value("handCrop", False, type=bool)
         self.virtual_hand_on = p.value("virtualHand", _virtual_hand_default(), type=bool)
         self.point_mode_on = p.value("pointMode", True, type=bool)
+        self.other_motion_on = p.value("otherHandMotion", True, type=bool)
+        self.skeleton_style = self._read_skeleton_style(p)
+        self.skeletonStyleChanged.emit()
         try:
             self.point_settings = clean_settings(json.loads(str(p.value("pointModeSettings", "{}") or "{}")))
         except Exception:
@@ -3279,6 +3403,7 @@ class QtDashboard(QObject):
         self.signal_text_on = p.value("signalText", True, type=bool)
         self.finger_overlay = p.value("fingerOverlay", False, type=bool)
         self.virtual_box = _saved_box(p.value("virtualBox", "", type=str))
+        self.other_box = _saved_other_box(p.value("otherBox", "", type=str))
         try:
             self.pointer_sensitivity = max(50, min(150, p.value("pointerSensitivity", 100, type=int)))
         except (TypeError, ValueError):
@@ -4575,6 +4700,30 @@ class QtDashboard(QObject):
             row["mode_works"] = works_in(str(row.get("mode", "all")), mode)
         return rows
 
+    @Property("QVariantList", notify=llmChanged)
+    def llmDeleted(self):
+        """Deleted gestures kept to be brought back (src/llm_binding.History.deleted_rows), newest first."""
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History
+        try:
+            return History().deleted_rows(get_action_registry())
+        except Exception:
+            return []
+
+    @Slot(int)
+    def restoreDeletedGesture(self, trash_index):
+        from src.action_bindings import get_action_registry
+        from src.llm_binding import History
+        try:
+            message = History().restore(int(trash_index), get_action_registry())
+        except ValueError as exc:
+            message = str(exc)
+        self.online_commands.append(("seq_reload",))
+        self.drawShapesChanged.emit()
+        self.refreshTraining()
+        self.stateChanged.emit()
+        self._llm_set(message=message)
+
     @Slot(int)
     def deleteLlmConnection(self, index):
         from src.action_bindings import get_action_registry
@@ -4604,7 +4753,10 @@ class QtDashboard(QObject):
         try:
             from src.action_bindings import get_action_registry
             from src.gesture_preview import preview
-            value = preview(key, get_action_registry())
+            # MediaPipe's label of the control hand in the mirrored picture ("Left" = the right hand): an open hand's
+            # recorded frames are told again by where the palm faces (gesture_preview._same_shape)
+            label = "Right" if str(getattr(self, "control_hand", "") or "") == "Left" else "Left"
+            value = preview(key, get_action_registry(), label=label)
         except Exception:
             value = {"frames": [], "source": "", "move": "", "shapes": [], "steps": [], "fps": 15}
         cache[key] = (time.monotonic(), value)
@@ -5310,11 +5462,11 @@ class QtDashboard(QObject):
             palm_axes_request=self.palm_axes_requests[0], palm_axes_cancel=self.palm_axes_requests[1],
             palm_axes_reset=self.palm_axes_requests[2],
             rec_mode=self.rec_mode, rec_advance=self.rec_advance, tcn_gate=self.tcn_gate, gate_model=self.gate_model,
-            virtual_hand=self.virtual_hand_on and not self.use_index_pointer, virtual_box=self.virtual_box,
+            virtual_hand=self.virtual_hand_on and not self.use_index_pointer, virtual_box=self.virtual_box, other_box=self.other_box,
             screen_ratio=_screen_ratio(),
             rec_focus=self.rec_focus, model_version=self.model_version,
             rec_plan=copy.deepcopy(self.rec_plan), rec_paused=self.rec_paused,
-            rec_discard=self.rec_discard, point_mode=self.point_mode_on, point_settings=dict(self.point_settings), signal_text=self.signal_text_on,
+            rec_discard=self.rec_discard, point_mode=self.point_mode_on, other_motion=getattr(self, "other_motion_on", True), point_settings=dict(self.point_settings), signal_text=self.signal_text_on,
         )
 
     LAG_FPS, RECOVER_FPS = 20.0, 26.0     # camera loop speed at which background learning is slowed / let go again
@@ -5407,6 +5559,7 @@ class QtDashboard(QObject):
         self.set_registration(getattr(snap, "registration", None))
         self.set_live_gesture(getattr(snap, "online_gesture", ""))
         self.set_virtual_hand(getattr(snap, "virtual_hand", None), snap.paused)
+        self.set_other_hand(getattr(snap, "other_hand", None))
         self._pending_preview_hand = getattr(snap, "preview_hand", None) or {}
         draw = getattr(snap, "draw", None) or {}
         if draw != self.draw_view:

@@ -257,7 +257,7 @@ def test_motion_and_side_gestures_never_prompt_palm_front_and_use_motion_courses
     assert all(r["orientation"] in plans.MOTION_ORIENTATIONS for r in editor.rows)
     assert all("손바닥 정면" not in r["name"] for r in editor.rows)
     assert "손바닥이 카메라를 정면으로" not in editor.orientationGuide
-    assert "엄지를 접고 네 손가락을 펴 왼쪽으로" in editor.orientationGuide
+    assert "네 손가락을 모두 펴고 왼쪽으로" in editor.orientationGuide
 
     # Switching presets on a motion task stays in motion course format
     editor.usePreset("diverse")

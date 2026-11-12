@@ -42,9 +42,12 @@ def run(mm, frames, t0=0.0, fps=30, **kw):
     return events, t
 
 
-def swipe_frames(x_from, x_to, n=10, thumb="out", fingers="open", dy=0.0):
-    return [hand(cx=x_from + (x_to - x_from) * i / (n - 1), cy=0.5 + dy * i / (n - 1), thumb=thumb, fingers=fingers)
+def swipe_frames(x_from, x_to, n=10, thumb="out", fingers="open", dy=0.0, **kw):
+    return [hand(cx=x_from + (x_to - x_from) * i / (n - 1), cy=0.5 + dy * i / (n - 1), thumb=thumb, fingers=fingers, **kw)
             for i in range(n)]
+
+
+INDEX = {"bent": (9, 13, 17)}       # the index alone out (2026-11-12: forward / back)
 
 
 def entered(mm=None, thumb_variant="out"):
@@ -94,22 +97,25 @@ def test_the_button_enters_and_leaves():
 
 
 # ---------------------------------------------------------------------- swipes
-def test_open_hand_with_the_thumb_out_swipes_back_and_forward():
+def test_the_index_alone_swipes_back_to_the_left_and_forward_to_the_right():
+    """2026-11-12: "검지만 펴서 좌우로 쓸면 앞으로가기 뒤로가기", then "좌우 움직임 바꾸고": left = back, right = forward."""
     mm, t = entered()
-    ev, t = run(mm, swipe_frames(0.7, 0.4), t0=t)                     # to the user's left
+    ev, t = run(mm, [hand(cx=0.7, **INDEX)] * 4 + swipe_frames(0.7, 0.4, **INDEX), t0=t)     # to the user's left
     assert [e.action for e in ev if e.kind == "swipe"] == ["back"] and ev[0].info["variant"] == "nav"
-    ev, t = run(mm, [hand(cx=0.4)] * 40, t0=t)                        # rest past the cooldown and return block
-    ev, t = run(mm, swipe_frames(0.4, 0.7), t0=t)
+    ev, t = run(mm, [hand(cx=0.4, **INDEX)] * 40, t0=t)              # rest past the cooldown and return block
+    ev, t = run(mm, swipe_frames(0.4, 0.7, **INDEX), t0=t)
     assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]
 
 
-def test_open_hand_with_the_thumb_tucked_swipes_the_tabs():
-    mm, t = entered()
-    ev, t = run(mm, swipe_frames(0.7, 0.4, thumb="tucked"), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"] and ev[0].info["variant"] == "tab"
-    ev, t = run(mm, [hand(cx=0.4, thumb="tucked")] * 40, t0=t)
-    ev, t = run(mm, swipe_frames(0.4, 0.7, thumb="tucked"), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
+def test_the_open_hand_swipes_the_tabs_whatever_the_thumb():
+    """2026-11-12: "탭이동은 손가락을 다 펴고 좌우로 쓸어내는 모션": left = the previous tab, right = the next one."""
+    for thumb in ("out", "tucked", "mid"):
+        mm, t = entered()
+        ev, t = run(mm, swipe_frames(0.7, 0.4, thumb=thumb), t0=t)
+        assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"] and ev[0].info["variant"] == "tab", thumb
+        ev, t = run(mm, [hand(cx=0.4, thumb=thumb)] * 40, t0=t)
+        ev, t = run(mm, swipe_frames(0.4, 0.7, thumb=thumb), t0=t)
+        assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"], thumb
 
 
 def test_ambiguous_thumb_slow_vertical_short_or_closed_strokes_send_nothing():
@@ -127,32 +133,43 @@ def test_ambiguous_thumb_slow_vertical_short_or_closed_strokes_send_nothing():
         assert not sideways, name                       # a downward stroke is its own command (Win+Down), not a sideways swipe
 
 
-def test_a_thumb_halfway_keeps_the_last_decision_and_with_none_yet_sends_nothing():
+def test_a_stroke_that_changes_shape_halfway_sends_nothing():
     mm, t = entered()
-    ev, t = run(mm, [hand(cx=0.7, thumb="out")] * 8, t0=t)                 # an open hand, thumb out: the state is "nav"
-    ev, t = run(mm, [hand(cx=0.7, thumb="mid")] * 8 + swipe_frames(0.7, 0.4, thumb="mid"), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["back"]
-    fresh = MotionMode()
-    fresh.update(0.0, hand(thumb="mid"), request="on")        # switched on by the button with no thumb decision
-    ev, _ = run(fresh, [hand(cx=0.7, thumb="mid")] * 8 + swipe_frames(0.7, 0.4, thumb="mid"), t0=0.1)
+    # open, then the index alone: each half shorter than a swipe, the whole long enough
+    frames = [hand(cx=0.7 - 0.24 * i / 9, **(INDEX if i >= 5 else {})) for i in range(10)]
+    ev, t = run(mm, [hand(cx=0.7)] * 4 + frames, t0=t)
     assert not [e for e in ev if e.kind == "swipe"]
+    assert mm.last_miss is not None and {"not_open", "ends_closed"} & set(mm.last_miss["why"])
+
+
+def test_the_index_alone_held_before_the_stroke_decides_it_though_the_moving_hand_blurs_open():
+    """12:30 that day: index-alone swipes of the other hand sent nothing. A small moving hand blurs and MediaPipe draws the
+    folded fingers open; the shape held still just before the stroke is the one meant."""
+    for blur in ({}, {"half": (9, 13, 17)}):              # read fully open / half open while it moves
+        mm, t = entered()
+        ev, t = run(mm, [hand(cx=0.7, **INDEX)] * 10 + swipe_frames(0.7, 0.4, **blur), t0=t)
+        sw = [e for e in ev if e.kind == "swipe"]
+        assert [e.action for e in sw] == ["back"] and sw[0].info["shape_from"] == "before", blur
+    mm, t = entered()                                     # held only for a moment (under half of the time before): not it
+    ev, t = run(mm, [hand(cx=0.7)] * 10 + [hand(cx=0.7, **INDEX)] * 2 + swipe_frames(0.7, 0.4), t0=t)
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"]
 
 
 def test_the_hand_coming_back_is_not_a_second_swipe_but_a_later_one_is():
     mm, t = entered()
     ev, t = run(mm, swipe_frames(0.3, 0.7), t0=t)                     # swipe right
-    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
     ev, t = run(mm, swipe_frames(0.7, 0.3, n=15), t0=t)               # the hand coming back, slower: ignored
     assert not [e for e in ev if e.kind == "swipe"]
     ev, t = run(mm, [hand(cx=0.3)] * 30, t0=t)                       # rest where the hand came back to
     ev, t = run(mm, swipe_frames(0.3, 0.7), t0=t)                     # a deliberate swipe after the pause
-    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
     ev, t = run(mm, [hand(cx=0.7)] * 30, t0=t)
     ev, t = run(mm, swipe_frames(0.7, 0.3), t0=t)                     # and the other way, after resting
-    assert [e.action for e in ev if e.kind == "swipe"] == ["back"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"]
     ev, t = run(mm, [hand(cx=0.3)] * 10, t0=t)                        # a third of a second of rest...
     ev, t = run(mm, swipe_frames(0.3, 0.7), t0=t)                     # ...then as quick as the last one: allowed
-    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
 
 
 def test_swipes_are_ignored_outside_motion_mode():
@@ -202,18 +219,18 @@ def test_swipes_that_were_refused_are_recorded_with_the_reason():
     assert not [e for e in ev if e.kind == "swipe"]
     assert mm.last_miss is not None and "short" in mm.last_miss["why"]
     ev, t = run(mm, [hand(cx=0.42)] * 20 + swipe_frames(0.42, 0.7), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"] and mm.last_miss is None
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"] and mm.last_miss is None
 
 
 def test_the_command_mapping_can_be_changed_but_only_to_known_commands():
     mm = MotionMode({"motion_actions": {"nav": {"left": "tab_prev", "right": "launch_missiles"}}})
     mm, t = entered(mm)
-    ev, t = run(mm, swipe_frames(0.7, 0.4), t0=t)
+    ev, t = run(mm, [hand(cx=0.7, **INDEX)] * 4 + swipe_frames(0.7, 0.4, **INDEX), t0=t)
     assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"]
-    ev, t = run(mm, [hand(cx=0.4)] * 40, t0=t)
-    ev, t = run(mm, swipe_frames(0.4, 0.7), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]     # the unknown command was refused
-    assert set(ACTION_KEYS) == {"back", "forward", "tab_prev", "tab_next", "close_window", "window_down"}
+    ev, t = run(mm, [hand(cx=0.4, **INDEX)] * 40, t0=t)
+    ev, t = run(mm, swipe_frames(0.4, 0.7, **INDEX), t0=t)
+    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]        # the unknown command was refused
+    assert set(ACTION_KEYS) == {"forward", "back", "tab_next", "tab_prev", "close_window", "window_down"}
     mm2 = MotionMode({"motion_actions": {"nav": {"left": "close_window"}}})        # Alt+F4 never from a sideways swipe
     assert mm2._actions["nav"]["left"] == "back"
 
@@ -255,7 +272,7 @@ def test_a_return_as_fast_as_the_swipe_is_still_the_hand_coming_back():
     mm, t = entered()
     for _ in range(3):                                                # forward x3: stroke, return, stroke, return ...
         ev, t = run(mm, swipe_frames(0.3, 0.7), t0=t)
-        assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]
+        assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
         ev, t = run(mm, swipe_frames(0.7, 0.3), t0=t)                 # just as fast, no rest in between
         assert not [e for e in ev if e.kind == "swipe"]
         assert mm.last_miss is None or "return_stroke" in mm.last_miss["why"]
@@ -266,10 +283,10 @@ def test_a_return_as_fast_as_the_swipe_is_still_the_hand_coming_back():
 def test_the_opposite_direction_counts_after_the_hand_rested():
     mm, t = entered()
     ev, t = run(mm, swipe_frames(0.3, 0.7), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
     ev, t = run(mm, [hand(cx=0.7)] * 12, t0=t)                        # 0.4 s of rest at the end of the stroke
     ev, t = run(mm, swipe_frames(0.7, 0.3), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["back"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"]
     ev, t = run(mm, swipe_frames(0.3, 0.7), t0=t)                     # straight back the other way, no rest: ignored
     assert not [e for e in ev if e.kind == "swipe"]
     mm2 = MotionMode({"motion_reverse_pause": 0.0})                   # the rule can be switched off
@@ -277,7 +294,7 @@ def test_the_opposite_direction_counts_after_the_hand_rested():
     ev, t2 = run(mm2, swipe_frames(0.3, 0.7), t0=t2)
     ev, t2 = run(mm2, [hand(cx=0.7)] * 4, t0=t2)                      # a breath, far short of 0.25 s
     ev, t2 = run(mm2, swipe_frames(0.7, 0.3), t0=t2)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["back"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"]
 
 
 def swing_frames(x_from, x_to, thumbs, n=10):
@@ -289,19 +306,15 @@ def swing_frames(x_from, x_to, thumbs, n=10):
     return out
 
 
-def test_a_tucked_thumb_that_pops_out_during_a_left_swing_is_still_a_tab_swipe():
-    """Logged 2026-11-04: on left strokes the thumb popped out (9 of 55 started tucked and ended out), so
-    'thumb tucked + left' was read as 'thumb out + left' = back instead of the previous tab."""
+def test_the_thumb_moving_during_the_swing_does_not_change_the_command():
+    """Until 2026-11-12 the thumb picked the command and its popping out mid-swing changed it; now the fingers do."""
     mm, t = entered()
-    rest = [hand(cx=0.7, thumb="tucked")] * 8                        # the thumb tucked before and at the start
+    rest = [hand(cx=0.7, thumb="tucked")] * 8
     ev, t = run(mm, rest + swing_frames(0.7, 0.4, ["tucked", "tucked", "out", "out"]), t0=t)
     assert [e.action for e in ev if e.kind == "swipe"] == ["tab_prev"]
     mm, t = entered()
-    ev, t = run(mm, [hand(cx=0.7, thumb="out")] * 8 + swing_frames(0.7, 0.4, ["out"]), t0=t)   # out all the way
-    assert [e.action for e in ev if e.kind == "swipe"] == ["back"]
-    mm, t = entered()
     ev, t = run(mm, [hand(cx=0.4, thumb="out")] * 8 + swing_frames(0.4, 0.7, ["out", "out", "tucked", "tucked"]), t0=t)
-    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]      # the right swing that ends tucked
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
 
 
 # ---------------------------------------------------------------------- only a completely open hand swipes
@@ -326,18 +339,22 @@ def test_a_swipe_needs_all_four_fingers_fully_extended():
         ev, _ = run(mm, [hand(cx=0.3)] * 12 + stroke_with(kw), t0=t)
         sideways = [e for e in ev if e.kind == "swipe" and e.action != "window_down"]
         assert not sideways, name                       # a downward stroke is its own command (Win+Down), not a sideways swipe
-        assert mm.last_miss is not None and ("bent" in mm.last_miss["why"] or "not_open" in mm.last_miss["why"]
-                                              or "ends_closed" in mm.last_miss["why"]), name
+        assert mm.last_miss is not None and {"no_shape", "not_open", "ends_closed"} & set(mm.last_miss["why"]), name
     mm, t = entered()
     ev, _ = run(mm, [hand(cx=0.3)] * 12 + stroke_with({}), t0=t)            # the same stroke with a fully open hand
-    assert [e.action for e in ev if e.kind == "swipe"] == ["forward"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
 
 
-def test_a_finger_that_bends_for_a_moment_during_the_stroke_refuses_it():
+def test_a_finger_that_bends_for_a_moment_is_let_through_but_not_for_half_the_stroke():
+    """2026-11-12: a stroke counts when 70 % of its frames are in one shape (a fast hand blurs); the old rule refused any bend."""
     mm, t = entered()
     frames = [hand(cx=0.3)] * 12 + [hand(cx=0.3 + 0.4 * i / 9, bent=(9,) if i in (2, 3) else ()) for i in range(10)]
     ev, _ = run(mm, frames, t0=t)
-    assert not [e for e in ev if e.kind == "swipe"] and "bent" in mm.last_miss["why"]
+    assert [e.action for e in ev if e.kind == "swipe"] == ["tab_next"]
+    mm, t = entered()
+    frames = [hand(cx=0.3)] * 12 + [hand(cx=0.3 + 0.4 * i / 9, bent=(9,) if 2 <= i <= 8 else ()) for i in range(10)]
+    ev, _ = run(mm, frames, t0=t)
+    assert not [e for e in ev if e.kind == "swipe"] and {"not_open", "ends_closed"} & set(mm.last_miss["why"])
 
 
 def test_pose_names_for_logs_and_later_motions():
@@ -436,7 +453,7 @@ def test_slow_lowering_sideways_or_bent_hands_do_not_ask():
 def test_a_horizontal_swipe_is_not_a_close_question():
     mm, t = entered()
     ev, _ = run(mm, swipe_frames(0.7, 0.4), t0=t)
-    assert [e.kind for e in ev] == ["swipe"] and ev[0].action == "back"
+    assert [e.kind for e in ev] == ["swipe"] and ev[0].action == "tab_prev"
 
 
 def test_a_fist_pointing_at_the_camera_is_not_the_entry_pose():
@@ -480,3 +497,14 @@ def test_a_knuckles_up_fist_is_not_the_entry_pose_but_a_thumbs_up_is():
     assert m.entry_pose(hand_features(_THUMBS_UP))
     assert not m.entry_pose(hand_features(_KNUCKLES_UP_FIST))
 
+
+
+def test_the_index_alone_with_the_middle_finger_half_folded_is_still_the_index_alone():
+    """2026-11-12 ("검지 펴서 스와이프 오른쪽은 먹는데 왼쪽은 안먹음"): the left hand held ready to swipe left kept its middle
+    finger half folded (1.25-1.45 against the index's 1.8-1.9, the 17:27 logs) and was no shape at all."""
+    mm = MotionMode()
+    assert mm.stroke_shape((1.88, 1.35, 1.20, 0.98)) == "nav"
+    assert mm.stroke_shape((1.88, 1.45, 1.25, 1.10)) == "nav"
+    assert mm.stroke_shape((1.90, 1.85, 1.00, 0.90)) is None          # a V: the middle is out as much as the index
+    assert mm.stroke_shape((1.60, 1.45, 1.30, 1.10)) is None          # a half-open hand: no gap between the fingers
+    assert mm.stroke_shape((1.90, 1.60, 1.50, 1.40)) == "tab"

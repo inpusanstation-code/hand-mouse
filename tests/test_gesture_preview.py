@@ -31,7 +31,7 @@ def test_what_names_the_hand_shapes_and_the_movement(tmp_path):
     assert gp.what("comp_rock_sign_hold", reg) == (["rock_sign"], "")
     assert gp.what("comp_fist_swipe_up", reg) == (["fist"], "up")
     assert gp.what("motion_knife", reg) == (["knife_hand"], "diag_down_left")
-    assert gp.what("swipe_tab_left", reg) == (["thumb_tucked"], "left")
+    assert gp.what("swipe_tab_left", reg) == (["open_hand"], "left")
     assert gp.what("thumb_ring", reg) == (["thumb_ring"], "")
     seqs = _Store({"seq_1": {"name": "s", "steps": ["fist", "open_hand"]}})
     assert gp.what("seq_1", reg, sequences=seqs) == (["fist", "open_hand"], "sequence")
@@ -124,3 +124,43 @@ def test_the_ai_list_shows_a_picture_per_card():
     root.findChild(QObject, "llmDialog").setProperty("visible", True)
     app.processEvents()
     root.findChild(QObject, "llmDialog").setProperty("visible", False)
+
+
+def test_the_virtual_hand_keys_have_a_hand_picture_too(tmp_path):
+    """2026-11-12: the AI card "엄지+새끼 집기" lost its picture when its connection moved from thumb_pinky to vh_pinky."""
+    from src import gesture_preview as gp
+    from src.action_bindings import ActionBindingRegistry
+    reg = ActionBindingRegistry(path=tmp_path / "b.json")
+    for key, shape in (("vh_pinky", "thumb_pinky"), ("vh_pinch", "thumb_index"), ("vh_triple", "thumb_index_middle"),
+                       ("vh_switch", "thumb_tucked"), ("vh_fist", "fist")):
+        assert gp.what(key, reg) == ([shape], ""), key
+        pv = gp.preview(key, reg, examples_dir=tmp_path / "none", probe_dir=tmp_path / "none", fires_dir=tmp_path / "none")
+        assert pv["frames"] and pv["source"] == gp.SOURCES["drawn"], key
+
+
+def test_an_open_hand_card_draws_only_frames_of_its_own_facing(tmp_path):
+    """2026-11-12: the card "손 펴기 (손바닥을 카메라로) 유지" was drawn with a palm-down hand ("이건 바닥을 아래로 유지하는
+    거잖아"): runs recorded before the open hand was split by facing say "open_hand" for every facing."""
+    from tests.test_hand_facing import open_hand, tilted
+    reg = ActionBindingRegistry(tmp_path / "b.json")
+    reg.composite_gestures["comp_open_hand_hold"] = {"key": "comp_open_hand_hold", "name": "손 펴기 유지",
+                                                     "base_posture": "open_hand", "trigger_type": "hold", "enabled": True}
+    fires = tmp_path / "fires"
+    fires.mkdir()
+
+    def record(name, hand):
+        lm = [[p.x, p.y, p.z] for p in hand]
+        (fires / name).write_text(json.dumps({"key": "comp_open_hand_hold", "frames": [
+            {"t": i / 30, "posture": "open_hand", "lm": lm} for i in range(10)]}), encoding="utf-8")
+    palm = open_hand()
+    down = tilted(open_hand(back=True))
+    record("20261112-100000-comp_open_hand_hold.json", palm)
+    record("20261112-110000-comp_open_hand_hold.json", down)        # newer, but palm-down
+    kw = dict(examples_dir=tmp_path / "none", probe_dir=tmp_path / "none", fires_dir=fires)
+    pv = gp.preview("comp_open_hand_hold", reg, **kw)
+    assert pv["source"] == gp.SOURCES["fire"]
+    want = gp.fit([gp._xy([[p.x, p.y, p.z] for p in palm], gp.ASPECT)] * 10)[0]
+    assert pv["frames"][0] == want                                     # the palm-to-camera run, not the newer palm-down one
+    reg.composite_gestures["comp_open_hand_hold"]["base_posture"] = "open_hand_down"
+    pv = gp.preview("comp_open_hand_hold", reg, **kw)
+    assert pv["frames"][0] == gp.fit([gp._xy([[p.x, p.y, p.z] for p in down], gp.ASPECT)] * 10)[0]

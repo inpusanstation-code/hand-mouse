@@ -10,10 +10,10 @@ still be set (seconds, 0 = never) for anyone who wants it to end by itself.
   toggle  thumb stuck out, the other four fingers folded, held still for `motion_enter_hold`
           (or the dashboard button / `request`). While on, the same pose held again switches it off
           (the pose must have been let go once after entering).
-  swipe   all four fingers open, a fast straight horizontal stroke of the palm centre
-          thumb out  (variant "nav") : left = back          right = forward
-          thumb tucked (variant "tab"): left = previous tab  right = next tab
-          thumb in between: no command (too ambiguous)
+  swipe   a fast straight horizontal stroke of the palm centre (2026-11-12: the shape picks the command)
+          all four fingers out (variant "tab"): left = previous tab   right = next tab
+          the index alone      (variant "nav"): left = back           right = forward
+          any other shape: no command
   mirror  landmarks are already mirrored (x grows to the user's right), so dx > 0 is "right"
 
 Pure logic: feed (time, 21 landmarks | None); no camera, Qt or OS input here. The caller sends the
@@ -52,6 +52,10 @@ ACTION_KEYS: Dict[str, Tuple[str, ...]] = {
     "window_down": ("win", "down"),    # the downward stroke (2026-11-11, was the Alt+F4 question): restore / minimise
 }
 ACTION_LABELS = {"back": "뒤로", "forward": "앞으로", "tab_prev": "이전 탭", "tab_next": "다음 탭", "close_window": "창 닫기", "window_down": "창 내리기"}
+# 2026-11-12 (user: "탭이동은 손가락을 다 펴고 좌우로 쓸어내는 모션 … 검지만 펴서 좌우로 쓸면 앞으로가기 뒤로가기"): the hand
+# SHAPE picks the variant now, not the thumb. All four fingers out = "tab", the index alone = "nav". The same day the user
+# had leftward = forward for a while, then asked for it the other way ("모션모드 좌우 움직임 바꾸고"): leftward = back
+# (the previous tab), rightward = forward (the next tab).
 DEFAULT_ACTIONS = {
     "nav": {"left": "back", "right": "forward"},
     "tab": {"left": "tab_prev", "right": "tab_next"},
@@ -108,6 +112,30 @@ DEFAULTS: Dict[str, Any] = {
     "motion_recent_move": 0.02,      # travel in the last 0.15 s (frame widths) for a stroke to count as happening now
     "motion_tab_frames": 3,          # frames with a clearly tucked thumb in the last 0.6 s that make a stroke a "tab" stroke
     "motion_settle_speed": 0.2,      # after a swipe the hand must slow below this (frame widths/s) before the next one counts
+    # the index alone (2026-11-12): index curl ratio >= open, the other three <= fold. In this PC's use log the shape held for
+    # '검지만 펴기' passed in 81 % of its frames (the misses: the little finger half out), an open hand in 0 %, other hands 1.3 %
+    "motion_index_open": 1.35,
+    "motion_index_fold": 1.2,
+    # ... or (2026-11-12, "검지 펴서 스와이프 오른쪽은 먹는데 왼쪽은 안 먹음") the other three under this and each at least
+    # motion_index_gap under the index: the left hand held ready to swipe left keeps its middle finger half folded
+    # (curl 1.25-1.45 against the index's 1.8-1.9) and was "no shape" - every refused leftward index stroke of 17:27
+    "motion_index_fold_loose": 1.5,
+    "motion_index_gap": 0.4,
+    "motion_shape_frac": 0.7,
+    "motion_nav_frac": 0.4,          # the same for an index-alone stroke (it blurs, see _stroke)        # share of a stroke's frames in its one shape (open / index alone)
+    "motion_shape_before": 0.3,      # s before a stroke whose (still, sharp) hand shape decides it (see _stroke)
+    # the other hand as a motion hand (2026-11-12, src/other_hand_motion.py): shown open and still this long, it swipes;
+    # lowered out of view this long, it stops. 1 = on (0 = off)
+    "motion_other_hand": 1.0,
+    "motion_other_arm": 0.3,         # s open and still before its swipes count
+    "motion_other_still": 0.05,      # palm centre may move this much (frame widths) while arming
+    "motion_other_lost": 0.5,        # s out of view and it ends (0.25 until 2026-11-12 afternoon: the detector lost a
+                                     # small moving index-alone hand for a second and more, ending the mode mid-use)
+    "motion_custom_down": 1.0,       # 0 = the user's own downward motions are not read (the other hand: see other_hand_motion)
+    # the other hand's strokes may be smaller and slower (2026-11-12, "왼손 움직임을 너무 크게 하지 않아도 작동하게"); the
+    # control hand keeps motion_swipe_min_dx / _speed
+    "motion_other_min_dx": 0.11,
+    "motion_other_min_speed": 0.45,
 }
 
 
@@ -241,6 +269,7 @@ class MotionMode:
         self.last_miss: Optional[Dict[str, Any]] = None   # the biggest stroke that was NOT sent, and why
         self._hist: Deque[Tuple[float, float, float, bool, Optional[str], float, float]] = deque()
         self._recent_f: Deque[Tuple[float, Dict[str, Any]]] = deque()   # hand features of the last 0.8 s
+        self._shapes: Deque[Tuple[float, Optional[str]]] = deque()       # (t, stroke shape) of the last 1.5 s
         self._last_swipe_t = -1e9
         self._last_swipe_dir = 0
         self._last_swipe_speed = 0.0
@@ -336,6 +365,18 @@ class MotionMode:
         hand shapes stay free for other motions)."""
         return min(f["curl"]) >= self.cfg("motion_open_ratio")
 
+    def stroke_shape(self, curls: Sequence[float]) -> Optional[str]:
+        """The swipe variant a hand shape makes: "tab" = all four fingers out, "nav" = the index alone, None = neither."""
+        if min(curls) >= self.cfg("motion_open_ratio"):
+            return "tab"
+        if curls[0] >= self.cfg("motion_index_open") and max(curls[1:]) <= self.cfg("motion_index_fold"):
+            return "nav"
+        gap = self.cfg("motion_index_gap")
+        if (gap > 0 and curls[0] >= self.cfg("motion_index_open") and max(curls[1:]) <= self.cfg("motion_index_fold_loose")
+                and curls[0] - max(curls[1:]) >= gap):
+            return "nav"
+        return None
+
     def pose(self, f: Dict[str, Any]) -> str:
         """A coarse name of the hand shape: entry | open | fist | other (for logs and later motions)."""
         if self.entry_pose(f):
@@ -355,6 +396,7 @@ class MotionMode:
         self._exit_armed = False
         self._thumb_state = None
         self._lows = []
+        self._curls = []
         self._settled = True
         self._pause_since = None
         self._paused_ok = True
@@ -462,24 +504,26 @@ class MotionMode:
         if self.entry_pose(f):
             self._hist.clear()                # the toggle pose is not a swipe pose (and it is not "a bent finger")
             self._lows = []
+            self._curls = []
             return None
         tuck = f["thumb_tuck"]
-        # a state with hysteresis: a frame in between keeps the last decision
-        if tuck >= self.cfg("motion_thumb_nav"):
-            self._thumb_state = "nav"
-        elif tuck <= self.cfg("motion_thumb_tab"):
-            self._thumb_state = "tab"
         # The finger ratios are noisy, most of all when the thumb is tucked over the palm (one real session: only
         # 26-35 % of the thumb-tucked strokes passed "all four extended" against ~60 % with the thumb out, and a
         # single noisy frame refused a stroke). The lowest finger ratio is the median of the last three frames.
         low_raw = min(f["curl"])
         self._lows = (self._lows + [low_raw])[-3:]
         low = sorted(self._lows)[len(self._lows) // 2]
+        self._curls = (getattr(self, "_curls", []) + [tuple(f["curl"])])[-3:]
+        shape = self.stroke_shape(tuple(sorted(c[k] for c in self._curls)[len(self._curls) // 2] for k in range(4)))
         self._recent_f.append((now, f))
-        while self._recent_f and now - self._recent_f[0][0] > .8:
+        while self._recent_f and now - self._recent_f[0][0] > 1.2:     # (the stroke window plus the time before it)
             self._recent_f.popleft()
-        self._hist.append((now, f["palm"][0], f["palm"][1], low >= self.cfg("motion_open_ratio"), self._thumb_state,
+        # [4] = the variant this frame's shape makes ("tab" open hand, "nav" index alone, None)
+        self._hist.append((now, f["palm"][0], f["palm"][1], low >= self.cfg("motion_open_ratio"), shape,
                            tuck, low))
+        self._shapes.append((now, shape))           # longer than the stroke window: the shape BEFORE a stroke
+        while self._shapes and now - self._shapes[0][0] > 1.5:
+            self._shapes.popleft()
         while self._hist and now - self._hist[0][0] > win:
             self._hist.popleft()
         if len(self._hist) >= 3:
@@ -539,6 +583,8 @@ class MotionMode:
         for m_key, m_def in custom_motions.items():
             if not m_def.get("enabled", True):
                 continue
+            if self.cfg("motion_custom_down") < 1.0 and "down" in str(m_def.get("direction", "")):
+                continue                      # (the other hand: lowering it is a downward stroke)
             req_posture = str(m_def.get("posture", "open_hand"))
             if not custom_posture_ok(req_posture, f):
                 # a fast stroke blurs the hand: the shape held for about half of the stroke is enough
@@ -550,10 +596,24 @@ class MotionMode:
             min_dist = float(m_def.get("min_distance", 0.14))
             min_spd = float(m_def.get("min_speed", 0.25))
             target_dir = str(m_def.get("direction", "right"))
+            held = {}                         # frame time -> in the shape (the time before a stroke, see below)
 
             for start in range(len(h) - 3):
                 seg = h[start:]
                 dt = seg[-1][0] - seg[0][0]
+                # the shape held just BEFORE the stroke too (2026-11-12): a fast index-alone stroke blurs, its middle
+                # finger reads open and it passed for a V - the user's "V = Shorts" motion fired instead of the index
+                # swipe. A hand that is still is sharp; with a few frames before the stroke, most must be in the shape.
+                before = [(tt, ff) for tt, ff in self._recent_f
+                          if seg[0][0] - self.cfg("motion_shape_before") <= tt <= seg[0][0] + 0.05]
+                if len(before) >= 3:
+                    ok = 0
+                    for tt, ff in before:
+                        if tt not in held:
+                            held[tt] = custom_posture_ok(req_posture, ff)
+                        ok += held[tt]
+                    if ok * 2 < len(before):
+                        continue
                 if dt < 0.08:
                     continue
                 dx = seg[-1][1] - seg[0][1]
@@ -584,6 +644,15 @@ class MotionMode:
                     dir_ok = True
                 elif target_dir == "diag_down_right" and dx >= min_dist * 0.55 and dy >= min_dist * 0.55:
                     dir_ok = True
+                if dir_ok:
+                    # the hand must still be travelling that way (2026-11-12: after a registered motion fired, the rest of
+                    # the same stroke and the resting hand stayed in the window and fired it again once the cooldown
+                    # ended; the built-in swipes have had this as "stale")
+                    recent = [q for q in seg if seg[-1][0] - q[0] <= 0.15]
+                    ux, uy = dx / dist, dy / dist
+                    if len(recent) < 2 or ((recent[-1][1] - recent[0][1]) * ux + (recent[-1][2] - recent[0][2]) * uy
+                                           < self.cfg("motion_recent_move")):
+                        dir_ok = False
 
                 if dir_ok:
                     self._last_swipe_t = self._last_activity = now
@@ -650,7 +719,7 @@ class MotionMode:
         t0, x0, y0 = seg[0][0], seg[0][1], seg[0][2]
         t1, x1, y1 = seg[-1][0], seg[-1][1], seg[-1][2]
         dt, dx, dy = t1 - t0, x1 - x0, y1 - y0
-        if abs(dx) < 0.10 or dt <= 0:
+        if abs(dx) < min(0.10, 0.8 * self.cfg("motion_swipe_min_dx")) or dt <= 0:
             return None, None
         path = sum(math.hypot(seg[k + 1][1] - seg[k][1], seg[k + 1][2] - seg[k][2]) for k in range(len(seg) - 1))
         speed = abs(dx) / dt
@@ -662,23 +731,50 @@ class MotionMode:
             why.append("short")
         if abs(dy) > self.cfg("motion_swipe_max_ratio") * abs(dx):
             why.append("vertical")
-        # The variant first: with the thumb tucked over the palm the finger ratios read lower (one real session:
-        # the same open hand gave a median lowest-finger ratio of 1.0 vs 1.2 with the thumb out), so the
-        # "fully extended" and "bent" lines for a tab stroke sit a little lower - and tab strokes were slower too.
-        tucked = sum(1 for w in window if w[5] <= self.cfg("motion_thumb_tab"))
-        variant = "tab" if tucked >= self.cfg("motion_tab_frames") else seg[-1][4]
-        suffix = "_tab" if variant == "tab" else ""
-        if speed < self.cfg("motion_swipe_min_speed" + suffix):
+        # The variant is the hand's shape (2026-11-12; until then an open hand with the thumb out or tucked).
+        # The shape the hand had just BEFORE the stroke counts too: still, it is sharp. While it swings, a small hand blurs
+        # and MediaPipe draws the folded fingers half open, so an index-alone stroke fell apart into "no shape" or even read
+        # as an open hand (12:30 that day: index swipes sent nothing). Blur goes one way only - folded fingers look open,
+        # open ones do not look folded - so the index alone held before the stroke decides it whatever the stroke reads;
+        # an open hand (or none) before it still needs most of the stroke open, ending open (motion_shape_frac).
+        counts: Dict[str, int] = {}
+        for q in seg:
+            if q[4]:
+                counts[q[4]] = counts.get(q[4], 0) + 1
+        before_t = self.cfg("motion_shape_before")
+        pre = [sh for tt, sh in self._shapes if t0 - before_t <= tt <= t0 + 0.05]
+        pre_counts: Dict[str, int] = {}
+        for sh in pre:
+            if sh:
+                pre_counts[sh] = pre_counts.get(sh, 0) + 1
+        pre_shape = max(pre_counts, key=pre_counts.get) if pre_counts else None
+        if pre_shape is not None and pre_counts[pre_shape] * 2 < len(pre):
+            pre_shape = None                  # no shape held for half of that time
+        if speed < self.cfg("motion_swipe_min_speed"):
             why.append("slow")
         if path > self.cfg("motion_swipe_straight") * math.hypot(dx, dy):
             why.append("curved")
-        open_thr, bent_thr = self.cfg("motion_open_ratio" + suffix), self.cfg("motion_open_min" + suffix)
-        if not (seg[0][6] >= open_thr and seg[-1][6] >= open_thr):
-            why.append("ends_closed")
-        elif sum(1 for s in seg if s[6] >= open_thr) / len(seg) < self.cfg("motion_swipe_open_frac"):
-            why.append("not_open")
-        if min(w[6] for w in window) < bent_thr:
-            why.append("bent")                # a finger was really folded at some moment of the last 0.6 s
+        if pre_shape == "nav":
+            variant = "nav"
+        else:
+            pre_shape = None
+            variant = max(counts, key=counts.get) if counts else None
+            # an index-alone stroke blurs into "no shape" (the folded fingers drawn half open), never into a fist: it may
+            # end blurred and needs only motion_nav_frac of its frames (2026-11-12: left strokes of the left hand ended
+            # blurred or were index-alone in 40-65 % of their frames, right strokes were not)
+            frac = self.cfg("motion_nav_frac") if variant == "nav" else self.cfg("motion_shape_frac")
+            ends_ok = seg[-1][4] in (variant, None) if variant == "nav" else seg[-1][4] == variant
+            if variant is not None and not ends_ok:
+                why.append("ends_closed")
+            elif variant is not None and counts[variant] / len(seg) < frac:
+                why.append("not_open")
+            elif variant == "nav" and counts.get("tab", 0) > .25 * len(seg):
+                why.append("not_open")        # the blur reads "no shape" (ring and little finger stay folded), not open
+                                              # hands: a stroke that was open for a good part is not an index stroke
+            # an open-hand (tab) stroke also needs the hand open BEFORE it (2026-11-12: a fist or a shaka swiped fast
+            # blurs and reads open on the way - it is the user's own motion, not a tab change)
+            if variant == "tab" and len(pre) >= 4 and pre_counts.get("tab", 0) * 2 < len(pre):
+                why.append("not_open_before")
         # the hand must still be travelling that way: a stroke that was refused a moment ago (the return
         # stroke) stays in the window and must not be accepted later, while the hand rests
         recent = [s for s in seg if t1 - s[0] <= 0.15]
@@ -687,7 +783,7 @@ class MotionMode:
         # (The swing itself moves the thumb: on left strokes it popped OUT, on right strokes it tucked IN, so
         # "tucked" counts if the thumb was clearly tucked at any time in the window, a few frames, not one.)
         if variant is None:
-            why.append("thumb_unclear")
+            why.append("no_shape")
         if self._last_swipe_dir == -direction and now - self._last_swipe_t < self.cfg("motion_return_block"):
             # the hand coming back: no rest after the last swipe, or clearly slower than that swipe was
             if self.cfg("motion_reverse_pause") > 0 and not self._paused_ok:
@@ -704,7 +800,8 @@ class MotionMode:
         self._paused_ok = False
         self._pause_since = None
         self._hist.clear()
-        info = {"variant": variant, "side": side, "action": action, "dx": round(dx, 3), "dy": round(dy, 3),
+        info = {"variant": variant, "shape_from": "before" if pre_shape is not None else "stroke",
+                "side": side, "action": action, "dx": round(dx, 3), "dy": round(dy, 3),
                 "seconds": round(dt, 2), "speed": round(speed, 2), "frames": len(seg),
                 "straight": round(path / max(1e-6, math.hypot(dx, dy)), 2)}
         self.last_swipe = info

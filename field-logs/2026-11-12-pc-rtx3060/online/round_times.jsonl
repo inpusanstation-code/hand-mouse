@@ -1,0 +1,7 @@
+{"when": "2026-11-12 11:23:57", "seconds": 26.1, "stages": {"import": 2.7, "prepare": 13.7, "update": 0.3, "check": 1.8, "verifier": 7.6}, "status": "rejected", "auto": true}
+{"when": "2026-11-12 11:54:38", "seconds": 24.3, "stages": {"import": 2.6, "prepare": 11.0, "update": 0.4, "check": 1.9, "verifier": 8.4}, "status": "rejected", "auto": true}
+{"when": "2026-11-12 12:04:51", "seconds": 25.4, "stages": {"import": 2.7, "prepare": 10.9, "update": 0.4, "check": 2.0, "verifier": 9.3}, "status": "rejected", "auto": true}
+{"when": "2026-11-12 12:53:42", "seconds": 42.4, "stages": {"import": 3.3, "prepare": 28.0, "update": 0.5, "check": 2.1, "verifier": 8.5}, "status": "rejected", "auto": true}
+{"when": "2026-11-12 14:04:54", "cut": true, "stage": "prepare", "seconds": 2.1, "tries": 1}
+{"when": "2026-11-12 14:05:22", "seconds": 26.0, "stages": {"import": 3.2, "prepare": 12.6, "update": 0.4, "check": 1.7, "verifier": 8.1}, "status": "rejected", "auto": true}
+{"when": "2026-11-12 15:11:29", "seconds": 28.5, "stages": {"import": 4.2, "prepare": 13.4, "update": 0.6, "check": 1.9, "verifier": 8.3}, "status": "rejected", "auto": true}

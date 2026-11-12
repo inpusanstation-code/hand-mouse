@@ -80,16 +80,22 @@ def test_the_page_stops_when_the_fist_opens_though_the_grip_holds_on_a_moment(tm
     tail = [abs(v) for v in sent[-6:]]
     assert abs(sum(sent) - scrolled) <= 1.2 * step and tail == sorted(tail, reverse=True), (sent, scrolled)
     end = time.perf_counter() + rt.grip.GRACE + .05         # the open hand stays in view while the grip runs out
+    biggest, last = 0.0, tuple(rt.mouse.last_screen_pos)
     while time.perf_counter() < end:
         rt.tracker.dx += .002
         time.sleep(1 / 60)
         rt._step()
+        biggest = max(biggest, math.dist(rt.mouse.last_screen_pos, last))
+        last = tuple(rt.mouse.last_screen_pos)
+    # no frame jumps (the logged releases went 133-996 px in one frame). 2026-11-12: the total below follows the hand's own
+    # slow movement in this loop, and the faster cursor filter follows it more closely (42 px seen once against 40)
+    assert biggest < 20, biggest
     assert rt.grip.mode is None and not rt.mouse.scroll_coasting      # and nothing to coast on
     assert abs(sum(sent) - scrolled) <= 1.2 * step
     scrolled = sum(sent)
     # the cursor was held over the page; the hand is now far to the right: no jump there
     moved = math.dist(rt.mouse.last_screen_pos, still)
-    assert moved < 40, moved
+    assert moved < 60, moved
     restore2 = forcing(rt, active_gesture="fist")          # a new fist scrolls again from here
     for _ in range(rt.grip.SOLID + 2):
         rt._step()
@@ -125,3 +131,27 @@ def test_a_few_stray_fist_frames_on_a_moving_hand_do_not_stop_the_cursor_or_shif
     steps = [b - a for a, b in zip(xs[5:], xs[6:])]
     assert min(steps) > 0, steps                           # the cursor never stood still
     assert rt.box_mapper._offset == (0.0, 0.0)             # and it is where the hand is: the box and the monitor line up
+
+
+def test_a_fist_just_over_the_engine_limit_still_grabs_in_the_virtual_hand(tmp_path):
+    """2026-11-12 ("주먹 스크롤이 적용 안되는 경우가 잦다"): curls of 1.04-1.05 with the thumb along the side, a thumb half out
+    read as the thumbs-up pose, the thumb on the index read as a pinch - the engine said no fist."""
+    from tests.test_gesture_mouse import make_real_hand
+    rt = box_runtime(tmp_path)
+    rt.tracker.hand = make_real_hand(curled=True)              # (the open test hand has its thumb straight up: excluded)
+    rt._step()
+    forcing(rt, active_gesture="no_pinch")                      # the engine: no fist
+    rt.engine.finger_curl_ratios = lambda pts: (0.97, 1.03, 1.04, 1.01)
+    rt.shape_pinch.reset()
+    for _ in range(rt.grip.START + 2):
+        rt._step()
+    assert rt.grip.mode == "scroll"
+    # looser than that, or the index out: no
+    rt2 = box_runtime(tmp_path)
+    rt2.tracker.hand = make_real_hand(curled=True)
+    rt2.engine.finger_curl_ratios = lambda pts: (0.97, 1.03, 1.04, 1.01)
+    assert rt2._loose_fist(rt2.tracker.hand)
+    rt2.engine.finger_curl_ratios = lambda pts: (1.08, 1.03, 1.04, 1.01)
+    assert not rt2._loose_fist(rt2.tracker.hand)
+    rt2.engine.finger_curl_ratios = lambda pts: (0.97, 1.1, 1.04, 1.01)
+    assert not rt2._loose_fist(rt2.tracker.hand)

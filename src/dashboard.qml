@@ -128,6 +128,15 @@ ApplicationWindow {
         readonly property int nOk: count("ok")
         readonly property int nBad: count("bad")
         readonly property int nLeft: count("")
+        // every use has a verdict (2026-11-12, "전부 다 하면 다했다는 메세지"): review = none left to look at;
+        // the plain viewer = each row is passed, rejected or marked with F
+        readonly property bool allDone: {
+            if (cases.loading || items.length === 0) return false
+            if (review) return nLeft === 0
+            for (var i = 0; i < items.length; i++)
+                if (!items[i].marked && items[i].review !== "ok" && items[i].review !== "bad") return false
+            return true
+        }
         function judge(v) {
             if (!review || shown === null) return
             var i = Math.min(current, items.length - 1)
@@ -189,6 +198,32 @@ ApplicationWindow {
                 wrapMode: Text.Wrap
                 color: window.muted
                 font.pixelSize: 12
+            }
+            // the session is finished: say so plainly, not only in the counts under the replay
+            Rectangle {
+                objectName: "useReviewDone"
+                visible: useCasesDialog.allDone
+                Layout.fillWidth: true
+                implicitHeight: doneText.implicitHeight + 20
+                radius: 8
+                color: "#E6F6EF"
+                border.color: "#6CCB9F"
+                Text {
+                    id: doneText
+                    objectName: "useReviewDoneText"
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    verticalAlignment: Text.AlignVCenter
+                    wrapMode: Text.Wrap
+                    color: "#15803D"
+                    font.pixelSize: 14
+                    font.bold: true
+                    text: useCasesDialog.review
+                          ? "검토를 모두 마쳤어요 (" + useCasesDialog.items.length + "개 · 통과 " + useCasesDialog.nOk
+                            + " · 오탐지 " + useCasesDialog.nBad + "). [닫기]를 누르면 통과한 사례를 다시 세고, 필요한 수가 차면 자동 학습이 시작돼요."
+                          : "이 사례들은 모두 판정했어요 (" + useCasesDialog.items.length + "개 · 통과 " + useCasesDialog.nOk
+                            + " · 아님 " + (useCasesDialog.items.length - useCasesDialog.nOk) + "). 더 할 일은 없어요."
+                }
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -384,7 +419,7 @@ ApplicationWindow {
                         Text {
                             Layout.fillWidth: true
                             text: "통과 " + useCasesDialog.nOk + "  ·  오탐지 " + useCasesDialog.nBad + "  ·  남음 " + useCasesDialog.nLeft
-                                  + (useCasesDialog.nLeft === 0 ? "   다 봤어요. 닫으면 통과한 사례로 이어 가요." : "")
+                                  + (useCasesDialog.nLeft === 0 ? "   · 다 봤어요" : "")
                             font.pixelSize: 12
                             font.bold: true
                             color: useCasesDialog.nLeft === 0 ? "#15803D" : window.ink
@@ -1472,6 +1507,17 @@ ApplicationWindow {
                                                     }
                                                 }
                                                 TextLabel {
+                                                    // 2026-11-12: a gesture registered without an AI history line (older app, copied
+                                                    // config) is listed too, so it can be seen, changed and deleted here
+                                                    objectName: "llmAdoptedNote"
+                                                    Layout.fillWidth: true
+                                                    visible: historyCard.modelData.adopted === true
+                                                    text: "AI 기록 없이 등록된 동작 · 목록에 " + historyCard.modelData.time + " 추가"
+                                                    color: window.muted
+                                                    font.pixelSize: 11
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                TextLabel {
                                                     Layout.fillWidth: true
                                                     visible: (historyCard.modelData.request || "") !== ""
                                                     text: "요청: " + historyCard.modelData.request + "  ·  " + historyCard.modelData.time
@@ -1685,8 +1731,8 @@ ApplicationWindow {
                                                     text: "삭제"
                                                     danger: true
                                                     onClicked: confirmDialog.ask("AI 연결 삭제",
-                                                        historyCard.modelData.created
-                                                            ? "'" + historyCard.modelData.gesture_name + "' 동작을 지웁니다."
+                                                        (historyCard.modelData.created || historyCard.modelData.custom) && !historyCard.modelData.app_match
+                                                            ? "'" + historyCard.modelData.gesture_name + "' 동작을 지웁니다. 지운 뒤에는 그 손짓에 아무 명령도 실행되지 않아요. (목록 아래 '지운 동작'에서 되살릴 수 있어요)"
                                                             : historyCard.modelData.app_match
                                                                 ? "'" + historyCard.modelData.gesture_name + "'의 " + historyCard.modelData.app_match + " 전용 명령을 지웁니다."
                                                                 : "'" + historyCard.modelData.gesture_name + "'에 AI가 연결한 명령을 지우고 기본 명령으로 돌립니다.",
@@ -1697,6 +1743,57 @@ ApplicationWindow {
                                                     text: "목록에서 지우기"
                                                     onClicked: dashboard.forgetLlmConnection(historyCard.modelData.index)
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                                // 2026-11-12 ("손바닥 폈을때 바탕화면 보기 명령어 어디갔냐?"): a deleted gesture is kept and
+                                // can be brought back (src/llm_binding.History.restore)
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.topMargin: 6
+                                    visible: dashboard.llmDeleted.length > 0
+                                    SectionLabel { text: "지운 동작 (" + dashboard.llmDeleted.length + ")" }
+                                    Item { Layout.fillWidth: true }
+                                    CheckBox { id: deletedShown; objectName: "llmDeletedShown"; text: "보기"; checked: false }
+                                }
+                                Repeater {
+                                    model: deletedShown.checked ? dashboard.llmDeleted : []
+                                    delegate: Rectangle {
+                                        objectName: "llmDeletedCard"
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        implicitHeight: deletedRow.implicitHeight + 14
+                                        radius: 8
+                                        color: Theme.Studio.surface
+                                        border.color: window.line
+                                        RowLayout {
+                                            id: deletedRow
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            anchors.margins: 8
+                                            spacing: 8
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    text: modelData.name + "  →  " + (modelData.after || "")
+                                                    font.pixelSize: 13
+                                                    wrapMode: Text.Wrap
+                                                }
+                                                TextLabel {
+                                                    Layout.fillWidth: true
+                                                    text: "지운 때 " + modelData.time
+                                                    color: window.muted
+                                                    font.pixelSize: 11
+                                                }
+                                            }
+                                            CompactButton {
+                                                objectName: "llmRestoreButton"
+                                                text: "되살리기"
+                                                onClicked: dashboard.restoreDeletedGesture(modelData.trash_index)
                                             }
                                         }
                                     }
@@ -1922,6 +2019,122 @@ ApplicationWindow {
                     text: dashboard.motionLabel
                     accent: dashboard.motionLabel.indexOf("켜짐") >= 0
                     onClicked: dashboard.toggleMotion()
+                }
+                // the other hand as a motion hand (src/other_hand_motion.py, 2026-11-12)
+                ActionButton {
+                    objectName: "settingsOtherMotion"
+                    Layout.fillWidth: true
+                    text: dashboard.otherMotionOn ? "다른 손으로 모션 · 켜짐 (눌러서 끄기)" : "다른 손으로 모션 · 꺼짐 (눌러서 켜기)"
+                    accent: dashboard.otherMotionOn
+                    onClicked: dashboard.setOtherMotion(!dashboard.otherMotionOn)
+                }
+                TextLabel {
+                    Layout.fillWidth: true
+                    text: "조작하지 않는 손(오른손으로 조작하면 왼손)을 펴서 0.3초 들고 있으면 그 손으로 모션 명령을 보내요. 손 펴고 왼쪽/오른쪽 = 다음/이전 탭, 검지만 펴고 왼쪽/오른쪽 = 앞으로/뒤로. "
+                          + "손을 내리면 끝나고, 조작하는 손은 그동안에도 커서를 움직여요. 두 손이 다 카메라에 보여야 하고, [손 자르기]가 켜져 있으면 안 보여요."
+                    color: window.muted
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                Divider {}
+                // ---------------------------------------------------------------- the skeletons' look (src/skeleton_style.py)
+                SectionLabel { text: "스켈레톤 표시" }
+                ColumnLayout {
+                    id: skelBox
+                    objectName: "skeletonStyleBox"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    readonly property var values: dashboard.skeletonStyle.values || {}
+                    readonly property var presets: dashboard.skeletonStyle.presets || []
+                    readonly property var ranges: dashboard.skeletonStyle.ranges || {}
+                    Repeater {
+                        // [key, label]
+                        model: [["main", "카메라 화면 · 조작하는 손"], ["other", "카메라 화면 · 다른 손 (모션)"],
+                                ["vh_line", "바탕화면 가상 손 · 선"], ["vh_joint", "바탕화면 가상 손 · 관절"]]
+                        delegate: ColumnLayout {
+                            required property var modelData
+                            readonly property string key: modelData[0]
+                            readonly property string current: skelBox.values[key] || ""
+                            Layout.fillWidth: true
+                            spacing: 3
+                            TextLabel { text: modelData[1]; font.pixelSize: 12 }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 5
+                                Repeater {
+                                    model: skelBox.presets
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        objectName: "skelSwatch_" + parent.parent.key + "_" + modelData
+                                        width: 24; height: 24; radius: 12
+                                        color: modelData
+                                        border.width: parent.parent.current === modelData ? 3 : 1
+                                        border.color: parent.parent.current === modelData ? window.ink : window.line
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: dashboard.setSkeletonStyle(parent.parent.parent.key, parent.modelData)
+                                        }
+                                    }
+                                }
+                                // any other colour as #RRGGBB
+                                TextField {
+                                    objectName: "skelHex_" + parent.parent.key
+                                    width: 92; height: 26
+                                    font.pixelSize: 12
+                                    text: parent.parent.current
+                                    placeholderText: "#RRGGBB"
+                                    onEditingFinished: if (!dashboard.setSkeletonStyle(parent.parent.key, text)) text = parent.parent.current
+                                }
+                            }
+                        }
+                    }
+                    Repeater {
+                        // [key, label, scale shown, unit]
+                        model: [["preview_alpha", "카메라 화면 스켈레톤 불투명도", 100, "%"], ["vh_alpha", "바탕화면 가상 손 불투명도", 100, "%"],
+                                ["width", "선 굵기", 1, "배"]]
+                        delegate: RowLayout {
+                            required property var modelData
+                            readonly property string key: modelData[0]
+                            readonly property var range: skelBox.ranges[key] || [0, 1]
+                            Layout.fillWidth: true
+                            spacing: 6
+                            TextLabel { text: modelData[1]; font.pixelSize: 12; Layout.preferredWidth: 190 }
+                            Slider {
+                                objectName: "skelSetting_" + parent.key
+                                Layout.fillWidth: true
+                                from: parent.range[0]
+                                to: parent.range[1]
+                                stepSize: 0.05
+                                snapMode: Slider.SnapAlways
+                                value: skelBox.values[parent.key] !== undefined ? skelBox.values[parent.key] : 1
+                                onPressedChanged: if (!pressed) dashboard.setSkeletonStyle(parent.key, value)
+                            }
+                            TextLabel {
+                                Layout.preferredWidth: 70
+                                horizontalAlignment: Text.AlignRight
+                                text: modelData[2] === 100 ? Math.round((skelBox.values[parent.key] || 1) * 100) + " %"
+                                                           : Number(skelBox.values[parent.key] || 1).toFixed(2) + " 배"
+                                font.pixelSize: 12
+                                color: window.muted
+                            }
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        TextLabel {
+                            Layout.fillWidth: true
+                            text: "집기 선(노랑·초록·빨강)과 주먹 스크롤 중 주황은 신호라 색이 바뀌지 않아요."
+                            color: window.muted
+                            font.pixelSize: 11
+                            wrapMode: Text.Wrap
+                        }
+                        CompactButton {
+                            objectName: "skeletonStyleReset"
+                            text: "기본값으로"
+                            onClicked: dashboard.resetSkeletonStyle()
+                        }
+                    }
                 }
                 Divider {}
                 SectionLabel { text: "커서 방향 보정" }
@@ -3806,8 +4019,29 @@ ApplicationWindow {
                                     Layout.minimumWidth: 0
                                     implicitWidth: 0
                                     accent: dashboard.boxEditing
-                                    text: dashboard.boxEditing ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
-                                    onClicked: dashboard.setBoxEditing(!dashboard.boxEditing)
+                                    text: dashboard.boxEditing && !dashboard.boxEditingOther ? "그리는 중 · 누르면 취소" : "손 움직일 영역 다시 그리기"
+                                    onClicked: dashboard.setBoxEditing(!(dashboard.boxEditing && !dashboard.boxEditingOther))
+                                }
+                                // the other hand's own box (2026-11-12, "왼손 모니터 박스를 별도로"): the whole image until drawn
+                                RowLayout {
+                                    visible: !dashboard.pointerOnly && dashboard.virtualHandOn && dashboard.otherMotionOn
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    ActionButton {
+                                        objectName: "otherBoxButton"
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        implicitWidth: 0
+                                        accent: dashboard.boxEditingOther
+                                        text: dashboard.boxEditingOther ? "그리는 중 · 누르면 취소"
+                                              : (dashboard.otherBoxDrawn ? "다른 손 영역 다시 그리기" : "다른 손 영역 그리기")
+                                        onClicked: dashboard.setOtherBoxEditing(!dashboard.boxEditingOther)
+                                    }
+                                    ActionButton {
+                                        visible: dashboard.otherBoxDrawn && !dashboard.boxEditingOther
+                                        text: "전체 화면"
+                                        onClicked: dashboard.resetOtherBox()
+                                    }
                                 }
                                 SectionLabel { visible: !(dashboard.virtualHandOn && !dashboard.pointerOnly); text: "커서 옆 손가락 표시" }
                                 Segmented {
@@ -4139,13 +4373,29 @@ ApplicationWindow {
                             property point end
                             property bool dragging: false
                             readonly property var box: dashboard.virtualBox
+                            readonly property bool drawingOther: dashboard.boxEditingOther
+                            readonly property color otherColour: (dashboard.skeletonStyle && dashboard.skeletonStyle.values
+                                                                  && dashboard.skeletonStyle.values.other) || "#D946EF"
+                            // the other hand's box, in its colour (only once drawn: the whole image needs no frame)
                             Rectangle {
+                                objectName: "otherBoxFrame"
+                                readonly property var b: dashboard.otherBox
+                                visible: dashboard.otherMotionOn && dashboard.otherBoxDrawn && !boxLayer.drawingOther
+                                x: b[0] * boxLayer.width; y: b[1] * boxLayer.height
+                                width: (b[2] - b[0]) * boxLayer.width; height: (b[3] - b[1]) * boxLayer.height
+                                color: "transparent"
+                                border.color: boxLayer.otherColour
+                                border.width: 2
+                                radius: 4
+                            }
+                            Rectangle {
+                                visible: !boxLayer.drawingOther || boxLayer.dragging
                                 x: (boxLayer.dragging ? Math.min(boxLayer.start.x, boxLayer.end.x) : boxLayer.box[0] * boxLayer.width)
                                 y: (boxLayer.dragging ? Math.min(boxLayer.start.y, boxLayer.end.y) : boxLayer.box[1] * boxLayer.height)
                                 width: boxLayer.dragging ? Math.abs(boxLayer.end.x - boxLayer.start.x) : (boxLayer.box[2] - boxLayer.box[0]) * boxLayer.width
                                 height: boxLayer.dragging ? Math.abs(boxLayer.end.y - boxLayer.start.y) : (boxLayer.box[3] - boxLayer.box[1]) * boxLayer.height
                                 color: dashboard.boxEditing ? Qt.rgba(0.27, 0.9, 0.74, 0.12) : "transparent"
-                                border.color: window.mint
+                                border.color: boxLayer.drawingOther ? boxLayer.otherColour : window.mint
                                 border.width: dashboard.boxEditing ? 3 : 2
                                 radius: 4
                             }
@@ -4161,7 +4411,8 @@ ApplicationWindow {
                                 Text {
                                     id: boxHint
                                     anchors.centerIn: parent
-                                    text: "손을 움직일 영역을 끌어서 그리세요 · 이 영역이 모니터 전체가 돼요"
+                                    text: boxLayer.drawingOther ? "다른 손을 움직일 영역을 끌어서 그리세요 · 이 영역이 모니터 전체가 돼요"
+                                                                : "손을 움직일 영역을 끌어서 그리세요 · 이 영역이 모니터 전체가 돼요"
                                     color: "#F5F7F8"
                                     font.pixelSize: 14
                                     font.family: Theme.Studio.font
@@ -9162,6 +9413,138 @@ ApplicationWindow {
         }
     }
 
+    // The other hand drawn on the screen too (src/other_hand_motion.py, 2026-11-12, "왼쪽 스켈레톤도 모니터에 같이"): where it is
+    // on the camera image, in the settings window's "다른 손" colour; faint while only seen, full and thick once it swipes.
+    Window {
+        id: otherHandWindow
+        objectName: "otherHandWindow"
+        title: "MANUX 다른 손"
+        transientParent: null
+        readonly property var hand: dashboard.otherHand
+        readonly property bool present: hand.pts !== undefined
+        readonly property var look: (dashboard.skeletonStyle && dashboard.skeletonStyle.values) || ({})
+        visible: dashboard.virtualHandOn && !dashboard.pointerOnly && present
+        color: "transparent"
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+               | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+        width: 640
+        height: 640
+        property var shown: null
+        property real shownX: 0
+        property real shownY: 0
+        function placeAt(px, py) { x = Math.round(px - width / 2); y = Math.round(py - height / 2) }
+        onPresentChanged: if (!present) shown = null
+        onHandChanged: {
+            if (hand.pts !== undefined && (shown === null || shown.length !== hand.pts.length)) {
+                shown = hand.pts.slice(); shownX = hand.x; shownY = hand.y
+                placeAt(shownX, shownY)
+                otherCanvas.requestPaint()
+            }
+        }
+        FrameAnimation {
+            running: otherHandWindow.visible && otherHandWindow.shown !== null
+            onTriggered: {
+                var w = otherHandWindow, h = w.hand
+                if (!h.pts || w.shown === null) return
+                var k = 1 - Math.exp(-Math.min(frameTime, 0.1) / 0.02)
+                var pts = w.shown
+                for (var i = 0; i < pts.length; i++) pts[i] += (h.pts[i] - pts[i]) * k
+                w.shownX += (h.x - w.shownX) * k
+                w.shownY += (h.y - w.shownY) * k
+                w.placeAt(w.shownX, w.shownY)
+                otherCanvas.requestPaint()
+            }
+        }
+        readonly property var bones: [
+            [0,1],[1,2],[2,3],[3,4], [0,5],[5,6],[6,7],[7,8], [5,9],[9,10],[10,11],[11,12],
+            [9,13],[13,14],[14,15],[15,16], [13,17],[17,18],[18,19],[19,20], [0,17]
+        ]
+        Canvas {
+            id: otherCanvas
+            objectName: "otherHandCanvas"
+            anchors.fill: parent
+            readonly property real stateAlpha: ({"idle": .55, "arming": .8, "on": 1.0})[otherHandWindow.hand.state] || .55
+            opacity: (otherHandWindow.look.vh_alpha || 1.0) * stateAlpha * (otherHandWindow.hand.lost ? 0.45 : 1.0)
+            Connections { target: dashboard; function onSkeletonStyleChanged() { otherCanvas.requestPaint() } }
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var w = otherHandWindow, pts = w.shown
+                if (pts === null || !w.hand.pts) return
+                var wk = (w.look.width || 1.0) * (w.hand.state === "on" ? 1.4 : 1.0)
+                var col = w.look.other || "#D946EF"
+                var cx = width / 2, cy = height / 2
+                function px(i) { return [cx + pts[2 * i], cy + pts[2 * i + 1]] }
+                ctx.lineCap = "round"
+                for (var pass = 0; pass < 2; pass++) {
+                    ctx.strokeStyle = pass === 0 ? "rgba(17,35,49,0.55)" : col
+                    ctx.lineWidth = (pass === 0 ? 7 : 3.5) * wk
+                    ctx.beginPath()
+                    for (var b = 0; b < w.bones.length; b++) {
+                        var a = px(w.bones[b][0]), c = px(w.bones[b][1])
+                        ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1])
+                    }
+                    ctx.stroke()
+                }
+                ctx.fillStyle = col
+                for (var j = 0; j < 21; j++) {
+                    var p = px(j)
+                    ctx.beginPath(); ctx.arc(p[0], p[1], (j % 4 === 0 && j > 0 ? 5 : 3.5) * Math.max(.7, wk), 0, 2 * Math.PI); ctx.fill()
+                }
+                // the speed dial (src/speed_dial.py, 2026-11-12): an arc above the hand, a tick per step, the needle at the
+                // hand's turn, the steps taken filled in (green faster, amber slower)
+                var dial = w.hand.dial
+                if (dial) {
+                    var reach = 40                                   // the arc goes round the hand, past its farthest joint
+                    for (var q = 0; q < 21; q++) reach = Math.max(reach, Math.hypot(pts[2 * q], pts[2 * q + 1]))
+                    var R = Math.min(250, reach + 34), ox = cx, oy = cy
+                    var lo = dial.min * dial.step_deg, hi = dial.max * dial.step_deg   // the speeds' range, degrees from 1x
+                    // the dial's middle at the hand's 11 o'clock (dial.center, degrees from up): the needle is where the hand points
+                    // dial.dir -1: "more" is to the left (counter-clockwise), the easy turn of the left hand
+                    function at(deg) { return -Math.PI / 2 + ((dial.center || 0) + (dial.dir || 1) * deg) * Math.PI / 180 }
+                    function ring(a0, a1, colour, width) {
+                        var s0 = at(a0), s1 = at(a1)
+                        ctx.strokeStyle = colour; ctx.lineWidth = width
+                        ctx.beginPath(); ctx.arc(ox, oy, R, Math.min(s0, s1), Math.max(s0, s1)); ctx.stroke()
+                    }
+                    ctx.lineCap = "round"
+                    ring(lo, hi, "rgba(17,35,49,0.55)", 14)
+                    ring(lo, hi, "rgba(245,247,248,0.85)", 6)
+                    var from = (dial.from || 0) * dial.step_deg, done = dial.steps * dial.step_deg   // filled from the start
+                    if (dial.steps > (dial.from || 0)) ring(from, done, "#2FBF8F", 8)
+                    if (dial.steps < (dial.from || 0)) ring(done, from, "#F2B544", 8)
+                    ctx.strokeStyle = "#112331"; ctx.lineWidth = 2
+                    for (var k = dial.min; k <= dial.max; k++) {
+                        var ang = at(k * dial.step_deg)
+                        var r1 = R - (k === 0 ? 14 : 8), r2 = R + (k === 0 ? 14 : 8)
+                        ctx.beginPath(); ctx.moveTo(ox + Math.cos(ang) * r1, oy + Math.sin(ang) * r1)
+                        ctx.lineTo(ox + Math.cos(ang) * r2, oy + Math.sin(ang) * r2); ctx.stroke()
+                    }
+                    var needle = at(Math.max(lo - 10, Math.min(hi + 10, dial.turn)))
+                    ctx.strokeStyle = col; ctx.lineWidth = 4
+                    ctx.beginPath(); ctx.moveTo(ox + Math.cos(needle) * (R - 22), oy + Math.sin(needle) * (R - 22))
+                    ctx.lineTo(ox + Math.cos(needle) * (R + 22), oy + Math.sin(needle) * (R + 22)); ctx.stroke()
+                    ctx.fillStyle = col
+                    ctx.beginPath(); ctx.arc(ox + Math.cos(needle) * R, oy + Math.sin(needle) * R, 8, 0, 2 * Math.PI); ctx.fill()
+                    ctx.textAlign = "center"
+                    ctx.lineJoin = "round"
+                    function say(text, x, y, size) {                  // light text with a dark edge: readable on any page
+                        ctx.font = "bold " + size + "px sans-serif"
+                        ctx.strokeStyle = "rgba(17,35,49,0.85)"; ctx.lineWidth = 4
+                        ctx.strokeText(text, x, y)
+                        ctx.fillStyle = "#F5F7F8"; ctx.fillText(text, x, y)
+                    }
+                    var ends = [[dial.min, dial.lo_text], [dial.max, dial.hi_text]]   // the words come from src/speed_dial.py
+                    for (var e = 0; e < 2; e++) {
+                        var ea = at(ends[e][0] * dial.step_deg)
+                        say(ends[e][1], ox + Math.cos(ea) * (R + 32), oy + Math.sin(ea) * (R + 32) + 5, 13)
+                    }
+                    say(dial.label, ox, oy - R - 22, 22)
+                    say(dial.caption, ox, oy - R - 48, 13)
+                }
+            }
+        }
+    }
     // The control hand drawn at the cursor (src/virtual_hand.py): its palm centre is the cursor; a click lands where the pinch meets.
     // Click-through and always on top, like the status pill; it follows the cursor instead of covering the screen.
     Window {
@@ -9222,11 +9605,15 @@ ApplicationWindow {
         Canvas {
             id: handCanvas
             anchors.fill: parent
-            opacity: virtualHandWindow.hand.lost ? 0.35 : (virtualHandWindow.hand.paused ? 0.45 : 1.0)
+            // the user's look (settings window, src/skeleton_style.py): colours, opacity, thickness
+            readonly property var look: (dashboard.skeletonStyle && dashboard.skeletonStyle.values) || ({})
+            opacity: (look.vh_alpha || 1.0) * (virtualHandWindow.hand.lost ? 0.35 : (virtualHandWindow.hand.paused ? 0.45 : 1.0))
+            Connections { target: dashboard; function onSkeletonStyleChanged() { handCanvas.requestPaint() } }
             onPaint: {
                 var ctx = getContext("2d")
                 ctx.reset()
                 var h = virtualHandWindow.hand
+                var wk = look.width || 1.0
                 var pts = virtualHandWindow.shown
                 if (!h.pts || pts === null) return
                 // with an anchor (box mode) the window centre is the cursor and the hand is shifted so its anchor is there
@@ -9236,8 +9623,8 @@ ApplicationWindow {
                 ctx.lineCap = "round"
                 // a dark outline under a light line: visible on light and dark windows alike
                 for (var pass = 0; pass < 2; pass++) {
-                    ctx.strokeStyle = pass === 0 ? "rgba(17,35,49,0.55)" : (h.grip ? "#F2B544" : "rgba(245,247,248,0.95)")
-                    ctx.lineWidth = pass === 0 ? 7 : 3.5
+                    ctx.strokeStyle = pass === 0 ? "rgba(17,35,49,0.55)" : (h.grip ? "#F2B544" : (look.vh_line || "#F5F7F8"))
+                    ctx.lineWidth = (pass === 0 ? 7 : 3.5) * wk
                     ctx.beginPath()
                     for (var b = 0; b < virtualHandWindow.bones.length; b++) {
                         var a = px(virtualHandWindow.bones[b][0]), c = px(virtualHandWindow.bones[b][1])
@@ -9247,8 +9634,8 @@ ApplicationWindow {
                 }
                 for (var j = 0; j < 21; j++) {
                     var p = px(j)
-                    ctx.beginPath(); ctx.arc(p[0], p[1], j % 4 === 0 && j > 0 ? 5 : 3.5, 0, 2 * Math.PI)
-                    ctx.fillStyle = "#46E5BD"; ctx.fill()
+                    ctx.beginPath(); ctx.arc(p[0], p[1], (j % 4 === 0 && j > 0 ? 5 : 3.5) * Math.max(.7, wk), 0, 2 * Math.PI)
+                    ctx.fillStyle = look.vh_joint || "#46E5BD"; ctx.fill()
                 }
                 // thumb -> finger lines of the pinches the engine sees
                 var colors = {"near": "#F2B544", "pinched": "#2FBF8F", "action": "#E5484D"}

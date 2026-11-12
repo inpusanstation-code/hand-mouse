@@ -37,7 +37,7 @@ def test_with_the_control_off_motion_mode_runs_as_a_simulation(tmp_path):
     assert "시뮬레이션" in rt._status
     sent = _swipe(rt)
     assert rt._motion(1.1, rt.ui, []) and sent == []              # nothing sent ...
-    assert rt._motion_last == "시뮬레이션: 손 펴고 왼쪽 쓸기 → 단축키: Alt + ←"     # ... but shown: the gesture and its command
+    assert rt._motion_last == "시뮬레이션: 검지만 펴고 왼쪽 쓸기 → 단축키: Alt + ←"     # 2026-11-12: "back" = the index to the left     # ... but shown: the gesture and its command
     assert "실행 안 함" in rt._status
 
 

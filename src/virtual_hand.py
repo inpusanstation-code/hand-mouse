@@ -140,9 +140,19 @@ class OneEuro:
 #   "smooth" (what it was): cursor 98 / 65 ms behind, shake .32 px; fingertip 51 / 26 ms, shake .56 px
 #   "fast"   (the default): cursor about 30 / 15 ms, shake about .6 px; fingertip about 17 / 6 ms, shake about 1.4 px
 # The camera and the hand detector come before all of this and are not in these numbers.
+# 2026-11-12 ("떨림을 줄임과 동시에 실시간 반응도"): the cursor's filter opened too little with speed. Replaying 42 recordings
+# (237,326 frames, 133 min; lag behind a both-ways smoothed path, slow 25-120 / fast over 300 px/s; shake of a still hand,
+# 1920x1080) with a larger beta plus BoxMapper.DEAD (a still hand's wobble under 1.5 px is not shown):
+#   cursor "fast"   1.5/.06  31.0 / 7.7 ms, shake .57 px  ->  .3/.15 + DEAD  23.9 / 4.0 ms, shake .41 px
+#   cursor "smooth" .4/.012  62.3 / 24.6 ms, shake .39 px ->  .4/.05 + DEAD  40.2 / 9.1 ms, shake .33 px
+# Leading the cursor by its speed (30-50 ms) was tried and left out: it ran ahead of fast moves and doubled the overshoot at
+# a stop. "smooth" overshoots a stop a little more now (median 2.7 -> 4.0 px); a click still aims where the palm was before.
+# The drawn joints the same way (fingertips, drawn-hand px, plus ViewSmoother.DEAD_PX = 2.5):
+#   joints "fast"   1.0/.08  26.7 / 10.9 ms, shake .53 px ->  .5/.4 + DEAD  16.4 / 3.9 ms, shake .41 px
+#   joints "smooth" .5/.03   43.1 / 21.3 ms, shake .39 px ->  .5/.15 + DEAD 26.5 / 7.3 ms, shake .30 px
 RESPONSE = {
-    "smooth": {"cursor": (.4, .012), "joints": (.5, .03), "glide": .04},
-    "fast": {"cursor": (1.5, .06), "joints": (1.0, .08), "glide": .015},
+    "smooth": {"cursor": (.4, .05), "joints": (.5, .15), "glide": .04},
+    "fast": {"cursor": (.3, .15), "joints": (.5, .4), "glide": .015},
 }
 DEFAULT_RESPONSE = "fast"
 # "auto" (the setting's default since 2026-11-11, "그냥 이동일 때는 좀 떨림이 있어도 빠릿하게, 명령 모션 중일 때는 떨림 없이
@@ -185,9 +195,11 @@ class ViewSmoother:
     """Steadies the drawn joints, each with its own speed (a still palm stays still while a finger closes)."""
 
     MIN_CUTOFF, BETA = RESPONSE[DEFAULT_RESPONSE]["joints"]   # px: jitter is damped, a 300 px/s pinch is followed
+    DEAD_PX = 2.5          # 2026-11-12: a still joint's wobble under this (drawn px) is not shown; the filter runs on beneath
 
     def __init__(self) -> None:
         self._filters = [OneEuro(self.MIN_CUTOFF, self.BETA) for _ in range(21)]
+        self._shown: List[Optional[List[float]]] = [None] * 21
 
     def set_response(self, mode: Any) -> None:
         cutoff, beta = response(mode)["joints"]
@@ -197,11 +209,17 @@ class ViewSmoother:
     def reset(self) -> None:
         for f in self._filters:
             f.reset()
+        self._shown = [None] * 21
 
     def __call__(self, pts: Sequence[float], now: Optional[float] = None) -> List[float]:
         out: List[float] = []
         for i, f in enumerate(self._filters):
-            out += [round(v, 1) for v in f(pts[2 * i:2 * i + 2], now)]
+            x = f(pts[2 * i:2 * i + 2], now)
+            shown = self._shown[i]
+            if shown is not None and f.dx is not None and math.hypot(x[0] - shown[0], x[1] - shown[1]) < self.DEAD_PX:
+                x = shown
+            self._shown[i] = x
+            out += [round(v, 1) for v in x]
         return out
 
 
@@ -235,6 +253,10 @@ class BoxMapper:
     # the offset back out of the hand's own movement, CATCH_UP of every move, so nothing moves while the hand is still.
     JUMP = .03             # monitor fractions between the held point and the hand that would be a jump
     CATCH_UP = .5          # share of each hand movement spent on closing the offset
+    # 2026-11-12: a still hand's wobble under DEAD_PX (on a 1920x1080 monitor, scaled with the monitor) leaves the cursor
+    # where it is; the filter keeps running underneath, so a real move goes on from the filtered point (see RESPONSE)
+    DEAD_PX = 1.5
+    DEAD = (DEAD_PX / 1920, DEAD_PX / 1080)
 
     def __init__(self) -> None:
         self.pos: Optional[Tuple[float, float]] = None
@@ -283,6 +305,7 @@ class BoxMapper:
         nx = min(1.0, max(0.0, (cx - x0) / (x1 - x0)))
         ny = min(1.0, max(0.0, (cy - y0) / (y1 - y0)))
         gap = self._last_t is not None and now - self._last_t > self.GAP
+        fresh = gap or self._held or self.pos is None
         self._last_t = now
         if hold and self.pos is not None:
             if not self._held:
@@ -318,8 +341,9 @@ class BoxMapper:
         self._last_n = (nx - self._offset[0], ny - self._offset[1]) if self._offset != (0.0, 0.0) else (nx, ny)
         fx, fy = self._filter((nx, ny), now)
         # the filter only nears a clamped edge: snap so the box edge really is the monitor edge
-        fx = nx if abs(fx - nx) < 1e-3 else fx
-        fy = ny if abs(fy - ny) < 1e-3 else fy
+        # (only there, 2026-11-12: anywhere else the snap let the raw wobble through, up to 1e-3 = 1.9 px on 1920)
+        fx = nx if nx in (0.0, 1.0) and abs(fx - nx) < 1e-3 else fx
+        fy = ny if ny in (0.0, 1.0) and abs(fy - ny) < 1e-3 else fy
         if self._ease_from is not None:
             k = (now - self._ease_t) / self.EASE
             if k >= 1.0:
@@ -327,6 +351,8 @@ class BoxMapper:
             else:
                 k = k * k * (3 - 2 * k)                     # smoothstep: no kick at either end
                 fx, fy = self._ease_from[0] + (fx - self._ease_from[0]) * k, self._ease_from[1] + (fy - self._ease_from[1]) * k
+        if not fresh and self._ease_from is None and self.pos is not None and math.hypot((fx - self.pos[0]) / self.DEAD[0], (fy - self.pos[1]) / self.DEAD[1]) < 1.0:
+            fx, fy = self.pos                               # under DEAD_PX: a still hand's wobble, not shown
         self.pos = (fx, fy)
         self._history.append((now, self.pos))
         return self.pos

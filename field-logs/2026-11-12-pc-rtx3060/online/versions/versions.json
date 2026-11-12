@@ -1,0 +1,737 @@
+[
+ {
+  "event": "initialized",
+  "time": "2026-11-12 11:23:32",
+  "reasons": [],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ]
+ },
+ {
+  "event": "rejected",
+  "time": "2026-11-12 11:23:49",
+  "reasons": [
+   "forgot:thumb_ring"
+  ],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "metrics": {
+   "before": {
+    "macro_f1": 0.8226353104317642,
+    "reps": {
+     "thumb_ring": [
+      33,
+      44
+     ],
+     "thumb_index": [
+      94,
+      120
+     ],
+     "thumb_middle": [
+      38,
+      39
+     ],
+     "palm_side": [
+      25,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 203,
+    "reps_total": 246,
+    "wrong_reps": 45,
+    "false_fires": 66,
+    "none_minutes": 8.863150000000022
+   },
+   "after": {
+    "macro_f1": 0.8237555252891574,
+    "reps": {
+     "thumb_ring": [
+      28,
+      44
+     ],
+     "thumb_index": [
+      103,
+      120
+     ],
+     "thumb_middle": [
+      37,
+      39
+     ],
+     "palm_side": [
+      24,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 205,
+    "reps_total": 246,
+    "wrong_reps": 34,
+    "false_fires": 60,
+    "none_minutes": 8.863150000000022
+   },
+   "learned": {
+    "macro_f1": 0.5,
+    "reps": {
+     "thumb_index": [
+      1,
+      1
+     ]
+    },
+    "reps_hit": 1,
+    "reps_total": 1,
+    "wrong_reps": 0,
+    "false_fires": 1,
+    "none_minutes": 0.009351666666680103
+   }
+  },
+  "data_snapshot": "30:1794450214",
+  "training": {
+   "method": "er",
+   "buffer": "reservoir",
+   "buffer_size": 5000,
+   "lr": 0.0003,
+   "encoder_lr": 0.0,
+   "rounds": 4,
+   "updates": 60,
+   "events": [
+    "head_updated"
+   ],
+   "user_samples": 30,
+   "held_out": 2,
+   "new_classes": [],
+   "untested_new_classes": [],
+   "device": "cpu"
+  }
+ },
+ {
+  "event": "rejected",
+  "time": "2026-11-12 11:54:30",
+  "reasons": [
+   "forgot:thumb_ring",
+   "forgot:thumb_middle"
+  ],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "metrics": {
+   "before": {
+    "macro_f1": 0.8226353104317642,
+    "reps": {
+     "thumb_ring": [
+      33,
+      44
+     ],
+     "thumb_index": [
+      94,
+      120
+     ],
+     "thumb_middle": [
+      38,
+      39
+     ],
+     "palm_side": [
+      25,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 203,
+    "reps_total": 246,
+    "wrong_reps": 45,
+    "false_fires": 66,
+    "none_minutes": 8.863150000000022
+   },
+   "after": {
+    "macro_f1": 0.8153697496240705,
+    "reps": {
+     "thumb_ring": [
+      27,
+      44
+     ],
+     "thumb_index": [
+      98,
+      120
+     ],
+     "thumb_middle": [
+      33,
+      39
+     ],
+     "palm_side": [
+      24,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 195,
+    "reps_total": 246,
+    "wrong_reps": 34,
+    "false_fires": 46,
+    "none_minutes": 8.863150000000022
+   },
+   "learned": {
+    "macro_f1": 0.4,
+    "reps": {
+     "thumb_index": [
+      0,
+      1
+     ]
+    },
+    "reps_hit": 0,
+    "reps_total": 1,
+    "wrong_reps": 0,
+    "false_fires": 0,
+    "none_minutes": 0.010028333333320916
+   }
+  },
+  "data_snapshot": "37:1794452057",
+  "training": {
+   "method": "er",
+   "buffer": "reservoir",
+   "buffer_size": 5000,
+   "lr": 0.0003,
+   "encoder_lr": 0.0,
+   "rounds": 3,
+   "updates": 69,
+   "events": [
+    "head_updated"
+   ],
+   "user_samples": 37,
+   "held_out": 2,
+   "new_classes": [],
+   "untested_new_classes": [],
+   "device": "cpu"
+  }
+ },
+ {
+  "event": "rejected",
+  "time": "2026-11-12 12:04:42",
+  "reasons": [
+   "forgot:thumb_ring",
+   "forgot:thumb_middle"
+  ],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "metrics": {
+   "before": {
+    "macro_f1": 0.8226353104317642,
+    "reps": {
+     "thumb_ring": [
+      33,
+      44
+     ],
+     "thumb_index": [
+      94,
+      120
+     ],
+     "thumb_middle": [
+      38,
+      39
+     ],
+     "palm_side": [
+      25,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 203,
+    "reps_total": 246,
+    "wrong_reps": 45,
+    "false_fires": 66,
+    "none_minutes": 8.863150000000022
+   },
+   "after": {
+    "macro_f1": 0.8156962395279691,
+    "reps": {
+     "thumb_ring": [
+      27,
+      44
+     ],
+     "thumb_index": [
+      99,
+      120
+     ],
+     "thumb_middle": [
+      33,
+      39
+     ],
+     "palm_side": [
+      24,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 196,
+    "reps_total": 246,
+    "wrong_reps": 33,
+    "false_fires": 47,
+    "none_minutes": 8.863150000000022
+   },
+   "learned": {
+    "macro_f1": 0.4,
+    "reps": {
+     "thumb_index": [
+      0,
+      1
+     ]
+    },
+    "reps_hit": 0,
+    "reps_total": 1,
+    "wrong_reps": 0,
+    "false_fires": 0,
+    "none_minutes": 0.010028333333320916
+   }
+  },
+  "data_snapshot": "42:1794452669",
+  "training": {
+   "method": "er",
+   "buffer": "reservoir",
+   "buffer_size": 5000,
+   "lr": 0.0003,
+   "encoder_lr": 0.0,
+   "rounds": 3,
+   "updates": 72,
+   "events": [
+    "head_updated"
+   ],
+   "user_samples": 42,
+   "held_out": 2,
+   "new_classes": [],
+   "untested_new_classes": [],
+   "device": "cpu"
+  }
+ },
+ {
+  "event": "rejected",
+  "time": "2026-11-12 12:53:33",
+  "reasons": [
+   "forgot:thumb_ring",
+   "forgot:thumb_middle"
+  ],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "metrics": {
+   "before": {
+    "macro_f1": 0.8226353104317642,
+    "reps": {
+     "thumb_ring": [
+      33,
+      44
+     ],
+     "thumb_index": [
+      94,
+      120
+     ],
+     "thumb_middle": [
+      38,
+      39
+     ],
+     "palm_side": [
+      25,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 203,
+    "reps_total": 246,
+    "wrong_reps": 45,
+    "false_fires": 66,
+    "none_minutes": 8.863150000000022
+   },
+   "after": {
+    "macro_f1": 0.8165945254030319,
+    "reps": {
+     "thumb_ring": [
+      27,
+      44
+     ],
+     "thumb_index": [
+      100,
+      120
+     ],
+     "thumb_middle": [
+      33,
+      39
+     ],
+     "palm_side": [
+      24,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 197,
+    "reps_total": 246,
+    "wrong_reps": 33,
+    "false_fires": 48,
+    "none_minutes": 8.863150000000022
+   },
+   "learned": {
+    "macro_f1": 0.5,
+    "reps": {
+     "thumb_index": [
+      0,
+      1
+     ]
+    },
+    "reps_hit": 0,
+    "reps_total": 1,
+    "wrong_reps": 0,
+    "false_fires": 0,
+    "none_minutes": 0.010028333333320916
+   }
+  },
+  "data_snapshot": "46:1794455583",
+  "training": {
+   "method": "er",
+   "buffer": "reservoir",
+   "buffer_size": 5000,
+   "lr": 0.0003,
+   "encoder_lr": 0.0,
+   "rounds": 3,
+   "updates": 75,
+   "events": [
+    "head_updated"
+   ],
+   "user_samples": 46,
+   "held_out": 2,
+   "new_classes": [],
+   "untested_new_classes": [],
+   "device": "cpu"
+  }
+ },
+ {
+  "event": "rejected",
+  "time": "2026-11-12 14:05:14",
+  "reasons": [
+   "forgot:thumb_ring",
+   "forgot:thumb_middle"
+  ],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "metrics": {
+   "before": {
+    "macro_f1": 0.8226353104317642,
+    "reps": {
+     "thumb_ring": [
+      33,
+      44
+     ],
+     "thumb_index": [
+      94,
+      120
+     ],
+     "thumb_middle": [
+      38,
+      39
+     ],
+     "palm_side": [
+      25,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 203,
+    "reps_total": 246,
+    "wrong_reps": 45,
+    "false_fires": 66,
+    "none_minutes": 8.863150000000022
+   },
+   "after": {
+    "macro_f1": 0.8148821562086764,
+    "reps": {
+     "thumb_ring": [
+      27,
+      44
+     ],
+     "thumb_index": [
+      102,
+      120
+     ],
+     "thumb_middle": [
+      33,
+      39
+     ],
+     "palm_side": [
+      24,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 199,
+    "reps_total": 246,
+    "wrong_reps": 34,
+    "false_fires": 52,
+    "none_minutes": 8.863150000000022
+   },
+   "learned": {
+    "macro_f1": 0.3953488372093023,
+    "reps": {
+     "thumb_index": [
+      0,
+      1
+     ]
+    },
+    "reps_hit": 0,
+    "reps_total": 1,
+    "wrong_reps": 0,
+    "false_fires": 0,
+    "none_minutes": 0.010630000000007082
+   }
+  },
+  "data_snapshot": "56:1794459886",
+  "training": {
+   "method": "er",
+   "buffer": "reservoir",
+   "buffer_size": 5000,
+   "lr": 0.0003,
+   "encoder_lr": 0.0,
+   "rounds": 3,
+   "updates": 81,
+   "events": [
+    "head_updated"
+   ],
+   "user_samples": 56,
+   "held_out": 2,
+   "new_classes": [],
+   "untested_new_classes": [],
+   "device": "cpu"
+  }
+ },
+ {
+  "event": "rejected",
+  "time": "2026-11-12 15:11:20",
+  "reasons": [
+   "forgot:thumb_ring",
+   "forgot:thumb_middle",
+   "forgot:palm_side"
+  ],
+  "classes": [
+   "none",
+   "thumb_index",
+   "thumb_ring",
+   "thumb_middle",
+   "thumb_pinky",
+   "palm_side",
+   "v_sign",
+   "thumbs_up"
+  ],
+  "metrics": {
+   "before": {
+    "macro_f1": 0.8226353104317642,
+    "reps": {
+     "thumb_ring": [
+      33,
+      44
+     ],
+     "thumb_index": [
+      94,
+      120
+     ],
+     "thumb_middle": [
+      38,
+      39
+     ],
+     "palm_side": [
+      25,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 203,
+    "reps_total": 246,
+    "wrong_reps": 45,
+    "false_fires": 66,
+    "none_minutes": 8.863150000000022
+   },
+   "after": {
+    "macro_f1": 0.8063501603375901,
+    "reps": {
+     "thumb_ring": [
+      25,
+      44
+     ],
+     "thumb_index": [
+      104,
+      120
+     ],
+     "thumb_middle": [
+      28,
+      39
+     ],
+     "palm_side": [
+      23,
+      30
+     ],
+     "thumb_pinky": [
+      3,
+      3
+     ],
+     "v_sign": [
+      10,
+      10
+     ]
+    },
+    "reps_hit": 193,
+    "reps_total": 246,
+    "wrong_reps": 36,
+    "false_fires": 53,
+    "none_minutes": 8.863150000000022
+   },
+   "learned": {
+    "macro_f1": 1.0,
+    "reps": {
+     "thumb_index": [
+      1,
+      1
+     ]
+    },
+    "reps_hit": 1,
+    "reps_total": 1,
+    "wrong_reps": 0,
+    "false_fires": 0,
+    "none_minutes": 0.01019166666668146
+   }
+  },
+  "data_snapshot": "73:1794463865",
+  "training": {
+   "method": "er",
+   "buffer": "reservoir",
+   "buffer_size": 5000,
+   "lr": 0.0003,
+   "encoder_lr": 0.0,
+   "rounds": 3,
+   "updates": 105,
+   "events": [
+    "head_updated"
+   ],
+   "user_samples": 73,
+   "held_out": 2,
+   "new_classes": [],
+   "untested_new_classes": [],
+   "device": "cpu"
+  }
+ }
+]
