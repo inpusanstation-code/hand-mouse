@@ -191,6 +191,7 @@ ApplicationWindow {
                 text: useCasesDialog.cases.loading ? "불러오는 중…"
                       : useCasesDialog.cases.error ? useCasesDialog.cases.error
                       : useCasesDialog.items.length === 0 ? "아직 모은 사례가 없어요. 이 동작을 쓰면 실행될 때마다 앞뒤 손 움직임이 저장돼요."
+                      : useCasesDialog.cases.note ? useCasesDialog.cases.note
                       : useCasesDialog.review ? "학습 전에 하나씩 봐 주세요. 의도한 동작이면 [통과], 우연히 잘못 잡힌 것이면 [오탐지]. "
                         + "통과한 사례만 이 동작으로 학습하고, 오탐지는 '이 동작이 아님' 예시로 따로 배워요. 빨간 선이 명령이 실행된 순간이에요."
                       : "이 동작이 실행될 때마다 저장된 손 움직임이에요 (최근 " + useCasesDialog.items.length + "개). "

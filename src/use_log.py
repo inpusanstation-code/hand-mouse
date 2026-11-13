@@ -138,6 +138,10 @@ class UseLog:
             self._worker.join(timeout)
             self._queue = self._worker = None
 
+    def put(self, rec: Dict[str, Any]) -> None:
+        """Write a record of another kind through this log's file and worker (src/tcn_solo.py uses a log of its own folder)."""
+        self._put(rec)
+
     # ------------------------------------------------------------------ file
     def _put(self, rec: Dict[str, Any], wait: bool = False) -> None:
         if self._queue is None:

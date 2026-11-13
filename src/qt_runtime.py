@@ -43,6 +43,7 @@ from src.click_check import ClickCheck
 from src.click_log import ClickLog
 from src import use_gate
 from src.use_log import UseLog, read_events as read_use_events, shadow_verdict
+from src import label_meta
 from src.online.use_import import CLICK_ACTIONS, click_base, click_key, click_name, learnable as use_import_learnable
 from src.gesture_engine import GestureEngine, GestureResult
 from src.hand_crop import HandCrop
@@ -88,6 +89,8 @@ RETRY_PASS = 3           # ... and the third one goes through
 WAITING_USES = 4         # uses on a new day that start a round for a gesture whose checking model waits for one (verifier.MIN_HELD)
 USE_LABELS = {"right_click": "thumb_ring", "left_click": "thumb_middle", "scroll_grab": "thumb_index",
               "task_switcher": "thumb_pinky", "show_desktop": "palm_side"}
+SOLO_NAMES = {"thumb_index": "엄지+검지", "thumb_middle": "엄지+중지", "thumb_ring": "엄지+약지", "thumb_pinky": "엄지+새끼",
+              "palm_side": "손날"}
 USE_LABELS_VIRTUAL = {"left_click": "thumb_index", "drag_hold": "thumb_index", "right_click": "thumb_index_middle",
                       "scroll_grab": "fist"}              # the virtual hand's shapes (src/virtual_hand.py)
 
@@ -254,6 +257,9 @@ class QtRuntime:
         self._pinch_triple = False                     # this thumb + index press became the three-finger right click
         self.click_check: Optional[ClickCheck] = None  # the TCN's second look at thumb + index clicks (loaded on first use)
         self.use_log: Optional[UseLog] = None          # joints around every command + the TCN's shadow verdict (logs/use_events)
+        self.solo = None                               # what the TCN would catch on its own (src/tcn_solo.py, logs/tcn_solo)
+        self._solo_log: Optional[UseLog] = None
+        self._solo_busy: set = set()                   # the labels of the rule grab / drag going on
         self._watchers: Dict[str, GestureGate] = {}    # "tcn" / "online": the models only watching (copies that block nothing)
         self._watch_loading: set = set()
         self._watch_stale: set = set()
@@ -479,6 +485,12 @@ class QtRuntime:
                     self.use_log.close()
                 except Exception:
                     pass
+            if self.solo is not None and self._solo_log is not None:
+                try:
+                    self.solo.close(time.perf_counter())
+                    self._solo_log.close()
+                except Exception:
+                    pass
             try:
                 self._stop_recording(time.perf_counter())   # quitting mid-recording still leaves a complete file
             except Exception:
@@ -565,6 +577,7 @@ class QtRuntime:
                 self._set_draw(not self.draw.active if cmd[1] is None else bool(cmd[1]))
             elif kind == "use_recount":
                 self._use_decide(recount=True)         # the person judged collected uses (src/use_review.py): count again
+                self._solo_recount()
             elif kind == "seq_reload":
                 self.seq_store.load()
                 self.sequences.reset()
@@ -1312,6 +1325,8 @@ class QtRuntime:
                         or not reg.get_binding(gkey).get("enabled", True)
                     ):
                         ok, badge = self._run_resolved(reg, resolved)
+                        if self.solo is not None:     # the rules did act on that gesture, through its other command
+                            self.solo.rule(t0, self._use_label(result.action, result.active_gesture, screen_point is not None))
                         if ok:
                             self._say(f"매핑 실행: {badge}", 1.2)
                         self._recent_action, self._recent_until = result.action, time.perf_counter() + 0.8
@@ -2025,6 +2040,8 @@ class QtRuntime:
         self._use_real_kind = ""
         config = self.engine.config
         if not active or not config.get("use_event_log", True) or getattr(self, "_use_failed", False):
+            if self.solo is not None:
+                self.solo.pause(t0)
             return
         try:
             if self.use_log is None:
@@ -2054,10 +2071,84 @@ class QtRuntime:
             self._use_watchers = watchers
             tcn = watchers.get("tcn")
             self.use_log.frame(t0, hand, None if tcn is None else tcn.last)
+            self._solo_frame(t0, tcn, hand is not None, aspect)
             self._use_auto(t0)
         except Exception as exc:
             self._use_failed = True
             self._say(f"사용 기록을 껐어요: {exc}", 5.0)
+
+    def _solo_frame(self, t0: float, tcn: Optional[GestureGate], hand: bool, aspect: float = 720 / 1280) -> None:
+        """The TCN alone (src/tcn_solo.py): only while the rules are acting on the hand (control on, no index pointer), so a
+        moment the rules did not act on is one they missed. Its own failure switches only this off."""
+        config = self.engine.config
+        if getattr(self, "_solo_failed", False) or not config.get("tcn_solo_watch", True):
+            return
+        try:
+            watching = not self.paused and not self.ui.use_index_pointer and tcn is not None
+            if self.solo is None:
+                if not watching:
+                    return
+                from src.tcn_solo import SoloWatch
+                pc = machine_info(str(config.get("pc_alias", "")))["pc"]
+                self._solo_log = UseLog(self.log_dir / "tcn_solo", pc=pc, camera=str(config.get("camera_note", "")),
+                                        max_mb=float(config.get("tcn_solo_max_mb", 150.0)))
+                self.solo = SoloWatch(self._solo_log.put, pc=pc, model=self._model_version("tcn"),
+                                      rules=label_meta.rules_version(config))
+                self._solo_rules_t = t0
+                self._solo_recount()
+            if not watching:
+                self.solo.pause(t0)
+                self._solo_busy = set()
+                return
+            virtual = bool(getattr(self.ui, "virtual_hand", False) and valid_box(self.ui.virtual_box))
+            self.solo.model = self._model_version("tcn")
+            if t0 - getattr(self, "_solo_rules_t", t0) >= 60.0:      # the settings may have changed (R, a profile)
+                self.solo.rules = label_meta.rules_version(config)
+                self._solo_rules_t = t0
+            self.solo.normal(t0, False)            # until the rules say this frame went as usual (_use_action)
+            self.solo.step(t0, tcn, self.use_log._frames, hand=hand, virtual=virtual, busy=self._solo_busy, aspect=aspect)
+            if sum(self.solo.retries.values()) != getattr(self, "_solo_retries_seen", 0):
+                self._solo_retries_seen = sum(self.solo.retries.values())
+                self._use_note()
+        except Exception as exc:
+            self._solo_failed = True
+            self._say(f"TCN 단독 지켜보기를 껐어요: {exc}", 5.0)
+
+    def _solo_recount(self) -> None:
+        """The retry moments that wait for the person's review (logs/tcn_solo), read in a thread."""
+        folder = self.log_dir / "tcn_solo"
+
+        def work() -> None:
+            try:
+                from src.tcn_solo import waiting_reviews
+                self._solo_waiting = waiting_reviews(folder)
+                if self.solo is not None:
+                    self.solo.retries = {}           # counted from the files now
+                self._solo_retries_seen = 0
+                self._use_note()
+            except Exception:
+                pass
+
+        threading.Thread(target=work, name="solo-recount", daemon=True).start()
+
+    def _solo_items(self) -> List[Dict[str, Any]]:
+        """Cards for the retry moments that wait for a review: moments the TCN caught before the rules did."""
+        from src.tcn_solo import parse_key
+        waiting = dict(getattr(self, "_solo_waiting", {}) or {})
+        for key, n in ((self.solo.retries if self.solo is not None else {}) or {}).items():
+            waiting[key] = waiting.get(key, 0) + n
+        items = []
+        need = int(self.engine.config.get("tcn_solo_review_from", 5))
+        for key, n in sorted(waiting.items(), key=lambda kv: -kv[1]):
+            virtual, label = parse_key(key)
+            if virtual is None or n < need:
+                continue
+            gesture = SOLO_NAMES.get(label, label)
+            items.append({"key": key, "name": f"놓친 것 같은 {gesture} ({'가상 손' if virtual else '손바닥'})",
+                          "state": "review", "n": n, "need": n, "review": n,
+                          "text": f"규칙보다 TCN이 먼저 잡은 순간 {n}개 · 하려던 동작이면 통과, 아니면 오탐지",
+                          "hint": "통과한 것은 규칙이 놓친 예시로 학습해요"})
+        return items
 
     def _model_version(self, kind: str, label: str = "") -> str:
         """Which model file a verdict came from: a verdict of another file says nothing about the one in use. For a taught
@@ -2164,9 +2255,16 @@ class QtRuntime:
     def _use_action(self, t0: float, action: str, gesture: str, virtual: bool = False, source: str = "rule") -> None:
         """A rule (or index pointer) action this frame: logged when it starts, not on every frame of a grab."""
         prev, self._use_prev_action = self._use_prev_action, action
+        if source == "rule":
+            held = self._use_label(action, gesture, virtual) if action in ("scroll_grab", "drag_hold") else ""
+            self._solo_busy = {held} if held else set()
+            if self.solo is not None:
+                self.solo.normal(t0, action in ("none", "move_cursor"))
         if action == prev or action not in USE_ACTIONS:
             return
         label = self._use_label(action, gesture, virtual) if source == "rule" else ""
+        if label and self.solo is not None:
+            self.solo.rule(t0, label)
         extra = {"click_kind": self._click_kind} if source == "rule" and action == "left_click" else {}
         self._use_event(source, action, t0, label=label, gesture=gesture, virtual=virtual, **extra)
 
@@ -2183,6 +2281,9 @@ class QtRuntime:
             return
         try:
             now = self._use_t if t0 is None else t0
+            if self.solo is not None:
+                self.solo.command(now)             # no quiet stretch around any command (src/tcn_solo.py)
+            extra = {**extra, "rules": self._rules_version(), "label_source": "rule"}   # (src/label_meta.py)
             taught = use_import_learnable(source, key)
             if taught:                             # which way the hand pointed: its own category (src/hand_direction.py)
                 extra = {**extra, "dir": self._hand_dir()}
@@ -2210,6 +2311,14 @@ class QtRuntime:
         except Exception as exc:
             self._use_failed = True
             self._say(f"사용 기록을 껐어요: {exc}", 5.0)
+
+    def _rules_version(self) -> Dict[str, str]:
+        """The rules judging the hand now (src/label_meta.py), worked out at most once a minute."""
+        now = time.perf_counter()
+        if now - getattr(self, "_rules_t", -1e9) >= 60.0:
+            self._rules_cached = label_meta.rules_version(self.engine.config)
+            self._rules_t = now
+        return self._rules_cached
 
     def _use_decide(self, recount: bool = False) -> None:
         """Reads the log's index in a thread and sets which commands a watching model may stop. New ones are announced.
@@ -2371,6 +2480,7 @@ class QtRuntime:
         onnx = self._onnx_item()
         if onnx is not None:
             items.append(onnx)
+        items.extend(self._solo_items())
         self._learn_note = "   ·   ".join(parts)
         self._learn_items = items
 

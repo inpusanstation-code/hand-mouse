@@ -735,6 +735,10 @@ class QtDashboard(QObject):
         key, name = str(key or ""), str(name or key)
         self.use_cases = {"key": key, "name": name, "loading": True, "error": "", "items": [], "review": True}
         self.useCasesChanged.emit()
+        from src.tcn_solo import parse_key
+        if parse_key(key)[0] is not None:
+            self._open_solo_review(key, name)
+            return
         from src.online.samples import DEFAULT_ROOT
         from src.use_view import review_cases
         folder, root = self._use_folder(), (self.online_root or DEFAULT_ROOT)
@@ -751,6 +755,27 @@ class QtDashboard(QObject):
         import threading
         threading.Thread(target=work, name="use-review", daemon=True).start()
 
+    SOLO_NOTE = ("규칙은 바로 실행하지 않았는데 TCN이 먼저 이 손짓으로 본 순간이에요 (빨간 선). 몇 초 뒤 규칙이 같은 손짓을 실행했어요. "
+                 "그때 이 손짓을 하려던 거였으면 [통과]: 규칙이 놓친 예시로 배워요. 그냥 움직이던 손이었으면 [오탐지]: '이 손짓이 아님'으로 배워요.")
+
+    def _open_solo_review(self, key, name):
+        """The retry moments of the TCN-alone watch (src/tcn_solo.py, logs/tcn_solo): the same 통과 / 오탐지 window."""
+        from src.tcn_solo import retry_moments
+        from src.use_view import rows
+        folder = self._use_folder().parent / "tcn_solo"
+        base = {"key": key, "name": name, "review": True, "folder": str(folder), "note": self.SOLO_NOTE}
+
+        def work():
+            try:
+                items = rows(m for m in retry_moments(folder, key) if not m.get("review"))
+                self.use_cases = {**base, "loading": False, "error": "", "items": items}
+            except Exception as exc:
+                self.use_cases = {**base, "loading": False, "error": f"읽지 못했어요: {exc}", "items": []}
+            self.useCasesChanged.emit()
+
+        import threading
+        threading.Thread(target=work, name="solo-review", daemon=True).start()
+
     def _judge(self, indexes, verdict):
         from src.use_review import BAD, OK, set_verdicts
         verdict = verdict if verdict in (OK, BAD) else ""
@@ -763,7 +788,7 @@ class QtDashboard(QObject):
                 changed.append((items[n].get("file", ""), items[n].get("id"), verdict))
         if not changed:
             return
-        set_verdicts(self._use_folder(), changed)
+        set_verdicts(Path(cases["folder"]) if cases.get("folder") else self._use_folder(), changed)
         cases["items"] = items
         cases["judged"] = int(cases.get("judged", 0)) + 1     # (the list stays where it is: only the verdicts changed)
         self.use_cases = cases
